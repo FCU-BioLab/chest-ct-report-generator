@@ -17,6 +17,9 @@ python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo Python not found. Installing Python...
     winget install --id Python.Python.3.10 --accept-source-agreements --accept-package-agreements
+
+    :: Manually update PATH after installation (assuming default install path)
+    set "PATH=%LocalAppData%\Programs\Python\Python310;%LocalAppData%\Programs\Python\Python310\Scripts;%PATH%"
 )
 
 :: Verify Python Installation (5 attempts)
@@ -37,9 +40,18 @@ if %errorlevel% neq 0 (
 echo Python installation confirmed:
 python --version
 
+:: Ensure pip is available
+echo Ensuring pip is available...
+python -m ensurepip --upgrade
+if %errorlevel% neq 0 (
+    echo ERROR: ensurepip failed.
+    pause
+    exit /b
+)
+
 :: Upgrade pip
 echo Upgrading pip...
-python -m pip install --upgrade --user pip
+python -m pip install --upgrade pip
 if %errorlevel% neq 0 (
     echo ERROR: Failed to upgrade pip.
     pause
@@ -48,7 +60,7 @@ if %errorlevel% neq 0 (
 
 :: Remove problematic pathlib (if installed)
 echo Checking pathlib compatibility...
-pip list | findstr pathlib >nul 2>&1
+pip list | findstr /I pathlib >nul 2>&1
 if %errorlevel% equ 0 (
     echo pathlib detected. Removing pathlib...
     pip uninstall pathlib -y
