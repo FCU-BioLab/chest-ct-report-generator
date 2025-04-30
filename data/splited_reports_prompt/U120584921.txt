@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- LUL: Dense opacity, 2.3 cm, with adjacent linear infiltration.
+- RUL: Opacity, 1.0 cm, with adjacent linear infiltration.
+- RML, MLL, LLL: Linear infiltrations suggestive of fibrosis; suspicious clip in RML.
+- Lungs: Emphysematous changes.
+- Mediastinum: Subcentimeter reactive lymph nodes.
+- Vasculature: Atherosclerotic plaques in the aortic arch.
+- Impression: Opacities with linear infiltration in LUL and RUL; fibrosis in multiple lobes; emphysematous changes. Recommend clinical correlation and follow-up imaging.

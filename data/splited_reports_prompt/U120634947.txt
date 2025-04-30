@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Infiltration and small nodules in RLL and left lingular lobe; bronchiectasis in both lower lungs; stable small juxtapleura nodules in both apical lobes (since 2023/11/22).
+- Mediastinum: No enlarged lymph nodes.
+- Vessels: No atherosclerotic changes in coronary arteries or aortic arch.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Impression: Post-inflammatory changes with bronchiectasis and stable juxtapleura nodules. Recommend continued monitoring.

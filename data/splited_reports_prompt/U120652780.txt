@@ -1,0 +1,11 @@
+Write a radiologic report for a non-contrast chest CT:
+- Clinical Information: History of anorectal GIST, post-surgery.
+- Lungs: Small 15.5 mm juxtapleural nodules in the right and left lower lobes, nonspecific, potentially benign or malignant. A 4.5 mm nodule in the left upper lobe; follow-up suggested.
+- Heart and Vessels: Atherosclerotic plaques in coronary arteries.
+- Mediastinum: No mass lesions observed.
+- Liver: Multiple enhancing masses, largest 3 cm, highly suspicious for metastatic disease.
+- Impression: 
+  1. Multiple liver masses, concerning for metastatic disease from GIST.
+  2. Juxtapleural nodules in both lower lobes and a 4.5 mm nodule in LUL; suggest follow-up.
+  3. Coronary artery atherosclerosis.
+- Recommendation: Clinical correlation and follow-up imaging for pulmonary nodules and metastatic evaluation.

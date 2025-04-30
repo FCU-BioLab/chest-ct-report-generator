@@ -1,0 +1,5 @@
+Write a radiologic report about non-contrast chest CT:
+- Mediastinum: Postoperative changes in the right anterior mediastinum consistent with VATS resection; no evidence of residual thymoma noted, though small foci cannot be excluded.
+- Cardiovascular: Atherosclerotic plaques in coronary artery and aortic arch.
+- Lungs: Right lower lobe consolidation, stable compared to 2024/03/25; likely postoperative atelectasis.
+- Impression: Postoperative mediastinal changes with no clear residual thymoma, stable right lower lobe consolidation, and atherosclerotic plaques. Recommend clinic check and follow-up imaging in 3-6 months.

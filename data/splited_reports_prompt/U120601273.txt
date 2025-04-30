@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Clear, no nodules, masses, or consolidation.
+- Pleura: No effusion.
+- Mediastinum: No lymphadenopathy.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No lytic or sclerotic lesions.
+- Impression: Stable since 2023/11/27; no pulmonary metastases in rectal cancer post-surgery. Recommend routine follow-up.

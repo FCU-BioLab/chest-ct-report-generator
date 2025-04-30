@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Clear, no nodules, masses, or consolidation.
+- Pleura: No effusion.
+- Mediastinum: No lymphadenopathy.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No lytic or sclerotic lesions.
+- Impression: No pulmonary metastases; coronary artery plaques. Recommend routine follow-up for colon cancer.

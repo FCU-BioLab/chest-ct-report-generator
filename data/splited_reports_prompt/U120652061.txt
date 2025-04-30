@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Stable 6.5mm and 3.5mm GGOs in the right middle and lower lobes; no cavitation or calcification.
+- Mediastinum: No enlarged lymph nodes or abnormalities.
+- Vessels: No atherosclerotic changes.
+- Pleura: No effusion or thickening.
+- Heart: Normal size; no pericardial effusion.
+- Bones: No significant lesions or abnormalities.
+- Impression: Stable GGOs in the right middle and lower lobes; recommend follow-up in 6-12 months.

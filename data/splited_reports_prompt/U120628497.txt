@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: Stable GGO, 4.2 mm, unchanged since 2019, likely benign. Suggest continued monitoring.
+- Mediastinum: No significant lymphadenopathy.
+- Pleura: No effusion or pneumothorax.
+- Bones: No acute abnormalities.
+- Impression: Stable GGO in RUL. Recommend continued follow-up.

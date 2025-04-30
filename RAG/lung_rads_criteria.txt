@@ -1,0 +1,105 @@
+Lung-RADS Classification System (version 1.1)
+
+Category 0 (incomplete):
+- Prior CT studies were performed but are not available.
+- Lungs incompletely imaged.
+- Findings suggest inflammation or infection.
+
+Category 1 (negative, <1% chance of malignancy):
+- No lung nodules.
+- Lung nodule(s) with specific findings favoring benign nodule(s), such as:
+  - Complete calcification
+  - Central calcification
+  - Popcorn calcification
+  - Calcification in concentric rings
+  - Fat-containing nodules
+
+Category 2 (benign appearance or behavior, <1% chance of malignancy):
+- Juxtapleural nodule <10mm mean diameter at baseline OR new and smooth, solid, oval, lentiform, or triangular.
+- Solid nodule(s):
+  - <6 mm at baseline
+  - New nodule <4 mm
+- Part-solid nodule <6 mm total mean diameter at baseline.
+- Ground-glass nodule(s):
+  - <30 mm
+  - ≥30 mm and unchanged or slowly growing
+- Subsegmental airway nodule at baseline or stable.
+- Category 3 nodules that are stable or decreased at 6 months.
+- Category 4B lesion that has a benign diagnosis on work up.
+
+Category 3 (probably benign, 1–2% chance of malignancy):
+- Solid nodule(s):
+  - Between 6 and 8 mm at baseline
+  - New nodule between 4 mm and 6 mm
+- Subsolid nodule(s):
+  - ≥6 mm total diameter with solid component <6 mm
+  - New <6 mm total diameter
+- Ground-glass nodule(s):
+  - ≥30 mm on baseline CT or new
+- Atypical thick-walled lung cyst with enlarging cystic component (mean diameter)
+- Category 4A lesion, stable or decreased in size at 3-month follow-up (excluding airway nodules)
+
+Category 4A (suspicious, 5–15% chance of malignancy):
+- Solid nodule(s):
+  - ≥8 mm to <15 mm at baseline
+  - Growing nodule(s) <8 mm
+  - New nodule 6 mm to <8 mm
+- Part-solid nodule(s):
+  - ≥6 mm total diameter with solid component ≥6 mm to <8 mm
+  - New or growing <4 mm solid component
+- Segmental or more proximal airway nodule at baseline
+- Thick-walled cyst OR multilocular cyst at baseline OR thin-/thick-walled cyst that becomes multilocular
+
+Category 4B (very suspicious, >15% chance of malignancy):
+- Stable or growing airway nodule, segmental or more proximal
+- Solid nodule(s):
+  - ≥15 mm at baseline
+  - New or growing, and ≥8 mm
+- Part-solid nodule(s):
+  - Solid component ≥8 mm
+  - New or growing ≥4 mm solid component
+- Atypical pulmonary cyst:
+  - Thick-walled cyst with increasing wall thickness/nodularity OR growing multilocular cyst
+  - Multilocular cyst with increased loculation or new/increased opacity (nodular, ground glass, or consolidation)
+- Solid or part-solid nodule growing slowly over multiple screening exams
+
+Category 4X (very suspicious, >15% chance of malignancy):
+- Category 3 or 4 nodules with additional features or imaging findings that increase the suspicion of malignancy, including:
+  - Spiculation
+  - Ground-glass nodule(s) that double in size in 1 year
+  - Enlarged regional lymph nodes
+- For new large nodules on annual repeat screening CT, a 1-month LDCT may be recommended to address potentially infectious or inflammatory conditions.
+
+Modified categories:
+- [X]S (e.g., "3S") if there is a clinically significant or potentially significant non-lung cancer finding.
+- (Removed) [X]C (e.g., "3C") for patients with prior diagnosis of lung cancer.
+
+Changes in 2022:
+- Up to 9% of lung cancers may present as atypical pulmonary cysts.
+  - Classify as category 3, 4A, or 4B depending on the most concerning feature (wall thickening, nodularity, multilocularity, opacity, or interval growth).
+- Juxtapleural replaces perifissural as descriptor for typical intraparenchymal lymph nodes.
+- Endobronchial nodules are now called "airway nodules", concerning if in segmental/proximal location or showing growth.
+- Nodule growth is defined by mean diameter change at 12-month interval.
+- Ground-glass nodules that grow ≤1.5mm over 12 months are category 2; higher growth or new solid component triggers upgrade.
+- Follow-up timing is based on finding severity.
+- Potentially benign infectious/inflammatory findings:
+  - May be assigned to Category 0 (e.g., >6 new nodules, rapid 8mm nodule, consolidation).
+  - Reassess at 1–3 months and reclassify based on most suspicious feature.
+  - Tree-in-bud nodules <3cm or new GGN <3cm may remain based on size criteria.
+  - Multiple segmental abnormalities without proximal lesion may be Category 4.
+
+Recommended follow-up:
+- Category 0: Comparison with prior studies before assignment
+- Category 1: Annual LDCT
+- Category 2: Annual LDCT
+- Category 3: 6-month LDCT
+- Category 4A: 3-month LDCT, consider PET-CT if solid component ≥8 mm
+- Category 4B / 4X: Chest CT ± contrast, PET-CT and/or biopsy depending on risk
+
+Practical Notes:
+- Measure nodules in lung window
+- Report mean diameter to 1 decimal point (long + short axis ÷ 2)
+- Growth = increase in mean diameter ≥1.5 mm
+- Assign Lung-RADS category based on most suspicious nodule
+- Perifissural nodules <10 mm with smooth oval/triangular shape = category 2
+- Category X is written as “Lung-RADS category X”

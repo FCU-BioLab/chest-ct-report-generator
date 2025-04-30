@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- Right lung: Multiple nodules, largest in RLL (2.6 cm) and RUL (2.0 cm, 1.6 cm), concerning for metastasis, granulomatous infection, or primary neoplasm.
+- Left lung: Multiple nodules, largest in LUL (0.9 cm) with reticular infiltration, possible metastasis or inflammation.
+- Mediastinum: Subcentimeter lymph nodes, no significant enlargement.
+- Pleura: No effusion.
+- Heart: Normal size, no pericardial effusion.
+- Impression: Concerning nodules in both lungs. Suggest PET CT or biopsy for further evaluation.

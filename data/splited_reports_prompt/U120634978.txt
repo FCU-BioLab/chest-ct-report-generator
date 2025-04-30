@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: Focal interlobular thickening with surgical stitches, stable since 2023/01/02, consistent with post-operative changes.
+- Other Lung Fields: No new nodules, masses, or abnormalities.
+- Mediastinum: No lymphadenopathy; heart and great vessels unremarkable.
+- Pleura: No effusion or pneumothorax.
+- Impression: Stable post-operative changes in RUL; no new abnormalities. Recommend continued follow-up.

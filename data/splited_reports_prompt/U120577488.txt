@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL and LUL: Focal interlobular thickening with surgical stitches, stable since 2024/01/01.
+- LLL: Surrounding infiltration and ground-glass opacities, likely post-operative changes. Recommend follow-up in 3-6 months.
+- Mediastinum: No lymphadenopathy.
+- Pleura: No effusion or pneumothorax.
+- Impression: Stable post-operative changes in RUL and LUL; post-operative changes in LLL with follow-up suggested.

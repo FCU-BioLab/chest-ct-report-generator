@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Mild subpleural infiltration in both lower lobes and left lingular lobe; no nodules, masses, or cavitary lesions.
+- Mediastinum: Multiple subcentimeter lymph nodes, no abnormal enlargement.
+- Vessels: No atherosclerotic changes in great vessels.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No significant lesions.
+- Impression: Mild subpleural infiltration; R/O early interstitial lung changes or mild inflammatory/infectious processes. Recommend clinical and imaging follow-up.

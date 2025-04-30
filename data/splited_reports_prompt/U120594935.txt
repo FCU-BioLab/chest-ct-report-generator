@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: Ground-glass opacity (GGO), 13.0 mm.
+- RLL: Ground-glass opacity (GGO), 14.0 mm.
+- Left lung: Ground-glass opacity (GGO), 8.3 mm.
+- Mediastinum: Subcentimeter lymph nodes, no significant enlargement.
+- Vessels: Atherosclerotic changes in coronary vessels.
+- Pleura: No effusion or thickening.
+- Impression: Multiple GGOs in RUL, RLL, and left lung; coronary atherosclerosis. Recommend further evaluation for GGOs as clinically indicated.

@@ -1,0 +1,58 @@
+查單號:U120728178
+
+Imaging Report Form for the Lung Cancer ����
+Imaging Date: 2024/06/27 
+Technique: ��CT ��MR images through the chest were obtained
+��with ��without intravenous contrast.
+A. Primary Tumor (T)
+# Location: LUL 
+# Size
+  ��Non-measurable
+  ��Measurable: 1.7 (greatest dimension)
+    ��T1a: Tumor <= 1 cm
+    ��T1b: Tumor > 1 cm but <= 2 cm
+    ��T1c: Tumor > 2 cm but <= 3 cm
+    ��T2a: Tumor > 3 cm but <= 4 cm
+    ��T2b: Tumor > 4 cm but <= 5 cm
+    ��T3:  Tumor > 5 cm but <= 7 cm
+    ��T4:  Tumor > 7 cm
+# Tumor Invasion
+  ��T1:
+    ��Surrounded by lung or visceral pleura
+    ��Not more proximal than lobar bronchus
+  ��T2:
+    ��Involves main bronchus
+    ��Invades visceral pleura
+    ��Atelectasis to hilum (focal or total)
+  ��T3:
+    ��Invades chest wall, pericardium
+    ��Separate tumor nodule(s) in same lobe
+  ��T4:
+    ��Invades diaphragm, mediastinum, heart, great vessels, vertebral body
+    ��Invades trachea, carina, recurrent laryngeal nerve, esophagus
+    ��Separate tumor nodule(s) in a different lobe of the ipsilateral lung
+B. Regional Lymph Node (N)
+  ��N0: No or Equivocal
+  ��Yes, locates
+    ��Low cervical, supraclavicular, sternal notch
+    ��Upper paratracheal ��Prevascular ��Retrotracheal ��Lower paratracheal
+    ��Subaortic ��Para-aortic ��Subcarinal ��Paraesophageal ��Pulmonary ligament
+    ��Hilar ��Interlobar ��Lobar ��Segmental ��Subsegmental
+  ��N1: Ipsilateral peribronchial and/or hilar and intrapulmonary lymph nodes
+  ��N2: Ipsilateral mediastinal and/or subcarinal lymph nodes
+  ��N3: Ipsilateral / contralateral scalene or supraclavicular lymph nodes
+  ��N3: Contralateral mediastinal and/or hilar lymph nodes
+C. Distant Metastasis (M)
+  ��M0: No or Equivocal
+  ��M1a: Separate tumor nodule(s) in contralateral lung
+  ��M1a: Pleural nodules or malignant pleural (or pericardial) effusion
+  ��M1b: Single extrathoracic metastasis, location: ____ 
+  ��M1c: Multiple extrathoracic metastases in one or more organs, location: ____ 
+D. Other Findings
+  
+= = = = = =
+IMP:
+Lung cancer, preliminary imaging staging T3N3M1a (AJCC 8th edition).
+
+
+=== ��g�M����v�G��������v  ��E�M�r��0328��  ====

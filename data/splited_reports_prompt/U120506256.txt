@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- Clear lungs, no nodules or masses.
+- No pleural effusion.
+- No mediastinal lymphadenopathy.
+- No coronary atherosclerosis.
+- Impression: No pulmonary metastases in colon cancer post-surgery.

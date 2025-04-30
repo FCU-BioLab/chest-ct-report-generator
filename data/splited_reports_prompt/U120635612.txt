@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: 13 mm part-solid lesion; recommend clinical evaluation or biopsy.
+- RLL: 5.4 mm GGO; suggest follow-up in 12 months to confirm stability.
+- Mediastinum: No enlarged lymph nodes.
+- Vessels: No atherosclerotic changes in great vessels; plaques in coronary artery.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Impression: Part-solid lesion in RUL requiring evaluation; small GGO in RLL stable, follow-up recommended.

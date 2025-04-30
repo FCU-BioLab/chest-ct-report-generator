@@ -1,0 +1,9 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Opacities in RUL, RLL, LLL, and left lingular lobe with bilateral pleural effusions and partial collapse of lower lobes, suggestive of bilateral pneumonia with effusions and atelectasis.
+- Mediastinum: No abnormal lymphadenopathy.
+- Vessels: Atherosclerotic plaques in coronary artery and aortic arch.
+- Pleura: No thickening.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No significant lesions.
+- Others: Multiple hypodensity lesions in liver; recommend ultrasound evaluation.
+- Impression: Bilateral pneumonia with effusions and atelectasis; atherosclerosis in coronary artery and aortic arch; liver lesions need further assessment.

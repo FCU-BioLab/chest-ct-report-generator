@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- Clinical Information: Follow-up post VATS RLL lobectomy for moderately differentiated adenocarcinoma.
+- Lungs: Focal interlobular thickening with surgical stitches in the right lower lobe, consistent with post-operative changes, stable compared to 2019/01/06. No new nodules or abnormalities in other lung fields.
+- Mediastinum: No lymphadenopathy.
+- Pleura: No effusion or pneumothorax.
+- Heart: Unremarkable.
+- Bones: Chest wall intact without masses or deformities.
+- Impression: Stable post-operative changes in RLL. No new lung abnormalities. Recommend continued clinical and imaging follow-up.

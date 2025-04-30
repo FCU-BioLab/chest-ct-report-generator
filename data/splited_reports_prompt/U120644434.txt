@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: 4.2 mm ground-glass opacity (GGO) in the left lower lobe.
+- Mediastinum: Multiple subcentimeter lymph nodes, not enlarged.
+- Vessels: No atherosclerotic changes.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No significant lesions.
+- Impression: 4.2 mm GGO in the left lower lobe; follow-up in 12 months recommended to confirm stability.

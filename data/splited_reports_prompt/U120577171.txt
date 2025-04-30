@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- LLL: GGO, 4 mm, stable since 2022/11/29, likely benign.
+- Left lingular lobe: Linear infiltration, likely post-inflammatory change.
+- Mediastinum: No lymphadenopathy.
+- Pleura: No effusion or pneumothorax.
+- Impression: Stable GGO in LLL; post-inflammatory change in left lingular lobe. Recommend continued monitoring.

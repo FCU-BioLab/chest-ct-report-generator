@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Mild infiltration in RLL and LLL, likely inflammatory or infectious changes.
+- Mediastinum: No masses or lymphadenopathy.
+- Vessels: Atherosclerotic plaques in coronary artery and aortic arch.
+- Pleura: No effusion or thickening.
+- Bones: No fractures or destructive lesions.
+- Impression: Mild infiltration in RLL and LLL; atherosclerotic plaques in coronary artery and aortic arch. Recommend clinical correlation and possible echocardiography for further evaluation.

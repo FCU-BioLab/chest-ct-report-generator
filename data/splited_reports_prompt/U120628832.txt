@@ -1,0 +1,5 @@
+Write a radiologic report about contrast-enhanced chest CT:
+- RUL: Solid nodule, 2.1 × 1.1 cm, not irregular, concerning for neoplastic process. Recommend further evaluation with contrast CT or biopsy.
+- Mediastinum: Subcentimeter lymph nodes, within normal size limits but warrant clinical correlation due to lung nodule.
+- Cardiovascular: Atherosclerotic plaques in coronary artery and aortic arch.
+- Impression: Solid nodule in RUL, possible neoplastic etiology; coronary artery plaques. Recommend further imaging or biopsy.

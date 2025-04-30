@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- Bony Thorax: Fractures in right 9-11th ribs, left 5th rib; suspicious right flail chest. Degenerative changes: marginal spur formation, scoliosis.
+- Lungs & Pleura: No pleural effusion, pneumothorax, or lung opacity.
+- Mediastinum: No lymphadenopathy or masses.
+- Heart: Normal size and silhouette.
+- Abdomen: Left renal hypodensity lesion, 1.4 cm; recommend sono follow-up. Smooth liver/spleen outline; contrast study suggested if clinical suspicion of laceration.
+- Impression: Rib fractures with possible flail chest; left renal lesion requires further evaluation.

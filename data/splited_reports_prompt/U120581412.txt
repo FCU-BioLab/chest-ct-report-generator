@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- LLL: Small juxtapleural nodule, 5 mm.
+- Mediastinum: No significant lymphadenopathy.
+- Pleura: No effusion or pneumothorax.
+- Bones: No acute abnormalities.
+- Impression: Stable chest compared to 2023/07/03; small juxtapleural nodule in LLL.

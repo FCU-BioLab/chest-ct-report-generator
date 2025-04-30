@@ -1,0 +1,9 @@
+Write a radiologic report for a non-contrast chest CT:
+- Findings:
+  1. Lungs: No significant abnormalities detected; unremarkable.
+  2. Mediastinum: No lymphadenopathy or abnormal masses.
+  3. Vessels: Unremarkable.
+  4. Pleura: No effusion or thickening observed.
+  5. Heart: Normal size and appearance; no pericardial effusion.
+  6. Bones and Soft Tissues: No significant osseous lesions or soft tissue abnormalities.
+- Impression: No active lung lesions; regular follow-up recommended.

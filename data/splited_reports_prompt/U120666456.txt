@@ -1,0 +1,9 @@
+Write a concise radiologic report for a non-contrast chest CT:
+
+Clinical Information: Abnormal GGO over chest CT.
+
+Findings: A fatty density lesion measuring 4.8 cm x 1.5 cm is noted in the left lower chest wall, likely a lipoma. A 5 mm ground-glass opacity is observed in the right lower lobe. Infiltration in the left lower lobe suggests post-inflammatory or infectious changes. No pleural effusion, pneumothorax, or significant mediastinal lymphadenopathy. The heart and great vessels are unremarkable, with no atherosclerotic changes.
+
+Impression: Fatty density lesion in the left lower chest wall consistent with lipoma; 5 mm ground-glass opacity in the right lower lobe; infiltration in the left lower lobe likely due to inflammation or infection.
+
+Recommendation: Follow-up with high-resolution or repeat CT in 6-12 months to monitor GGO changes.

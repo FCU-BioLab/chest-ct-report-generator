@@ -1,0 +1,4 @@
+Write a radiologic report about non-contrast chest CT:
+- LUL: 9 mm opacity, likely post-inflammatory change. Suggest follow-up CT in 6-12 months.
+- Mediastinum: No mass lesions; heart, great vessels, trachea, and major bronchi unremarkable.
+- Impression: 9 mm opacity in LUL, likely post-inflammatory. Recommend follow-up in 6-12 months.

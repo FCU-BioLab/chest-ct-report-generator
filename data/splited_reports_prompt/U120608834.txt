@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- Bony Thorax: Fractures of right 3rd-7th ribs, suspicious for flail chest. Marginal spur formation in thoracic spine (degenerative changes).
+- Lungs: No pleural effusion, pneumothorax, or lung opacity.
+- Mediastinum: No lymphadenopathy or masses.
+- Heart: Normal size and configuration.
+- Impression: Right rib fractures with potential flail chest. Recommend clinical correlation and follow-up imaging if needed.

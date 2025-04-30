@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- RML: Focal atelectasis and bronchiectasis.
+- RUL: Nodules, 3.7 cm and 3.0 cm. Suggest follow-up.
+- Mediastinum: No masses or lymphadenopathy.
+- Pleura: No effusion or pneumothorax.
+- Heart: Atherosclerotic plaques in coronary artery and aortic arch.
+- Impression: RML atelectasis and bronchiectasis; RUL nodules. Recommend follow-up imaging.

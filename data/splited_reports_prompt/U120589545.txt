@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: Mass lesion, 3.1 cm, decreasing in size compared to 2023/08/14.
+- Pleura: Large right-sided pleural effusion.
+- Other lung fields: No additional nodules or significant changes.
+- Mediastinum: No lymphadenopathy.
+- Vessels: Atherosclerotic plaques in coronary artery.
+- Impression: Stable right chest findings compared to 2023/08/14; mass lesion in RUL with decreased size. Recommend follow-up imaging in 6 months.

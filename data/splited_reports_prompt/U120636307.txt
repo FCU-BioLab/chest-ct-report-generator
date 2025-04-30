@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: 5.6 mm GGO; recommend follow-up in 12 months to confirm stability.
+- Mediastinum: No enlarged lymph nodes.
+- Vessels: No atherosclerotic changes in great vessels.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No significant lesions.
+- Impression: Stable small GGO in RUL; follow-up in 12 months recommended.

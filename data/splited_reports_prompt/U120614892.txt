@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: GGO, 8.5 mm, mild increase in size and density since 2024/03/05. Suggest 6-month follow-up.
+- Mediastinum: No significant lymphadenopathy.
+- Pleura: No effusion or pneumothorax.
+- Bones: No acute abnormalities.
+- Impression: Mildly enlarged and denser GGO in RUL. Recommend 6-month follow-up.

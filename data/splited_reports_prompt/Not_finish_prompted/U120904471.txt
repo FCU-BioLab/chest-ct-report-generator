@@ -1,0 +1,42 @@
+查單號:U120904471
+
+Imaging Report Form for the Esophageal Cancer ���D��
+Imaging Date: 2024/07/22 
+Technique: ��CT ��MR images through the chest were obtained
+��with ��without intravenous contrast.
+A. Primary Tumor (T)
+# Location
+  ��Cervical segment (hypopharynx to sternal notch)
+  ��Upper third of thoracic segment (sternal notch to azygos vein)
+  ��Middle third of thoracic segment (azygos vein to inferior pulmonary vein)
+  ��Lower third of thoracic segment (inferior pulmonary vein to esophagogastric junction,
+    epicenter within the proximal 2cm of the cardia)
+# Size
+  ��Not visible / Non-measurable
+  ��Measurable: Length: 3cm ; Maximum thickness: 0.8cm 
+# Tumor Invasion
+  ��<=T2: Less than the muscularis propria
+  ��T3: Invades esophageal adventitia
+  ��T4a: Invades pleura, pericardium, azygos vein, diaphragm, or peritoneum
+  ��T4b: Invades aorta, vertebral body, airway
+B. Regional Lymph Node (N)
+  ��N0: No or Equivocal
+  ��Yes, locates
+      ��Low cervical ��Upper paratracheal ��Lower paratracheal ��Subcarinal ��Upper paraesophageal
+      ��Middle paraesophageal ��Lower paraesophageal ��Pulmonary ligament ��Diaphragmatic
+      ��Paracardial ��Left gastric ��Common hepatic ��Splenic ��Celiac
+# Number: ____ 
+  ��N1: Regional lymph node metastases involving 1 to 2 nodes
+  ��N2: Regional lymph node metastases involving 3 to 6 nodes
+  ��N3: Regional lymph node metastases involving >=7 nodes
+C. Distant Metastasis (M)
+  ��M0: No or Equivocal
+  ��M1: Yes, location: ____ 
+D. Other Findings
+  
+= = = = = =
+IMP:
+Esophageal cancer, preliminary imaging staging T2N1M0 (AJCC 8th edition).
+
+
+=== ��g�M����v�G��������v  ��E�M�r��0328��  ====

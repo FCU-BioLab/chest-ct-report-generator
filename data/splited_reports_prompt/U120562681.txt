@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Unremarkable.
+- Mediastinum: Subcentimeter reactive lymph nodes, no significant lymphadenopathy.
+- Pleura: No effusion or thickening.
+- Bones: Suspicious spur and possible tear at right clavicle near the sternum-clavicle junction. Recommend clinical evaluation.
+- Impression: Right clavicle abnormality; clinic check advised.

@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- LLL: Adenocarcinoma, pT3N0 post VATS lobectomy. Suspicious new GGO, 8.3 mm; follow-up needed.
+- RLL: GGO, 8.5 mm, stable compared to 2023/09/25.
+- Mediastinum: Subcentimeter lymph nodes, no significant enlargement.
+- Vessels: Atherosclerotic changes in coronary arteries and aortic arch.
+- Impression: Post-surgical changes in LLL; stable GGO in RLL; suspicious new GGO in LLL. Recommend follow-up in 6 months.

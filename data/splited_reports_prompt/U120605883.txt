@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: GGO, 5.3 mm, stable since 2023/02/11. Suggest follow-up.
+- Pleura: No effusion.
+- Mediastinum: No lymphadenopathy.
+- Heart: Normal size, no pericardial effusion. Coronary artery plaques noted.
+- Bones: No lytic or sclerotic lesions.
+- Impression: Stable GGO in RUL; coronary artery plaques. Recommend routine oncological follow-up.

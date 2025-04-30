@@ -1,0 +1,5 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: Focal interlobular thickening with surgical stitches, stable since 2023/12/18.
+- LLL: Part-solid nodule, reduced from 35 mm to 16.3 mm since 2023/12/18.
+- Mediastinum: No lymphadenopathy.
+- Impression: Stable post-operative changes in RUL; significant response of LLL nodule. Recommend follow-up imaging or biopsy in 3 months.

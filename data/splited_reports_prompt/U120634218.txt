@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Bilateral GGO, more prominent in lower lobes. Non-specific, consider infectious, inflammatory, or interstitial lung diseases.
+- Mediastinum: No enlarged lymph nodes.
+- Vessels: Atherosclerotic plaques in abdominal aorta.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No significant lesions.
+- Impression: Bilateral GGO in lower lobes; recommend clinical correlation and further imaging if needed.

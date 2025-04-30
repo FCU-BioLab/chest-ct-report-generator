@@ -1,0 +1,9 @@
+Write a concise radiologic report for a non-contrast chest CT:
+
+Clinical Information: Lung adenocarcinoma, cT4N1M0, stage IIIa, EGFR wild type, post-neoadjuvant chemotherapy.
+
+Findings: Focal interlobular thickening and surgical stitches in the right middle lobe are consistent with prior surgery and remain stable compared to the 2024/01/03 study. Infiltration in the right lower lobe is also stable. No new nodules, masses, or significant parenchymal changes are observed. The mediastinum and hila show no lymphadenopathy, and there is no pleural effusion or pneumothorax.
+
+Impression: Post-operative changes in the right middle lobe are stable, with no evidence of new abnormalities.
+
+Recommendation: Clinical follow-up; repeat imaging may be considered in 6 months.

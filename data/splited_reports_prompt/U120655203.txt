@@ -1,0 +1,9 @@
+Write a brief radiologic report for a non-contrast chest CT:
+- Clinical Info: Trauma evaluation.
+- Findings:
+  1. Right 6th-11th rib fractures, possible flail chest. Thoracic spine spurs indicate degenerative changes.
+  2. Right lung subpleural reticulation, suggestive of post-inflammatory changes or early interstitial lung disease. No effusion or pneumothorax.
+  3. Mediastinum and heart: No abnormalities.
+- Impression:
+  1. Right rib fractures with potential flail chest.
+  2. Right lung subpleural reticulation; consider follow-up.

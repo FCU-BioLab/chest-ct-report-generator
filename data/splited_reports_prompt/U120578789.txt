@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- RML: Reticular infiltration.
+- Mediastinum: No significant lymphadenopathy.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No significant abnormalities.
+- Impression: Reticular infiltration in RML.

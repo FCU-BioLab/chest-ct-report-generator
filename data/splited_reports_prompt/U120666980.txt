@@ -1,0 +1,9 @@
+Write a brief radiologic report for a non-contrast chest CT:
+
+Clinical Information: Rectal adenocarcinoma, stage IIIC, post CCRT.
+
+Findings: Clear lungs, no pleural effusion, no significant lymphadenopathy, normal heart, and no bone lesions.
+
+Impression: No pulmonary metastases. Stable compared to CT (2024/04/02).
+
+Recommendation: Routine oncological follow-up.

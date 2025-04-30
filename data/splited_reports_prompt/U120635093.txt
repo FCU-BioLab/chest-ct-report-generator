@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- RUL: Small GGO (<4 mm), stable.
+- Mediastinum: No enlarged lymph nodes.
+- Vessels: No atherosclerotic changes in great vessels.
+- Pleura: No effusion or thickening.
+- Heart: Normal size, no pericardial effusion.
+- Impression: Stable small GGO in RUL. Recommend follow-up in 12 months to confirm stability.

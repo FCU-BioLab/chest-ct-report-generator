@@ -1,0 +1,1 @@
+Generate a non-contrast chest CT report for a colon cancer patient undergoing salvage chemotherapy: clear lungs, mild subpleural fibrosis in lower lungs (post-inflammatory), emphysema in upper lungs, no pleural effusion or lymphadenopathy, atherosclerotic coronary plaques, normal heart, and no osseous metastases.

@@ -1,0 +1,14 @@
+torch
+transformers
+datasets
+peft
+huggingface_hub
+accelerate
+tqdm
+ollama
+PyQt6
+pymupdf
+faiss-cpu
+sentence-transformers
+numpy
+pyinstaller

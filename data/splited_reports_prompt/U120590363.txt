@@ -1,0 +1,8 @@
+Write a radiologic report about non-contrast chest CT:
+- Lungs: Clear, no nodules, masses, or consolidation.
+- Pleura: No effusion.
+- Mediastinum: No lymphadenopathy.
+- Cardiovascular: Atherosclerotic plaques in coronary artery; suspicious left descending artery with stent.
+- Heart: Normal size, no pericardial effusion.
+- Bones: No lytic or sclerotic lesions.
+- Impression: Stable compared to 2023/11/09; no pulmonary metastases in colon cancer post-surgery; coronary artery plaques with suspicious stent. Recommend routine oncological follow-up.

@@ -1,0 +1,8 @@
+Write a radiologic report for non-contrast chest CT:
+- Clinical Information: History of RS colon adenocarcinoma, post laparoscopic LAR and right hemicolectomy, presenting with cough and sputum.
+- Lungs: Clear lungs without nodules, masses, or consolidation. No pleural effusion.
+- Mediastinum: No lymphadenopathy or pathological enlargement.
+- Heart: Normal size and silhouette without pericardial effusion.
+- Bones: Thoracic spine and ribs intact, no evidence of metastatic lesions.
+- Impression: No pulmonary metastases in a patient with a history of colon cancer post-surgery.
+- Recommendation: Continue routine follow-up for colon cancer management.

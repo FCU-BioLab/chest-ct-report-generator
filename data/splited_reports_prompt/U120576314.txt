@@ -1,0 +1,6 @@
+Write a radiologic report about non-contrast chest CT:
+- LUL: Stable ground-glass opacities compared to 2023/12/14.
+- LLL: Post-surgical changes consistent with prior lobectomy; no new lesions.
+- Remaining lung: No consolidation, nodules, or pleural effusion.
+- Mediastinum: Within normal limits, no lymphadenopathy.
+- Impression: Stable ground-glass opacities in LUL; post-surgical changes in LLL, no recurrent disease.

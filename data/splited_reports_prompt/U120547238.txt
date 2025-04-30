@@ -1,0 +1,7 @@
+Write a radiologic report about non-contrast chest CT:
+- Right breast: Soft tissue mass, size 2.2 cm. Suggest mammography and sonography.
+- Lungs: No masses, nodules, or cavities.
+- Mediastinum: Intact, no lymphadenopathy.
+- Pleura: No effusion or thickening.
+- Cardiovascular: Atherosclerotic plaques in coronary artery and aortic arch.
+- Impression: Right breast mass and coronary artery plaques. Recommend further evaluation of breast mass.
