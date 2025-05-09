@@ -26,28 +26,93 @@ class MedicalReportApp(QWidget):
 
     def initUI(self):
         self.setWindowTitle("Medical Report Generator")
-        self.setGeometry(100, 100, 600, 400)
+        self.setGeometry(100, 100, 900, 700)
+
+        # 全域樣式
+        self.setStyleSheet("""
+            QWidget {
+                background: #f7fafd;
+                font-family: 'Segoe UI', 'Arial', sans-serif;
+                font-size: 16px;
+            }
+            QLabel#TitleLabel {
+                font-size: 28px;
+                font-weight: bold;
+                color: #2a4d69;
+                margin-bottom: 16px;
+            }
+            QLabel {
+                color: #2a4d69;
+                font-size: 16px;
+            }
+            QPushButton {
+                background-color: #4fc3f7;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 24px;
+                font-size: 16px;
+                font-weight: bold;
+                margin: 8px 0;
+            }
+            QPushButton:hover {
+                background-color: #0288d1;
+            }
+            QLineEdit, QComboBox {
+                background: #fff;
+                border: 1.5px solid #b0bec5;
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-size: 16px;
+                margin-bottom: 8px;
+            }
+            QTextEdit {
+                background: #f0f4f8;
+                border: 1.5px solid #b0bec5;
+                border-radius: 10px;
+                font-size: 16px;
+                color: #263238;
+                padding: 16px;
+            }
+            QComboBox QAbstractItemView {
+                background: #fff;
+                selection-background-color: #b3e5fc;
+            }
+        """)
 
         layout = QVBoxLayout()
+        layout.setSpacing(18)
+        layout.setContentsMargins(32, 32, 32, 32)
 
+        # 標題
+        self.title_label = QLabel("Chest CT Report Generator")
+        self.title_label.setObjectName("TitleLabel")
+        layout.addWidget(self.title_label)
+
+        # PDF 區塊
+        pdf_layout = QHBoxLayout()
         self.pdf_label = QLabel("Select Medical PDFs:")
-        layout.addWidget(self.pdf_label)
-
+        pdf_layout.addWidget(self.pdf_label)
         self.pdf_button = QPushButton("Load PDFs")
         self.pdf_button.clicked.connect(self.load_pdfs)
-        layout.addWidget(self.pdf_button)
+        pdf_layout.addWidget(self.pdf_button)
+        pdf_layout.addStretch()
+        layout.addLayout(pdf_layout)
 
+        # 查詢輸入
         self.query_input = QLineEdit()
         self.query_input.setPlaceholderText("Enter query for medical knowledge...")
         layout.addWidget(self.query_input)
 
+        # 產生報告按鈕
         self.generate_button = QPushButton("Generate Report")
         self.generate_button.clicked.connect(self.generate_report)
         layout.addWidget(self.generate_button)
 
+        # 分類選擇區
         classification_layout = QHBoxLayout()
         self.classification_label = QLabel("Lung-RADS Classification:")
-        self.classification_label.setStyleSheet("font-weight: bold; color: #000;")
+        self.classification_label.setStyleSheet("font-weight: bold; color: #0288d1; font-size: 17px;")
         self.classification_combo = QComboBox()
         self.classification_combo.addItems([
             "Auto", "Category 0", "Category 1", "Category 2", "Category 3",
@@ -56,10 +121,13 @@ class MedicalReportApp(QWidget):
         self.classification_combo.setCurrentText("Auto")
         classification_layout.addWidget(self.classification_label)
         classification_layout.addWidget(self.classification_combo)
+        classification_layout.addStretch()
         layout.addLayout(classification_layout)
 
+        # 報告顯示區
         self.report_output = QTextEdit()
         self.report_output.setReadOnly(True)
+        self.report_output.setMinimumHeight(350)
         layout.addWidget(self.report_output)
 
         self.setLayout(layout)
