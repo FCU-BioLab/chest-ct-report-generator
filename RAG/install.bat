@@ -80,51 +80,6 @@ if %errorlevel% neq 0 (
     exit /b
 )
 
-:: Check Ollama installation
-echo Checking Ollama...
-where ollama >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Ollama not found. Installing Ollama...
-    winget install Ollama --accept-source-agreements --accept-package-agreements
-)
-
-:: Verify Ollama Installation (5 attempts)
-set attempts=0
-:check_ollama
-where ollama >nul 2>&1
-if %errorlevel% neq 0 (
-    set /a attempts+=1
-    if !attempts! geq 5 (
-        echo ERROR: Ollama installation failed.
-        pause
-        exit /b
-    )
-    timeout /t 5 >nul
-    goto check_ollama
-)
-
-echo Ollama installed successfully.
-ollama --version
-
-:: Download Ollama Model (3 attempts)
-set attempts=0
-set model=gemma3:4b
-:pull_model
-echo Downloading Ollama model !model!...
-ollama pull !model!
-if %errorlevel% neq 0 (
-    set /a attempts+=1
-    if !attempts! geq 3 (
-        echo ERROR: Failed to download Ollama model.
-        pause
-        exit /b
-    )
-    echo Retry attempt !attempts!...
-    timeout /t 5 >nul
-    goto pull_model
-)
-echo Ollama model downloaded successfully!
-
 :: PyInstaller packaging
 echo Building executable with PyInstaller...
 python -m PyInstaller --noconfirm ^

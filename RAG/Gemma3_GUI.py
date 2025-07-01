@@ -2,10 +2,11 @@ import sys
 import os
 import fitz  # PyMuPDF
 import faiss
-import ollama
 import datetime
 import re
 import numpy as np
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout, QTextEdit,
     QFileDialog, QLabel, QLineEdit, QComboBox, QHBoxLayout
@@ -23,6 +24,11 @@ class MedicalReportApp(QWidget):
         self.metadata = []
         self.model = SentenceTransformer("all-MiniLM-L6-v2")
         self.lung_rads_criteria = self.load_lung_rads_criteria()
+        
+        # 初始化Gemma模型
+        self.llm_tokenizer = None
+        self.llm_model = None
+        self.load_gemma_model()
 
     def initUI(self):
         self.setWindowTitle("Medical Report Generator")
@@ -299,6 +305,297 @@ class MedicalReportApp(QWidget):
             return "Significantly enlarged lymph node (possible malignancy)"
         return "Unclassified"
 
+    def load_gemma_model(self):
+        """載入語言模型，優先使用本地模型"""
+        try:
+            if hasattr(self, 'report_output') and self.report_output:
+                self.report_output.setText("正在載入語言模型，請稍候...")
+            
+            # 檢查是否有GPU可用
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"使用設備：{device}")
+            
+            # 優先嘗試載入本地Gemma 3模型
+            local_gemma_path = "model/gemma-3-4b-it"
+            if os.path.exists(local_gemma_path):
+                try:
+                    print(f"發現本地Gemma 3模型: {local_gemma_path}")
+                    
+                    from transformers import AutoTokenizer, AutoModelForCausalLM
+                    
+                    # 載入本地tokenizer和模型
+                    self.llm_tokenizer = AutoTokenizer.from_pretrained(
+                        local_gemma_path,
+                        trust_remote_code=True
+                    )
+                    
+                    if self.llm_tokenizer.pad_token is None:
+                        self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+                    
+                    self.llm_model = AutoModelForCausalLM.from_pretrained(
+                        local_gemma_path,
+                        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                        device_map="auto" if device == "cuda" else None,
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True
+                    )
+                    
+                    if device == "cpu":
+                        self.llm_model = self.llm_model.to(device)
+                    
+                    print(f"✅ 本地Gemma 3 4B模型載入成功，使用設備：{device}")
+                    return
+                    
+                except Exception as local_e:
+                    print(f"載入本地Gemma 3模型失敗：{str(local_e)}")
+                    print("嘗試從Hugging Face載入...")
+            
+            # 首先嘗試載入線上Gemma 3模型（僅當有GPU時）
+            if device == "cuda":
+                try:
+                    model_name = "google/gemma-3-4b-it"
+                    print(f"嘗試載入線上模型 {model_name}...")
+                    
+                    # 檢查是否已登入Hugging Face
+                    from huggingface_hub import whoami
+                    try:
+                        user_info = whoami()
+                        print(f"已登入Hugging Face，用戶：{user_info['name']}")
+                    except Exception:
+                        print("未登入Hugging Face，請先執行：huggingface-cli login")
+                        raise Exception("需要Hugging Face身份驗證")
+                    
+                    # 載入tokenizer和模型
+                    self.llm_tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        trust_remote_code=True
+                    )
+                    
+                    if self.llm_tokenizer.pad_token is None:
+                        self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+                    
+                    self.llm_model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True
+                    )
+                    
+                    print(f"Gemma 3 4B模型載入成功，使用設備：{device}")
+                    return
+                    
+                except Exception as gemma_e:
+                    print(f"載入Gemma 3模型失敗：{str(gemma_e)}")
+                    print("嘗試使用較小的模型...")
+            else:
+                print("檢測到CPU環境，Gemma 3 4B模型太大，跳過載入...")
+            
+            # 備用選項1：使用較小的Gemma 2B模型（如果可用）
+            try:
+                model_name = "google/gemma-2b-it"
+                print(f"嘗試載入 {model_name}...")
+                
+                # 檢查是否已登入Hugging Face
+                from huggingface_hub import whoami
+                try:
+                    user_info = whoami()
+                    print(f"已登入Hugging Face，用戶：{user_info['name']}")
+                except Exception:
+                    print("未登入Hugging Face，跳過Gemma模型...")
+                    raise Exception("需要Hugging Face身份驗證")
+                
+                self.llm_tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True
+                )
+                
+                if self.llm_tokenizer.pad_token is None:
+                    self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+                
+                # 使用8位量化來減少記憶體使用
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_threshold=6.0
+                )
+                
+                self.llm_model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    quantization_config=quantization_config if device == "cuda" else None,
+                    torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+                    device_map="auto" if device == "cuda" else None,
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True
+                )
+                
+                if device == "cpu":
+                    self.llm_model = self.llm_model.to(device)
+                
+                print(f"Gemma 2B模型載入成功，使用設備：{device}")
+                return
+                
+            except Exception as gemma2b_e:
+                print(f"載入Gemma 2B模型失敗：{str(gemma2b_e)}")
+                print("嘗試使用開源替代模型...")
+            
+            # 備用選項2：使用DistilGPT-2（輕量且穩定）
+            try:
+                model_name = "distilgpt2"
+                print(f"嘗試載入 {model_name}...")
+                
+                self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.llm_model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=True
+                )
+                
+                if self.llm_tokenizer.pad_token is None:
+                    self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+                
+                if device == "cpu":
+                    self.llm_model = self.llm_model.to(device)
+                
+                print(f"DistilGPT-2模型載入成功，使用設備：{device}")
+                return
+                
+            except Exception as distilgpt2_e:
+                print(f"載入DistilGPT-2失敗：{str(distilgpt2_e)}")
+            
+            # 備用選項3：使用更小的GPT-2模型
+            try:
+                model_name = "gpt2"
+                print(f"嘗試載入 {model_name}...")
+                
+                self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.llm_model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=True
+                )
+                
+                if self.llm_tokenizer.pad_token is None:
+                    self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+                
+                if device == "cpu":
+                    self.llm_model = self.llm_model.to(device)
+                
+                print(f"GPT-2模型載入成功，使用設備：{device}")
+                return
+                
+            except Exception as gpt2_e:
+                print(f"載入GPT-2失敗：{str(gpt2_e)}")
+            
+            # 最後備用：簡單文本生成
+            print("所有模型載入失敗，將使用簡單文本模板")
+            self.llm_tokenizer = None
+            self.llm_model = None
+            
+        except Exception as e:
+            print(f"載入語言模型時發生錯誤：{str(e)}")
+            self.llm_tokenizer = None
+            self.llm_model = None
+
+    def generate_with_gemma(self, prompt, max_length=1024):
+        """使用語言模型生成文本"""
+        if self.llm_model is None or self.llm_tokenizer is None:
+            # 如果沒有模型，使用簡單的模板生成
+            return self.generate_template_report(prompt)
+        
+        try:
+            # 編碼輸入，限制輸入長度避免記憶體問題
+            max_input_length = 512  # 限制輸入長度
+            inputs = self.llm_tokenizer.encode(
+                prompt, 
+                return_tensors="pt", 
+                max_length=max_input_length, 
+                truncation=True
+            )
+            
+            # 移到正確的設備
+            device = next(self.llm_model.parameters()).device
+            inputs = inputs.to(device)
+            
+            # 計算合理的最大生成長度
+            input_length = inputs.shape[1]
+            max_new_tokens = min(max_length - input_length, 512)  # 限制新生成的token數量
+            
+            # 生成文本
+            with torch.no_grad():
+                outputs = self.llm_model.generate(
+                    inputs,
+                    max_new_tokens=max_new_tokens,  # 使用max_new_tokens而不是max_length
+                    num_return_sequences=1,
+                    temperature=0.7,
+                    do_sample=True,
+                    pad_token_id=self.llm_tokenizer.eos_token_id,
+                    eos_token_id=self.llm_tokenizer.eos_token_id,
+                    repetition_penalty=1.1,
+                    no_repeat_ngram_size=3  # 避免重複
+                )
+            
+            # 解碼輸出
+            generated_text = self.llm_tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # 移除原始prompt，只返回生成的部分
+            if generated_text.startswith(prompt):
+                generated_text = generated_text[len(prompt):].strip()
+            
+            return generated_text if generated_text else self.generate_template_report(prompt)
+            
+        except Exception as e:
+            print(f"模型生成失敗：{str(e)}")
+            return self.generate_template_report(prompt)
+    
+    def generate_template_report(self, prompt):
+        """使用模板生成基本報告"""
+        current_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        template_report = f"""
+**Patient Information:**
+- Name: [Patient Name]
+- Date of Birth: [DOB]
+- Sex: [Sex]
+- Imaging Modality: Chest CT
+- Scanner Model: [Scanner Model]
+- Scan Date: {current_date}
+
+**Findings:**
+Based on the query provided, the following observations are noted:
+{self.extract_template_findings(prompt)}
+
+**Impression:**
+The findings suggest further evaluation may be warranted. This corresponds to an appropriate Lung-RADS classification based on the specific findings.
+
+**Differential Diagnosis:**
+- Benign: Inflammatory changes, granulomatous disease
+- Infectious: Pneumonia, tuberculosis
+- Malignant: Primary lung carcinoma, metastatic disease
+
+**Recommendations:**
+- Follow-up imaging as clinically indicated
+- Correlation with clinical symptoms and laboratory findings
+- Consider further diagnostic workup if clinically appropriate
+
+**Note:** This is a template-generated report. For accurate medical diagnosis, please consult with a qualified radiologist and use appropriate diagnostic tools.
+        """
+        return template_report.strip()
+    
+    def extract_template_findings(self, prompt):
+        """從prompt中提取關鍵發現用於模板"""
+        findings_text = "Multiple findings noted requiring radiological assessment."
+        
+        # 簡單的關鍵詞檢測
+        if "nodule" in prompt.lower():
+            findings_text += "\n- Pulmonary nodule identified requiring classification and follow-up."
+        if "ground glass" in prompt.lower() or "ggo" in prompt.lower():
+            findings_text += "\n- Ground glass opacity observed."
+        if "lymph node" in prompt.lower():
+            findings_text += "\n- Lymph node changes noted."
+        
+        return findings_text
+
     def generate_report(self):
         query = self.query_input.text().strip()
         if not query:
@@ -385,17 +682,31 @@ class MedicalReportApp(QWidget):
         """
 
         try:
-            response = ollama.chat(
-                model="gemma3:4b",
-                # model="gemma3:1b",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Generate a radiological report : " + query}
-                ]
-            )
-            self.report_output.setText(response["message"]["content"])
+            # 使用語言模型生成報告
+            if self.llm_model is None:
+                self.report_output.setText("使用模板生成報告（語言模型未載入）\n\n")
+            
+            # 構建完整的prompt
+            full_prompt = f"{system_prompt}\n\n用戶查詢：{query}\n\n請生成專業的胸部CT報告："
+            
+            # 使用模型生成報告
+            generated_report = self.generate_with_gemma(full_prompt, max_length=2048)
+            
+            # 顯示報告
+            if "錯誤：" in generated_report or "生成文本時發生錯誤：" in generated_report:
+                self.report_output.setText(f"警告：{generated_report}\n\n使用模板生成基本報告...")
+            else:
+                self.report_output.setText(generated_report)
+                
         except Exception as e:
-            self.report_output.setText(f"Error during report generation:\n{str(e)}")
+            error_msg = f"報告生成過程中發生錯誤：{str(e)}\n\n使用模板生成基本報告..."
+            self.report_output.setText(error_msg)
+            # 嘗試使用模板生成
+            try:
+                template_report = self.generate_template_report(f"用戶查詢：{query}")
+                self.report_output.setText(error_msg + "\n\n" + template_report)
+            except Exception as template_e:
+                self.report_output.setText(f"嚴重錯誤：無法生成報告 - {str(template_e)}")
 
 
 if __name__ == "__main__":
