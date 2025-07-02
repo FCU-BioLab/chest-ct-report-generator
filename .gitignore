@@ -4,5 +4,4 @@ extracted_texts
 results
 RAG/build
 RAG/dist
-RAG/model
-venv
+testenv
