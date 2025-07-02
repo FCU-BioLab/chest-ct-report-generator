@@ -135,7 +135,7 @@ python -m PyInstaller --noconfirm ^
     --collect-all sentence_transformers ^
     --collect-all fitz ^
     --collect-all faiss ^
-    Gemma3_GUI.py
+    GUI.py
 
 if %errorlevel% neq 0 (
     echo ERROR: PyInstaller build failed.
