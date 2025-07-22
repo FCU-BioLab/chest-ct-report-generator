@@ -6,3 +6,5 @@ RAG/build
 RAG/dist
 RAG/model
 venv
+original_datasets
+matched_data_by_patient
