@@ -8,3 +8,5 @@ RAG/model
 venv
 original_datasets
 matched_data_by_patient
+dataset_splits
+CT_ViT_Training/src/__pycache__

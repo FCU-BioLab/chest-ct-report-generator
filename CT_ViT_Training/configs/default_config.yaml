@@ -1,0 +1,182 @@
+# CT-ViT 訓練配置文件
+# 將此文件複製為 config.yaml 並根據需要修改參數
+
+# === 資料集配置 ===
+dataset:
+  root_dir: "D:/GitHub/chest-ct-report-generator/dataset_splits"
+  train_dir: "train"
+  validation_dir: "validation"
+  test_dir: "test"
+  
+  # 切片選擇策略
+  slice_selection: "middle"  # "middle", "random", "all"
+  
+  # 類別標籤映射
+  label_mapping:
+    A: 0  # A系列病例
+    B: 1  # B系列病例
+    E: 2  # E系列病例
+    G: 3  # G系列病例
+
+# === 模型配置 ===
+model:
+  name: "google/vit-base-patch16-224"
+  image_size: 224
+  patch_size: 16
+  num_labels: 4
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  
+  # 是否使用預訓練權重
+  use_pretrained: true
+
+# === 訓練配置 ===
+training:
+  # 基本參數
+  batch_size: 8
+  learning_rate: 2e-5
+  num_epochs: 50
+  weight_decay: 0.01
+  
+  # 學習率調度
+  warmup_steps: 500
+  lr_scheduler: "linear"  # "linear", "cosine", "polynomial"
+  
+  # 優化器設置
+  optimizer: "adamw"  # "adamw", "adam", "sgd"
+  max_grad_norm: 1.0
+  
+  # 保存和評估
+  save_steps: 1000
+  eval_steps: 500
+  logging_steps: 100
+  save_total_limit: 3
+  metric_for_best_model: "eval_accuracy"
+  greater_is_better: true
+  
+  # 早停設置
+  early_stopping_patience: 5
+  early_stopping_threshold: 0.001
+
+# === 資料增強配置 ===
+augmentation:
+  enable: true
+  
+  # 隨機旋轉
+  rotation:
+    enable: true
+    degrees: 15
+  
+  # 隨機水平翻轉
+  horizontal_flip:
+    enable: true
+    probability: 0.5
+  
+  # 隨機亮度調整
+  brightness:
+    enable: true
+    factor: 0.2
+  
+  # 隨機對比度調整
+  contrast:
+    enable: true
+    factor: 0.2
+  
+  # 隨機縮放和裁剪
+  resize_crop:
+    enable: true
+    scale: [0.8, 1.0]
+    ratio: [0.9, 1.1]
+
+# === DICOM處理配置 ===
+dicom:
+  # 視窗化參數 (Hounsfield Units)
+  window_center: -600  # 肺部視窗中心
+  window_width: 1200   # 肺部視窗寬度
+  
+  # 歸一化參數
+  normalization:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  
+  # 輸出尺寸
+  output_size: [224, 224]
+  
+  # 是否轉換為RGB
+  convert_to_rgb: true
+
+# === 輸出配置 ===
+output:
+  # 輸出目錄
+  output_dir: "./output"
+  runs_dir: "./runs"
+  
+  # 模型保存
+  save_model: true
+  model_save_path: "./output/best_model"
+  
+  # 日誌設置
+  logging_dir: "./logs"
+  tensorboard_dir: "./runs"
+  
+  # 結果保存
+  save_predictions: true
+  save_confusion_matrix: true
+  save_classification_report: true
+
+# === 系統配置 ===
+system:
+  # GPU設置
+  device: "auto"  # "auto", "cpu", "cuda:0"
+  num_workers: 4
+  pin_memory: true
+  
+  # 混合精度訓練
+  mixed_precision: true
+  
+  # 隨機種子
+  seed: 42
+  
+  # 記憶體優化
+  gradient_checkpointing: false
+  dataloader_drop_last: true
+
+# === 超參數搜索配置 ===
+hyperparameter_search:
+  enable: false
+  
+  # 搜索參數
+  search_params:
+    learning_rate: [1e-5, 2e-5, 5e-5]
+    batch_size: [4, 8, 16]
+    weight_decay: [0.01, 0.1]
+  
+  # 搜索策略
+  strategy: "grid"  # "grid", "random", "bayesian"
+  num_trials: 10
+
+# === 驗證配置 ===
+validation:
+  # 驗證間隔
+  validation_interval: 1  # 每幾個epoch驗證一次
+  
+  # 測試時增強
+  test_time_augmentation: false
+  tta_samples: 5
+  
+  # 閾值調整
+  threshold_optimization: false
+
+# === 部署配置 ===
+deployment:
+  # 模型導出格式
+  export_format: ["pytorch", "onnx"]
+  
+  # 量化設置
+  quantization:
+    enable: false
+    method: "dynamic"  # "dynamic", "static"
+  
+  # 推理優化
+  optimize_for_inference: true
