@@ -339,10 +339,10 @@ def main():
     """主函數"""
     parser = argparse.ArgumentParser(description="胸部CT資料集劃分工具")
     parser.add_argument("--source_dir", type=str, 
-                       default="d:/GitHub/chest-ct-report-generator/matched_data_by_patient",
+                       default="../../matched_data_by_patient",
                        help="源資料目錄路徑")
     parser.add_argument("--output_dir", type=str,
-                       default="d:/GitHub/chest-ct-report-generator/dataset_splits", 
+                       default="../../dataset_splits", 
                        help="輸出目錄路徑")
     parser.add_argument("--train_ratio", type=float, default=0.7,
                        help="訓練集比例 (預設: 0.7)")

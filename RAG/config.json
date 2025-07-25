@@ -1,14 +1,11 @@
 {
-  "lung_rads_criteria_path": "RAG/lung_rads_criteria.txt",
-  "output_dir": "extracted_texts",
   "model_name": "all-MiniLM-L6-v2",
   "ollama_model": "gemma3n:e2b",
-  "top_k": 2,
-  "window_size": [
-    2560,
-    1377
-  ],
+  "top_k": 5,
+  "similarity_threshold": 0.7,
   "max_history": 50,
   "auto_save": true,
-  "log_level": "INFO"
+  "log_level": "INFO",
+  "lung_rads_criteria_path": "RAG/lung_rads_criteria.txt",
+  "output_dir": "extracted_texts"
 }

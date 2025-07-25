@@ -1,0 +1,47 @@
+{
+  "models": {
+    "detection_model_path": "CT_ViT_Training/models/best_detection_model.pth",
+    "classification_model_path": "CT_ViT_Training/models/best_classification_model.pth"
+  },
+  "processing": {
+    "image_size": 224,
+    "confidence_threshold": 0.5,
+    "batch_size": 8,
+    "use_gpu": true,
+    "preprocessing": {
+      "normalize_method": "percentile",
+      "percentile_range": [1, 99],
+      "target_pixel_range": [0, 255]
+    }
+  },
+  "data": {
+    "patient_data_dir": "matched_data_by_patient",
+    "dataset_splits_dir": "dataset_splits",
+    "output_base_dir": "workflow_outputs"
+  },
+  "rag": {
+    "knowledge_base_path": "RAG/medical_knowledge_base",
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "top_k": 5,
+    "similarity_threshold": 0.7,
+    "enable_rag": true
+  },
+  "llm": {
+    "model_name": "llama3.2",
+    "temperature": 0.3,
+    "max_tokens": 2048,
+    "enable_llm": true
+  },
+  "output": {
+    "save_visualizations": true,
+    "save_intermediate_results": true,
+    "generate_html_report": true,
+    "generate_json_report": true
+  },
+  "system": {
+    "max_concurrent_processes": 4,
+    "enable_caching": true,
+    "cache_dir": "cache",
+    "log_level": "INFO"
+  }
+}

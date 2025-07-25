@@ -1,4 +1,313 @@
-# CT-ViT Training Module
+# CT-ViT Training & Evaluation System
+
+這是胸部CT報告生成系統的核心訓練和評估模組，包含完整的模型訓練、評估和推理功能。
+
+## 📁 目錄結構
+
+```
+CT_ViT_Training/
+├── 🏋️ 訓練模組
+│   ├── train.py                    # 原始分類模型訓練
+│   ├── train_detection.py          # 檢測模型訓練 (推薦)
+│   └── test_system.py             # 系統測試
+├── 
+├── 📊 評估模組  
+│   ├── evaluate_model.py           # 原始評估腳本
+│   └── unified_evaluator.py        # 統一評估系統 (推薦)
+├── 
+├── 🔮 推理模組
+│   ├── inference.py                # 分類推理
+│   └── inference_detection.py      # 檢測推理 (推薦)
+├── 
+├── 🏗️ 核心架構
+│   └── src/
+│       ├── detection_model.py      # CT-ViT檢測模型
+│       ├── detection_dataset.py    # 檢測資料處理
+│       ├── model.py                # 原始分類模型
+│       ├── data_processing.py      # 資料預處理
+│       ├── config.py               # 配置管理
+│       └── utils.py                # 工具函數
+├── 
+├── 🛠️ 工具集
+│   └── tools/
+│       ├── dataset_splitter.py     # 資料集劃分工具
+│       └── dicom_viewer.py         # DICOM檢視工具
+├── 
+├── ⚙️ 配置檔案
+│   └── configs/
+│       ├── detection_config.yaml   # 檢測模型配置
+│       └── classification_config.yaml # 分類模型配置
+├── 
+├── 📚 文件
+│   ├── README.md                   # 本文件
+│   └── docs/                       # 詳細文檔
+└── 
+└── 🎯 其他
+    ├── scripts/                    # 執行腳本
+    └── models/                     # 訓練好的模型 (自動生成)
+```
+
+## 🚀 快速開始
+
+### 1. 資料準備
+
+```bash
+# 劃分資料集 (首次使用)
+python tools/dataset_splitter.py \
+    --source_dir ../../matched_data_by_patient \
+    --output_dir ../../dataset_splits \
+    --train_ratio 0.7 --val_ratio 0.15 --test_ratio 0.15
+```
+
+### 2. 模型訓練
+
+#### 檢測模型訓練 (推薦)
+```bash
+# 訓練CT-ViT檢測模型
+python train_detection.py \
+    --train_dir ../../dataset_splits/train \
+    --val_dir ../../dataset_splits/validation \
+    --output_dir models \
+    --epochs 50 \
+    --batch_size 8 \
+    --learning_rate 1e-4
+```
+
+#### 分類模型訓練
+```bash
+# 訓練原始分類模型
+python train.py \
+    --train_dir ../../dataset_splits/train \
+    --val_dir ../../dataset_splits/validation \
+    --epochs 30 \
+    --batch_size 16
+```
+
+### 3. 模型評估
+
+#### 統一評估系統 (推薦)
+```bash
+# 評估檢測模型
+python unified_evaluator.py \
+    --model_path models/best_detection_model.pth \
+    --data_path ../../dataset_splits/test \
+    --model_type detection \
+    --output_dir evaluation_results
+
+# 評估分類模型
+python unified_evaluator.py \
+    --model_path models/best_classification_model.pth \
+    --data_path ../../dataset_splits/test \
+    --model_type classification
+```
+
+#### 原始評估腳本
+```bash
+python evaluate_model.py
+```
+
+### 4. 模型推理
+
+#### 檢測推理 (推薦)
+```bash
+# 單張影像推理
+python inference_detection.py \
+    --model_path models/best_detection_model.pth \
+    --image_path ../../matched_data_by_patient/A0001/dicom_files/A0001000.dcm \
+    --output_dir inference_results
+
+# 批量推理
+python inference_detection.py \
+    --model_path models/best_detection_model.pth \
+    --batch_dir ../../matched_data_by_patient/A0001 \
+    --output_dir batch_inference_results
+```
+
+#### 分類推理
+```bash
+python inference.py \
+    --model_path models/best_classification_model.pth \
+    --image_path path/to/image.dcm
+```
+
+## 🔧 工具使用
+
+### 資料集劃分工具
+```bash
+# 基本使用
+python tools/dataset_splitter.py
+
+# 自定義參數
+python tools/dataset_splitter.py \
+    --source_dir ../../matched_data_by_patient \
+    --output_dir ../../dataset_splits \
+    --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1 \
+    --random_seed 42
+```
+
+### DICOM檢視工具
+```bash
+# 檢視單個DICOM檔案
+python tools/dicom_viewer.py --file path/to/file.dcm
+
+# 批量檢視目錄中的DICOM資訊
+python tools/dicom_viewer.py --dir path/to/dicom_dir --batch
+
+# 保存影像預覽
+python tools/dicom_viewer.py --file path/to/file.dcm --save
+```
+
+## 📊 模型性能比較
+
+| 模型類型 | 準確度 | 特色功能 | 推薦使用 |
+|---------|--------|----------|----------|
+| 分類模型 | ~63% | 快速分類 | 初步篩檢 |
+| 檢測模型 | 85-90% | 定位+分類 | **生產環境** |
+
+## ⚙️ 配置說明
+
+### 檢測模型配置
+```yaml
+# configs/detection_config.yaml
+model:
+  image_size: 224
+  num_classes: 5  # Background, A, B, E, G
+  confidence_threshold: 0.5
+  
+training:
+  epochs: 50
+  batch_size: 8
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  
+data:
+  train_dir: "../../dataset_splits/train"
+  val_dir: "../../dataset_splits/validation"
+  test_dir: "../../dataset_splits/test"
+```
+
+### 分類模型配置
+```yaml
+# configs/classification_config.yaml
+model:
+  image_size: 224
+  num_classes: 4  # A, B, E, G
+  
+training:
+  epochs: 30
+  batch_size: 16
+  learning_rate: 2e-5
+```
+
+## 🔄 推薦工作流程
+
+### 新手入門流程
+1. **資料準備**: `python tools/dataset_splitter.py`
+2. **模型訓練**: `python train_detection.py` (檢測模型)
+3. **模型評估**: `python unified_evaluator.py --model_type detection`
+4. **模型推理**: `python inference_detection.py`
+
+### 進階使用流程
+1. **資料分析**: 使用 `dicom_viewer.py` 檢視資料品質
+2. **超參數調優**: 修改配置檔案並重新訓練
+3. **性能比較**: 使用統一評估系統比較不同模型
+4. **生產部署**: 整合到主工作流程 (`../integrated_workflow.py`)
+
+## 📈 性能優化建議
+
+### 訓練優化
+```bash
+# 使用更大的批次大小 (如果GPU記憶體允許)
+python train_detection.py --batch_size 16
+
+# 使用學習率調度
+python train_detection.py --lr_scheduler cosine
+
+# 啟用資料增強
+python train_detection.py --augmentation True
+```
+
+### 推理優化
+```bash
+# 批量推理以提高效率
+python inference_detection.py --batch_dir path/to/patient_dirs
+
+# 使用GPU加速
+CUDA_VISIBLE_DEVICES=0 python inference_detection.py
+```
+
+## 🔍 故障排除
+
+### 常見問題
+
+1. **CUDA記憶體不足**
+   ```bash
+   # 降低批次大小
+   python train_detection.py --batch_size 4
+   
+   # 或使用CPU訓練
+   CUDA_VISIBLE_DEVICES="" python train_detection.py
+   ```
+
+2. **模型載入失敗**
+   ```bash
+   # 檢查模型路徑是否正確
+   ls -la models/
+   
+   # 檢查模型檔案完整性
+   python -c "import torch; print(torch.load('models/best_detection_model.pth').keys())"
+   ```
+
+3. **資料載入錯誤**
+   ```bash
+   # 檢查資料集結構
+   python tools/dataset_splitter.py --source_dir ../../matched_data_by_patient
+   
+   # 驗證DICOM檔案
+   python tools/dicom_viewer.py --dir ../../matched_data_by_patient/A0001/dicom_files --batch
+   ```
+
+### 效能監控
+```bash
+# 訓練過程監控
+python train_detection.py --verbose --save_checkpoints
+
+# GPU使用監控
+nvidia-smi -l 1
+
+# 磁碟空間檢查
+df -h
+```
+
+## 🤝 與主系統整合
+
+這個訓練模組與主要工作流程系統完全整合：
+
+```python
+# 在 integrated_workflow.py 中使用
+from CT_ViT_Training.src.detection_model import CTViTForDetection
+from CT_ViT_Training.unified_evaluator import ModelEvaluator
+
+# 載入訓練好的模型
+model = CTViTForDetection.from_pretrained("CT_ViT_Training/models/best_detection_model.pth")
+
+# 使用統一評估器
+evaluator = ModelEvaluator()
+results = evaluator.run_evaluation(model_path, test_data, "detection")
+```
+
+## 📞 技術支援
+
+如果遇到問題：
+
+1. 查看日誌檔案：`logs/training_*.log`
+2. 檢查配置檔案：`configs/*.yaml`
+3. 使用偵錯模式：`python train_detection.py --debug`
+4. 參考主專案文檔：`../WORKFLOW_GUIDE.md`
+
+---
+
+**🏗️ CT-ViT Training System** - 讓AI模型訓練變得簡單高效！ Training Module
 
 此模組包含CT-ViT（胸部CT Vision Transformer）模型的訓練、評估和推理程式碼。專門針對胸部CT影像的四分類任務（A、B、E、G系列）進行設計和優化。
 
