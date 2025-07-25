@@ -176,14 +176,24 @@ class CTViTInference:
         
         # 保存結果
         results_file = os.path.join(output_dir, "evaluation_results.json")
+        
+        def convert_numpy_types(obj):
+            """遞迴轉換numpy類型為Python原生類型"""
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_types(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            else:
+                return obj
+        
         with open(results_file, 'w', encoding='utf-8') as f:
-            # 轉換numpy陣列為列表
-            json_results = {}
-            for key, value in results.items():
-                if isinstance(value, np.ndarray):
-                    json_results[key] = value.tolist()
-                else:
-                    json_results[key] = value
+            json_results = convert_numpy_types(results)
             json.dump(json_results, f, indent=2, ensure_ascii=False)
         
         return results
@@ -210,9 +220,9 @@ class CTViTInference:
             fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob_array[:, i])
             roc_auc = auc(fpr, tpr)
             roc_data[class_name] = {
-                'fpr': fpr,
-                'tpr': tpr,
-                'auc': roc_auc
+                'fpr': fpr.tolist(),  # 轉換為列表
+                'tpr': tpr.tolist(),  # 轉換為列表
+                'auc': float(roc_auc)  # 確保是Python float
             }
         
         # 繪製可視化圖表
@@ -332,7 +342,7 @@ def main():
         
         # 獲取影像路徑列表
         if os.path.isfile(args.input):
-            with open(args.input, 'r') as f:
+            with open(args.input, 'r', encoding='utf-8') as f:
                 image_paths = [line.strip() for line in f if line.strip()]
         elif os.path.isdir(args.input):
             image_paths = []

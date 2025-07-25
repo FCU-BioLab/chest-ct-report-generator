@@ -19,12 +19,14 @@ from config import CTViTConfig
 class CTViTTrainer(Trainer):
     """自定義的CT-ViT訓練器"""
     
-    def __init__(self, config: CTViTConfig, **kwargs):
+    def __init__(self, config: CTViTConfig, logger=None, **kwargs):
+        # 移除logger從kwargs，因為Trainer不接受這個參數
+        kwargs.pop('logger', None)
         super().__init__(**kwargs)
         self.config = config
-        self.logger = kwargs.get('logger', logging.getLogger(__name__))
+        self.logger = logger if logger is not None else logging.getLogger(__name__)
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """計算損失"""
         labels = inputs.get("labels")
         outputs = model(**inputs)

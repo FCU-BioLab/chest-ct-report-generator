@@ -1,0 +1,67 @@
+# CT-ViT 配置文件
+# 用於 inference_ct_vit.py 和相關工具
+
+# 模型配置
+model:
+  name: "google/vit-base-patch16-224"
+  num_labels: 4
+  image_size: 224
+  patch_size: 16
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+
+# 資料處理配置
+data:
+  # DICOM處理參數
+  dicom:
+    window_center: -600  # 肺窗中心 (HU)
+    window_width: 1200   # 肺窗寬度 (HU)
+    normalize_hounsfield: true
+    rescale_intensity: true
+  
+  # 影像預處理
+  preprocessing:
+    resize: [224, 224]
+    normalize_mean: [0.485, 0.456, 0.406]
+    normalize_std: [0.229, 0.224, 0.225]
+    to_rgb: true
+
+# 推理配置
+inference:
+  batch_size: 8
+  num_workers: 2
+  device: "auto"  # "auto", "cpu", "cuda"
+  mixed_precision: true
+
+# 類別標籤
+classes:
+  id2label:
+    0: "A"
+    1: "B" 
+    2: "E"
+    3: "G"
+  label2id:
+    "A": 0
+    "B": 1
+    "E": 2
+    "G": 3
+
+# 輸出配置
+output:
+  save_attention: false
+  save_probabilities: true
+  confidence_threshold: 0.5
+  formats: ["json", "csv", "txt"]
+
+# 路徑配置
+paths:
+  model_dir: "D:/GitHub/chest-ct-report-generator/CT_ViT_Training/models"
+  output_dir: "D:/GitHub/chest-ct-report-generator/datasets_process/results"
+  log_dir: "D:/GitHub/chest-ct-report-generator/datasets_process/logs"
+
+# 日誌配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "inference.log"

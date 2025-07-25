@@ -29,22 +29,16 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
-import pydicom
-import cv2
-from PIL import Image
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix, classification_report
 
-import transformers
-from transformers import ViTImageProcessor, ViTForImageClassification, ViTConfig
-from transformers import TrainingArguments, Trainer
-from transformers.trainer_utils import EvalPrediction
+from transformers import ViTImageProcessor, ViTForImageClassification
+from transformers import TrainingArguments
 
 # 導入自定義模組
 from config import CTViTConfig
@@ -157,7 +151,7 @@ class CTViTTrainingPipeline:
             weight_decay=self.config.weight_decay,
             warmup_steps=self.config.warmup_steps,
             logging_steps=self.config.logging_steps,
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             eval_steps=self.config.eval_steps,
             save_steps=self.config.save_steps,
             save_total_limit=3,
@@ -168,7 +162,7 @@ class CTViTTrainingPipeline:
             max_grad_norm=self.config.max_grad_norm,
             dataloader_num_workers=self.config.num_workers,
             remove_unused_columns=False,
-            report_to="tensorboard",
+            report_to="tensorboard",  # 只使用tensorboard，不使用wandb
             logging_dir=self.config.tensorboard_dir,
         )
         
@@ -222,12 +216,21 @@ class CTViTTrainingPipeline:
         y_true = predictions.label_ids
         y_pred = np.argmax(predictions.predictions, axis=1)
         
-        # 分類報告
-        class_names = ['A_series', 'B_series', 'E_series', 'G_series']
-        classification_rep = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
+        # 動態獲取實際存在的類別
+        unique_labels = sorted(list(set(y_true.tolist() + y_pred.tolist())))
+        class_names = [['A_series', 'B_series', 'E_series', 'G_series'][i] for i in unique_labels]
+        
+        # 分類報告 - 只針對實際存在的類別
+        classification_rep = classification_report(
+            y_true, y_pred, 
+            labels=unique_labels,
+            target_names=class_names, 
+            output_dict=True,
+            zero_division=0
+        )
         
         # 混淆矩陣
-        cm = confusion_matrix(y_true, y_pred)
+        cm = confusion_matrix(y_true, y_pred, labels=unique_labels)
         
         # 保存結果
         results = {

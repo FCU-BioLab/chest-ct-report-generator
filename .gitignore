@@ -1,3 +1,4 @@
+.DS_Store
 PDFs
 models
 extracted_texts
@@ -9,4 +10,6 @@ venv
 original_datasets
 matched_data_by_patient
 dataset_splits
+CT_ViT
+CT_ViT_Training/__pycache__
 CT_ViT_Training/src/__pycache__
