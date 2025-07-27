@@ -4,6 +4,15 @@ import shutil
 import json
 from datetime import datetime
 
+# 讀取 config 設定
+config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../config.json'))
+with open(config_path, 'r', encoding='utf-8') as f:
+    config = json.load(f)
+
+dicom_root = config['data']['dicom_root']
+xml_root = config['data']['xml_root']
+base_output_dir = config['data']['patient_data_dir']
+
 def create_directory_if_not_exists(path):
     """如果目錄不存在則創建"""
     if not os.path.exists(path):
@@ -19,7 +28,7 @@ def copy_patient_matched_files(patient_id):
     
     # DICOM文件搜索
     dcm_file = []
-    search_path = rf'D:\GitHub\chest-ct-report-generator\datasets\Lung-PET-CT-Dx\manifest-1608669183333\Lung-PET-CT-Dx\Lung_Dx-{patient_id}'
+    search_path = os.path.join(dicom_root, f'Lung_Dx-{patient_id}')
     
     if not os.path.exists(search_path):
         print(f"警告: 病例 {patient_id} 的DICOM資料夾不存在: {search_path}")
@@ -51,7 +60,7 @@ def copy_patient_matched_files(patient_id):
     
     # XML文件搜索
     xml_file = []
-    xml_search_path = rf'D:\GitHub\chest-ct-report-generator\datasets\Lung-PET-CT-Dx\Lung-PET-CT-Dx-Annotations-XML-Files-rev12222020\Annotation\{patient_id}'
+    xml_search_path = os.path.join(xml_root, patient_id)
     
     if not os.path.exists(xml_search_path):
         print(f"警告: 病例 {patient_id} 的XML標注資料夾不存在: {xml_search_path}")
@@ -96,7 +105,6 @@ def copy_patient_matched_files(patient_id):
         return None
     
     # === 創建目標目錄 ===
-    base_output_dir = r'D:\GitHub\chest-ct-report-generator\matched_data_by_patient'
     patient_output_dir = os.path.join(base_output_dir, patient_id)
     dcm_output_dir = os.path.join(patient_output_dir, 'dicom_files')
     xml_output_dir = os.path.join(patient_output_dir, 'xml_annotations')
@@ -219,10 +227,12 @@ def copy_patient_matched_files(patient_id):
 
 def copy_all_patients_matched_files():
     """處理所有病例的匹配文件"""
-    
     # 獲取所有可用的病例ID
-    patients_dir = r'D:\GitHub\chest-ct-report-generator\datasets\Lung-PET-CT-Dx\manifest-1608669183333\Lung-PET-CT-Dx'
+    patients_dir = dicom_root
     patient_ids = []
+    
+    base_output_dir = config['data']['patient_data_dir']
+    create_directory_if_not_exists(base_output_dir)
     
     if os.path.exists(patients_dir):
         for item in os.listdir(patients_dir):
@@ -233,12 +243,14 @@ def copy_all_patients_matched_files():
     patient_ids.sort()
     print(f"找到 {len(patient_ids)} 個病例: {patient_ids[:10]}..." if len(patient_ids) > 10 else f"找到 {len(patient_ids)} 個病例: {patient_ids}")
     
+    if len(patient_ids) == 0:
+        print("未找到任何病例，請確認 patients_dir 路徑及資料夾內容。")
+        return
+    
     # 處理所有病例
     results = []
     total_copied = 0
     total_errors = 0
-    
-    base_output_dir = r'D:\GitHub\chest-ct-report-generator\matched_data_by_patient'
     
     # 清除之前的總體統計
     summary_path = os.path.join(base_output_dir, 'all_patients_summary.txt')

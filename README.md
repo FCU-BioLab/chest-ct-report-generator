@@ -242,9 +242,9 @@ if dcm_uid == xml_uid:
 #### 完整資料處理流程
 ```
 原始資料集 (Lung-PET-CT-Dx)
-    ↓ copy_matched_files.py (DICOM-XML匹配)
+    ↓ copy_all_patients_matched_files.py (DICOM-XML匹配)
 配對數據 (matched_data_by_patient/)
-    ↓ dataset_splitter.py (智能分割)
+    ↓ dataset_splitter.py (分割訓練/驗證/測試)
 分割資料集 (dataset_splits/)
     ↓ data_processing.py (數據載入)
 PyTorch資料集 → CT-ViT訓練
