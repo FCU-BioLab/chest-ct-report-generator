@@ -19,6 +19,7 @@
     "patient_data_dir": "matched_data_by_patient",
     "dataset_splits_dir": "dataset_splits",
     "output_base_dir": "workflow_outputs",
+    "segmentation_result_dir": "E:/GitHub/chest-ct-report-generator/CT_ViT_Training/segmentation_result",
     "dicom_root": "E:/GitHub/chest-ct-report-generator/original_datasets/Lung-PET-CT-Dx/manifest-1608669183333/Lung-PET-CT-Dx",
     "xml_root": "E:/GitHub/chest-ct-report-generator/original_datasets/Lung-PET-CT-Dx/Lung-PET-CT-Dx-Annotations-XML-Files-rev12222020/Annotation"
   },

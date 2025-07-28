@@ -10,16 +10,24 @@ transformers>=4.30.0
 opencv-python>=4.8.0
 Pillow>=9.5.0
 pydicom>=2.4.0
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
+
+# Medical Image Processing
+SimpleITK>=2.2.0
+nibabel>=5.1.0
 
 # Data Science and Analysis
 numpy>=1.24.0
 pandas>=2.0.0
 scikit-learn>=1.3.0
+scipy>=1.10.0
+scikit-image>=0.21.0
 
 # Visualization and Monitoring
 matplotlib>=3.7.0
 seaborn>=0.12.0
 tensorboard>=2.13.0
+plotly>=5.15.0
 
 # ML Training and Fine-tuning
 datasets>=2.13.0
@@ -33,6 +41,8 @@ wandb>=0.15.0
 tqdm>=4.65.0
 pyyaml>=6.0
 colorlog>=6.7.0
+wget>=3.2
+gdown>=4.7.0
 
 # RAG and Embeddings
 faiss-cpu

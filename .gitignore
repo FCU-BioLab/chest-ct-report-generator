@@ -15,3 +15,4 @@ CT_ViT_Training/__pycache__
 CT_ViT_Training/src/__pycache__
 CT_ViT_Training/matched_data_by_patient
 CT_ViT_Training/all_patient_data
+CT_ViT_Training/segmentation_result

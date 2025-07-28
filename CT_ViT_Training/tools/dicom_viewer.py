@@ -64,12 +64,27 @@ def parse_xml_bboxes(xml_path):
 
 
 def load_dicom_volume(dicom_files):
-    """載入DICOM檔案並建構3D體積"""
+    """載入DICOM檔案並建構3D體積，處理不同尺寸的影像"""
     slices = []
+    valid_slices = []
+    
+    # 首先載入所有DICOM文件並檢查其格式
     for dicom_file in dicom_files:
         try:
             ds = pydicom.dcmread(str(dicom_file))
-            slices.append(ds)
+            pixel_array = ds.pixel_array
+            
+            # 檢查像素陣列的維度和形狀
+            if len(pixel_array.shape) == 2:  # 2D 灰階影像
+                slices.append((ds, pixel_array))
+            elif len(pixel_array.shape) == 3 and pixel_array.shape[2] == 3:  # 3D 彩色影像，轉為灰階
+                # 將RGB轉為灰階
+                gray_array = np.mean(pixel_array, axis=2).astype(pixel_array.dtype)
+                slices.append((ds, gray_array))
+            else:
+                print(f"跳過不支援的影像格式: {dicom_file.name}, 形狀: {pixel_array.shape}")
+                continue
+                
         except Exception as e:
             print(f"讀取DICOM檔案失敗 {dicom_file}: {e}")
             continue
@@ -77,36 +92,86 @@ def load_dicom_volume(dicom_files):
     if not slices:
         return None, None, None
     
+    # 找出最常見的影像尺寸
+    shape_counts = {}
+    for ds, pixel_array in slices:
+        shape = pixel_array.shape
+        shape_counts[shape] = shape_counts.get(shape, 0) + 1
+    
+    # 選擇最常見的尺寸作為標準尺寸
+    target_shape = max(shape_counts.keys(), key=lambda x: shape_counts[x])
+    print(f"目標影像尺寸: {target_shape} (共有 {shape_counts[target_shape]} 個切片)")
+    
+    # 只保留符合標準尺寸的切片，或將其他尺寸調整到標準尺寸
+    for ds, pixel_array in slices:
+        if pixel_array.shape == target_shape:
+            valid_slices.append((ds, pixel_array))
+        else:
+            # 嘗試調整尺寸到標準尺寖
+            try:
+                from scipy.ndimage import zoom
+                scale_factors = [target_shape[i] / pixel_array.shape[i] for i in range(2)]
+                resized_array = zoom(pixel_array, scale_factors, order=1)
+                valid_slices.append((ds, resized_array.astype(pixel_array.dtype)))
+                print(f"調整影像尺寸: {pixel_array.shape} -> {resized_array.shape}")
+            except ImportError:
+                # 如果沒有scipy，使用簡單的重複或裁剪
+                if pixel_array.shape[0] < target_shape[0] or pixel_array.shape[1] < target_shape[1]:
+                    # 使用填充
+                    padded_array = np.zeros(target_shape, dtype=pixel_array.dtype)
+                    padded_array[:pixel_array.shape[0], :pixel_array.shape[1]] = pixel_array
+                    valid_slices.append((ds, padded_array))
+                    print(f"填充影像尺寸: {pixel_array.shape} -> {target_shape}")
+                else:
+                    # 使用裁剪
+                    cropped_array = pixel_array[:target_shape[0], :target_shape[1]]
+                    valid_slices.append((ds, cropped_array))
+                    print(f"裁剪影像尺寸: {pixel_array.shape} -> {target_shape}")
+            except Exception as e:
+                print(f"無法調整影像尺寸 {pixel_array.shape} -> {target_shape}: {e}")
+                continue
+    
+    if not valid_slices:
+        print("沒有有效的切片")
+        return None, None, None
+    
+    print(f"成功處理 {len(valid_slices)} 個切片")
+    
     # 根據切片位置排序
     try:
-        slices.sort(key=lambda x: float(x.ImagePositionPatient[2]))
+        valid_slices.sort(key=lambda x: float(x[0].ImagePositionPatient[2]))
     except:
         try:
-            slices.sort(key=lambda x: int(x.InstanceNumber))
+            valid_slices.sort(key=lambda x: int(x[0].InstanceNumber))
         except:
             print("警告：無法確定切片順序")
     
     # 建構3D陣列
-    img_shape = list(slices[0].pixel_array.shape)
-    img_shape.append(len(slices))
+    dicom_slices = [ds for ds, _ in valid_slices]
+    pixel_arrays = [pixel_array for _, pixel_array in valid_slices]
+    
+    img_shape = list(target_shape)
+    img_shape.append(len(valid_slices))
     volume = np.zeros(img_shape, dtype=np.float32)
     
-    for i, s in enumerate(slices):
+    for i, pixel_array in enumerate(pixel_arrays):
         try:
-            volume[:, :, i] = s.pixel_array.astype(np.float32)
+            volume[:, :, i] = pixel_array.astype(np.float32)
         except Exception as e:
             print(f"載入切片 {i} 時發生錯誤: {e}")
             continue
     
     # 獲取像素間距
     try:
-        pixel_spacing = slices[0].PixelSpacing
-        slice_thickness = float(slices[0].SliceThickness) if hasattr(slices[0], 'SliceThickness') else 1.0
+        first_slice = dicom_slices[0]
+        pixel_spacing = first_slice.PixelSpacing
+        slice_thickness = float(first_slice.SliceThickness) if hasattr(first_slice, 'SliceThickness') else 1.0
         spacing = [pixel_spacing[0], pixel_spacing[1], slice_thickness]
     except:
         spacing = [1.0, 1.0, 1.0]
     
-    return volume, slices, spacing
+    print(f"3D體積建構完成，形狀: {volume.shape}")
+    return volume, dicom_slices, spacing
 
 
 def create_3d_viewer_window(patient_id, base_dir):
@@ -200,9 +265,11 @@ def setup_3d_gui(window, volume, slices, spacing, patient_id, xml_ann_dir, loadi
     
     show_bbox_var = tk.BooleanVar(value=True)
     tk.Checkbutton(option_frame, text="顯示標記框", variable=show_bbox_var).pack()
-    
     show_crosshair_var = tk.BooleanVar(value=True)
     tk.Checkbutton(option_frame, text="顯示十字線", variable=show_crosshair_var).pack()
+    
+    show_3d_bbox_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(option_frame, text="3D標記框", variable=show_3d_bbox_var).pack()
     
     # 建立圖形顯示區域
     fig = plt.figure(figsize=(15, 10))
@@ -228,7 +295,6 @@ def setup_3d_gui(window, volume, slices, spacing, patient_id, xml_ann_dir, loadi
         windowed = np.clip(image, img_min, img_max)
         windowed = (windowed - img_min) / (img_max - img_min)
         return windowed
-    
     def get_bboxes_for_slice(slice_idx):
         """獲取特定切片的bounding boxes"""
         if not xml_ann_dir or not xml_ann_dir.exists() or slice_idx >= len(slices):
@@ -244,6 +310,29 @@ def setup_3d_gui(window, volume, slices, spacing, patient_id, xml_ann_dir, loadi
             pass
         return []
     
+    def get_all_3d_bboxes():
+        """獲取所有切片的3D標記框資訊"""
+        all_bboxes = []
+        if not xml_ann_dir or not xml_ann_dir.exists():
+            return all_bboxes
+        
+        for z_idx, slice_obj in enumerate(slices):
+            try:
+                sop_uid = getattr(slice_obj, 'SOPInstanceUID', None)
+                if sop_uid:
+                    xml_file = xml_ann_dir / f"{sop_uid}.xml"
+                    if xml_file.exists():
+                        bboxes_2d = parse_xml_bboxes(str(xml_file))
+                        for bbox in bboxes_2d:
+                            xmin, ymin, xmax, ymax = bbox
+                            # 轉換為3D座標 (加入z軸資訊)
+                            all_bboxes.append({
+                                'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax,
+                                'z_idx': z_idx
+                            })
+            except:
+                continue
+        return all_bboxes
     def update_display(*args):
         axial_idx = axial_var.get()
         coronal_idx = coronal_var.get()
@@ -252,6 +341,7 @@ def setup_3d_gui(window, volume, slices, spacing, patient_id, xml_ann_dir, loadi
         wl = wl_var.get()
         show_bbox = show_bbox_var.get()
         show_crosshair = show_crosshair_var.get()
+        show_3d_bbox = show_3d_bbox_var.get()
         
         # 軸向切片
         ax1.clear()
@@ -296,8 +386,7 @@ def setup_3d_gui(window, volume, slices, spacing, patient_id, xml_ann_dir, loadi
             if show_crosshair:
                 ax3.axhline(axial_idx, color='yellow', linestyle='--', alpha=0.7, linewidth=1)
                 ax3.axvline(coronal_idx, color='red', linestyle='--', alpha=0.7, linewidth=1)
-        
-        # 3D體積渲染
+          # 3D體積渲染
         ax4.clear()
         try:
             step = 4
@@ -313,6 +402,25 @@ def setup_3d_gui(window, volume, slices, spacing, patient_id, xml_ann_dir, loadi
                 ax4.scatter(x_coords[mask] * step, y_coords[mask] * step, z_coords[mask] * step, 
                            c=sampled_volume[mask], cmap='bone', alpha=0.1, s=1)
             
+            # 顯示3D標記框
+            if show_3d_bbox:
+                all_bboxes = get_all_3d_bboxes()
+                for bbox in all_bboxes:
+                    xmin, ymin, xmax, ymax = bbox['xmin'], bbox['ymin'], bbox['xmax'], bbox['ymax']
+                    z_idx = bbox['z_idx']
+                    
+                    # 繪製3D標記框的邊線
+                    # 底面 (在z_idx層)
+                    ax4.plot([xmin, xmax], [ymin, ymin], [z_idx, z_idx], 'r-', linewidth=2, alpha=0.8)
+                    ax4.plot([xmax, xmax], [ymin, ymax], [z_idx, z_idx], 'r-', linewidth=2, alpha=0.8)
+                    ax4.plot([xmax, xmin], [ymax, ymax], [z_idx, z_idx], 'r-', linewidth=2, alpha=0.8)
+                    ax4.plot([xmin, xmin], [ymax, ymin], [z_idx, z_idx], 'r-', linewidth=2, alpha=0.8)
+                    
+                    # 添加標記點在標記框中心
+                    center_x = (xmin + xmax) / 2
+                    center_y = (ymin + ymax) / 2
+                    ax4.scatter([center_x], [center_y], [z_idx], c='red', s=50, alpha=0.9, marker='o')
+            
             ax4.set_title('3D體積渲染')
             ax4.set_xlim(0, volume.shape[0])
             ax4.set_ylim(0, volume.shape[1])
@@ -323,9 +431,8 @@ def setup_3d_gui(window, volume, slices, spacing, patient_id, xml_ann_dir, loadi
                     transform=ax4.transAxes, ha='center', va='center', fontsize=10)
         
         canvas.draw()
-    
-    # 綁定事件
-    for var in [axial_var, coronal_var, sagittal_var, ww_var, wl_var, show_bbox_var, show_crosshair_var]:
+      # 綁定事件
+    for var in [axial_var, coronal_var, sagittal_var, ww_var, wl_var, show_bbox_var, show_crosshair_var, show_3d_bbox_var]:
         var.trace('w', update_display)
     
     update_display()
