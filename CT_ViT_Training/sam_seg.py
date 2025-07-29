@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """
-MedSAM Segmentation with Spatial Alignment
-==========================================
+MedSAM/MedSAM2 Segmentation with Spatial Alignment
+=================================================
 
 Integrated and optimized MedSAM implementation for chest tumor segmentation
 with built-in spatial alignment verification and testing capabilities.
+
+Supports both:
+- MedSAM2: Advanced medical image segmentation model (recommended)
+- Original SAM: Hugging Face SAM models as fallback
+
+Usage:
+    # Use MedSAM2 (recommended)
+    python sam_seg.py --model medsam2 --config sam2_hiera_s
+    
+    # Use original SAM
+    python sam_seg.py --model facebook/sam-vit-huge
 """
 
 import sys
@@ -27,10 +38,20 @@ import matplotlib.pyplot as plt
 # PyTorch availability check
 try:
     import torch
-    from transformers import SamModel, SamProcessor
+    # MedSAM2 imports
+    from sam2_train.build_sam import build_sam2_video_predictor
+    from sam2_train.sam2_image_predictor import SAM2ImagePredictor
     TORCH_AVAILABLE = True
+    MEDSAM2_AVAILABLE = True
 except ImportError:
-    TORCH_AVAILABLE = False
+    try:
+        import torch
+        from transformers import SamModel, SamProcessor
+        TORCH_AVAILABLE = True
+        MEDSAM2_AVAILABLE = False
+    except ImportError:
+        TORCH_AVAILABLE = False
+        MEDSAM2_AVAILABLE = False
 
 
 def setup_logging(log_dir: str = "segmentation_result") -> logging.Logger:
@@ -42,7 +63,7 @@ def setup_logging(log_dir: str = "segmentation_result") -> logging.Logger:
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(str(log_path / "medsam_seg.log")),
+            logging.FileHandler(str(log_path / "medsam_seg.log"), encoding='utf-8'),
             logging.StreamHandler(sys.stdout)
         ]
     )
@@ -53,15 +74,23 @@ logger = setup_logging()
 
 
 class MedSAMSegmentator:
-    """Integrated MedSAM segmentation with spatial alignment verification"""
+    """Integrated MedSAM segmentation with spatial alignment verification - supports both SAM and MedSAM2"""
     
-    def __init__(self, data_dir: str = "all_patient_data", model_name: str = "facebook/sam-vit-huge"):
-        """Initialize MedSAM Segmentator"""
+    def __init__(self, data_dir: str = "all_patient_data", model_name: str = "medsam2", config_file: str = "sam2.1_hiera_t512.yaml"):
+        """Initialize MedSAM Segmentator
+        
+        Args:
+            data_dir: Directory containing patient data
+            model_name: Model type - "medsam2", "facebook/sam-vit-huge", or other SAM models
+            config_file: Configuration file for MedSAM2 (sam2_hiera_s, sam2_hiera_l, etc.)
+        """
         self.data_dir = Path(data_dir)
         self.segmentation_result_base = Path("segmentation_result")
         self.model_name = model_name
+        self.config_file = config_file
         self.model = None
         self.processor = None
+        self.predictor = None
         self.device = "cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu" if TORCH_AVAILABLE else None
         
         if TORCH_AVAILABLE:
@@ -69,20 +98,57 @@ class MedSAMSegmentator:
         else:
             logger.warning("PyTorch unavailable. Running in mock mode.")
         
-        logger.info(f"MedSAM initialized - Data: {self.data_dir}, Device: {self.device}")
+        logger.info(f"MedSAM initialized - Data: {self.data_dir}, Model: {self.model_name}, Device: {self.device}")
     
     def _load_model(self):
         """Load SAM model and processor"""
         try:
-            self.model = SamModel.from_pretrained(self.model_name)
-            self.processor = SamProcessor.from_pretrained(self.model_name)
-            if self.device:
-                self.model.to(self.device)
-            logger.info(f"Model loaded: {self.model_name}")
+            if self.model_name.startswith("medsam2") and MEDSAM2_AVAILABLE:
+                # Load MedSAM2 model
+                checkpoint_path = "MedSAM2/checkpoints/MedSAM2_latest.pt"  # Use the downloaded model
+                
+                # Reinitialize Hydra with the correct config path for MedSAM2
+                from hydra import initialize_config_dir
+                from hydra.core.global_hydra import GlobalHydra
+                import os
+                
+                # Clear existing Hydra instance
+                if GlobalHydra.instance().is_initialized():
+                    GlobalHydra.instance().clear()
+                
+                # Initialize with the MedSAM2 config directory
+                config_dir = os.path.abspath("MedSAM2/sam2/configs")
+                initialize_config_dir(config_dir=config_dir, version_base="1.2")
+                
+                # Use the config filename without extension
+                config_name = self.config_file.replace('.yaml', '')
+                
+                self.model = build_sam2_video_predictor(
+                    config_file=config_name,
+                    ckpt_path=checkpoint_path,
+                    device=self.device
+                )
+                self.predictor = SAM2ImagePredictor(sam_model=self.model)
+                logger.info(f"MedSAM2 model loaded: {config_name}")
+            elif not self.model_name.startswith("medsam2") and not MEDSAM2_AVAILABLE:
+                # Fallback to original SAM
+                from transformers import SamModel, SamProcessor
+                self.model = SamModel.from_pretrained(self.model_name)
+                self.processor = SamProcessor.from_pretrained(self.model_name)
+                if self.device:
+                    self.model.to(self.device)
+                logger.info(f"Original SAM model loaded: {self.model_name}")
+            else:
+                logger.warning("Model configuration mismatch. Using mock mode.")
+                self.model = None
+                self.processor = None
+                self.predictor = None
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
+            logger.info("Falling back to mock mode")
             self.model = None
             self.processor = None
+            self.predictor = None
     
     def get_patient_list(self) -> List[str]:
         """Get list of available patients"""
@@ -197,27 +263,57 @@ class MedSAMSegmentator:
             return None
     
     def segment_with_medsam(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
-        """Perform segmentation using MedSAM"""
-        if not TORCH_AVAILABLE or self.model is None:
+        """Perform segmentation using MedSAM (supports both SAM and MedSAM2)"""
+        if not TORCH_AVAILABLE or (self.model is None and self.predictor is None):
             return self._generate_mock_masks(image, bounding_boxes)
         
         try:
             masks = []
-            for bbox in bounding_boxes:
-                inputs = self.processor(image, input_boxes=[[bbox]], return_tensors="pt")
-                if self.device:
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            if self.predictor is not None:  # MedSAM2 path
+                # Convert image to RGB if grayscale
+                if len(image.shape) == 3 and image.shape[2] == 3:
+                    # Ensure image is in RGB format
+                    rgb_image = image
+                else:
+                    # Convert grayscale to RGB
+                    rgb_image = np.stack([image] * 3, axis=-1) if len(image.shape) == 2 else image
                 
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
+                # Set image for MedSAM2 predictor
+                self.predictor.set_image(rgb_image)
                 
-                mask = self.processor.image_processor.post_process_masks(
-                    outputs.pred_masks.cpu(),
-                    inputs["original_sizes"].cpu(),
-                    inputs["reshaped_input_sizes"].cpu()
-                )[0]
-                
-                masks.append((mask[0, 0].numpy() > 0.5).astype(np.uint8))
+                for bbox in bounding_boxes:
+                    # Convert bbox format: [xmin, ymin, xmax, ymax] -> [xmin, ymin, xmax, ymax]
+                    input_box = np.array(bbox)
+                    
+                    # Predict mask using MedSAM2
+                    masks_pred, scores, logits = self.predictor.predict(
+                        point_coords=None,
+                        point_labels=None,
+                        box=input_box[None, :],
+                        multimask_output=False,
+                    )
+                    
+                    # Take the first (and only) mask
+                    mask = masks_pred[0].astype(np.uint8)
+                    masks.append(mask)
+                    
+            else:  # Original SAM path
+                for bbox in bounding_boxes:
+                    inputs = self.processor(image, input_boxes=[[bbox]], return_tensors="pt")
+                    if self.device:
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                    
+                    with torch.no_grad():
+                        outputs = self.model(**inputs)
+                    
+                    mask = self.processor.image_processor.post_process_masks(
+                        outputs.pred_masks.cpu(),
+                        inputs["original_sizes"].cpu(),
+                        inputs["reshaped_input_sizes"].cpu()
+                    )[0]
+                    
+                    masks.append((mask[0, 0].numpy() > 0.5).astype(np.uint8))
             
             return masks
             
@@ -416,9 +512,9 @@ class MedSAMSegmentator:
             verification = AlignmentVerifier.verify_alignment(reference_path, str(nifti_path))
             alignment_verified = verification.get('aligned', False)
             if alignment_verified:
-                logger.info("✓ Spatial alignment verified - files should align perfectly in 3D Slicer!")
+                logger.info("[SUCCESS] Spatial alignment verified - files should align perfectly in 3D Slicer!")
             else:
-                logger.warning("⚠ Spatial alignment verification failed")
+                logger.warning("[WARNING] Spatial alignment verification failed")
         
         return {
             'status': 'success',
@@ -582,26 +678,27 @@ class AlignmentVerifier:
             print(f"Error: {results['error']}")
             return
         
-        print(f"Overall aligned: {'✓ YES' if results['aligned'] else '✗ NO'}")
-        print(f"Shapes match: {'✓' if results['shapes_match'] else '✗'}")
-        print(f"Affines match: {'✓' if results['affines_match'] else '✗'}")
-        print(f"Spacing match: {'✓' if results['spacing_match'] else '✗'}")
+        print(f"Overall aligned: {'[YES]' if results['aligned'] else '[NO]'}")
+        print(f"Shapes match: {'[YES]' if results['shapes_match'] else '[NO]'}")
+        print(f"Affines match: {'[YES]' if results['affines_match'] else '[NO]'}")
+        print(f"Spacing match: {'[YES]' if results['spacing_match'] else '[NO]'}")
         print(f"Origin distance: {results['origin_distance']:.3f} mm")
         print(f"Reference shape: {results['reference_shape']}")
         print(f"Segmentation shape: {results['segmentation_shape']}")
         
         if results['aligned']:
-            print("\n🎉 Files should align perfectly in 3D Slicer!")
+            print("\n[SUCCESS] Files should align perfectly in 3D Slicer!")
         else:
-            print("\n⚠️  Files may not align properly in 3D Slicer")
+            print("\n[WARNING] Files may not align properly in 3D Slicer")
 
 
-def test_spatial_alignment(patient_id: str = "A0001"):
+def test_spatial_alignment(patient_id: str = "A0001", model_name: str = "medsam2", config_file: str = "sam2.1_hiera_t512.yaml"):
     """Test spatial alignment for a patient"""
     print(f"Testing spatial alignment for patient: {patient_id}")
+    print(f"Using model: {model_name}")
     print("=" * 60)
     
-    segmentator = MedSAMSegmentator()
+    segmentator = MedSAMSegmentator(model_name=model_name, config_file=config_file)
     
     # 1. Create reference NIfTI
     print("\n1. Creating DICOM reference NIfTI...")
@@ -638,9 +735,13 @@ def test_spatial_alignment(patient_id: str = "A0001"):
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description="MedSAM Segmentation with Spatial Alignment")
+    parser = argparse.ArgumentParser(description="MedSAM Segmentation with Spatial Alignment (SAM/MedSAM2)")
     parser.add_argument("--patient_id", type=str, default="A0001", help="Patient ID to process")
     parser.add_argument("--data_dir", type=str, default="all_patient_data", help="Patient data directory")
+    parser.add_argument("--model", type=str, default="medsam2", 
+                       help="Model type: 'medsam2' for MedSAM2 or 'facebook/sam-vit-huge' for original SAM")
+    parser.add_argument("--config", type=str, default="sam2.1_hiera_t512.yaml", 
+                       help="MedSAM2 config: sam2.1_hiera_t512.yaml, efficientmedsam_s_512_FLARE_RECIST.yaml, etc.")
     parser.add_argument("--list_patients", action="store_true", help="List available patients")
     parser.add_argument("--test_alignment", action="store_true", help="Test spatial alignment")
     parser.add_argument("--create_reference", action="store_true", help="Create reference NIfTI only")
@@ -650,7 +751,7 @@ def main():
     
     args = parser.parse_args()
     
-    segmentator = MedSAMSegmentator(data_dir=args.data_dir)
+    segmentator = MedSAMSegmentator(data_dir=args.data_dir, model_name=args.model, config_file=args.config)
     
     if args.list_patients:
         patients = segmentator.get_patient_list()
@@ -658,7 +759,7 @@ def main():
         return
     
     if args.test_alignment:
-        test_spatial_alignment(args.patient_id)
+        test_spatial_alignment(args.patient_id, args.model, args.config)
         return
     
     if args.create_reference:
@@ -694,7 +795,7 @@ def main():
         if results.get('nifti_path'):
             print(f"Segmentation saved: {results['nifti_path']}")
         if results.get('alignment_verified'):
-            print("✓ Spatial alignment verified - ready for 3D Slicer!")
+            print("[SUCCESS] Spatial alignment verified - ready for 3D Slicer!")
     else:
         print(f"Processing failed: {results.get('message', 'Unknown error')}")
 
