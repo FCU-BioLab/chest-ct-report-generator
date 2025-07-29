@@ -1,214 +1,286 @@
-# MedSAM Demo for Chest Tumor Segmentation
+# MedSAM Segmentation with Spatial Alignment
 
-這個專案展示如何使用 MedSAM (Medical Segment Anything Model) 對 `all_patient_data` 中的胸腔腫瘤病例進行分割。
+整合並最佳化的 MedSAM 胸腔腫瘤分割系統，具備完整的空間對齊驗證功能，確保分割結果在 3D Slicer 中完美對齊。
 
-## 功能特色
+## ✨ 主要特色
 
-- 🏥 支援單一病例的腫瘤分割演示
-- 📊 批次處理多個病例
-- 🎯 基於 XML 標註的邊界框提示
-- 📈 視覺化分割結果
-- 📋 生成詳細的處理報告
+- � **智能分割**: 基於 MedSAM 的高精度腫瘤分割
+- � **空間對齊**: 完整的 DICOM 到 NIfTI 座標系統轉換
+- ✅ **自動驗證**: 內建空間對齊驗證機制
+- � **3D Slicer 相容**: 確保分割結果在 3D Slicer 中完美顯示
+- � **一站式工具**: 整合分割、驗證、測試於單一程式
+- � **模式切換**: PyTorch 不可用時自動切換到模擬模式
 
-## 檔案結構
+## 📁 檔案結構
 
 ```
 CT_ViT_Training/
-├── medsam_demo.py              # 主要的 MedSAM demo 類別
-├── run_medsam_example.py       # 使用範例腳本
-├── medsam_batch_processor.py   # 批次處理腳本
-├── medsam_requirements.txt     # 額外的依賴套件
-└── README_MedSAM.md           # 這個說明文件
+├── medsam_seg.py               # 🎯 整合的主程式 (新版本)
+├── medsam_demo.py              # 📋 原始版本 (已最佳化)
+├── test_spatial_alignment.py   # 🔧 空間對齊測試工具
+├── verify_alignment.py         # ✅ NIfTI 對齊驗證工具
+└── README_MedSAM.md           # 📖 本說明文件
 ```
 
-## 安裝依賴
+## 🛠️ 環境安裝
 
-1. 首先安裝基本依賴：
+### 1. 基本依賴
 ```bash
-pip install -r requirements.txt
+# 安裝核心依賴
+pip install numpy nibabel pydicom opencv-python matplotlib
+
+# 安裝 MedSAM 相關依賴 (可選，無則使用模擬模式)
+pip install torch transformers
 ```
 
-2. 安裝 MedSAM 相關依賴：
-```bash
-pip install -r medsam_requirements.txt
-```
-
-## 使用方法
-
-### 1. 簡單範例
-
-運行基本演示：
-```bash
-cd CT_ViT_Training
-python run_medsam_example.py
-```
-
-運行互動式演示：
-```bash
-python run_medsam_example.py --interactive
-```
-
-### 2. 單一病例處理
-
-使用命令行處理特定病例：
-```bash
-# 處理病例 A0001 的第 0 個切片
-python medsam_demo.py --patient_id A0001 --slice_index 0
-
-# 列出所有可用的病例
-python medsam_demo.py --list_patients
-
-# 處理病例 A0005 的第 10 個切片，不保存結果
-python medsam_demo.py --patient_id A0005 --slice_index 10 --no_save
-```
-
-### 3. 批次處理
-
-處理多個病例：
-```bash
-# 處理前 5 個病例
-python medsam_batch_processor.py --first_n 5
-
-# 處理指定的病例
-python medsam_batch_processor.py --patients A0001 A0002 A0003
-
-# 處理病例範圍
-python medsam_batch_processor.py --patient_range A0001-A0010
-
-# 每個病例處理 3 個切片
-python medsam_batch_processor.py --first_n 3 --slices_per_patient 3
-```
-
-## 程式架構
-
-### MedSAMDemo 類別
-
-核心功能類別，包含以下主要方法：
-
-- `load_patient_data()`: 載入病例資料
-- `load_dicom_image()`: 載入 DICOM 影像
-- `parse_xml_annotation()`: 解析 XML 標註
-- `segment_with_medsam()`: 使用 MedSAM 進行分割
-- `visualize_results()`: 視覺化結果
-- `demo_single_case()`: 單一病例演示
-
-### 資料格式
-
-程式支援以下資料結構：
+### 2. 數據目錄結構
 ```
 all_patient_data/
 ├── A0001/
-│   ├── dicom_files/           # DICOM 檔案
-│   ├── xml_annotations/       # XML 標註檔案
-│   ├── A0001_file_list.json   # 檔案清單
-│   └── ...
+│   ├── dicom/                 # DICOM 檔案目錄
+│   │   ├── slice001.dcm
+│   │   └── slice002.dcm
+│   └── xml/                   # XML 標註目錄
+│       ├── annotation001.xml
+│       └── annotation002.xml
 ├── A0002/
 └── ...
 ```
 
-## 輸出結果
+## 🚀 使用方法
 
-### 視覺化輸出
+### 基本命令
 
-程式會生成包含三個子圖的視覺化結果：
-1. 原始影像
-2. 帶邊界框標註的影像
-3. MedSAM 分割結果
+```bash
+# 列出所有可用病例
+python medsam_seg.py --list_patients
 
-### 批次處理結果
+# 處理單一病例 (預設行為)
+python medsam_seg.py --patient_id A0001
 
-批次處理會在 `medsam_results/` 目錄下生成：
-```
-medsam_results/
-├── visualizations/            # 視覺化圖片
-│   ├── A0001_slice000_segmentation.png
-│   └── ...
-└── reports/                   # 報告檔案
-    ├── medsam_batch_results_YYYYMMDD_HHMMSS.json
-    ├── medsam_batch_results_YYYYMMDD_HHMMSS.csv
-    └── medsam_batch_results_YYYYMMDD_HHMMSS_summary.json
+# 完整的空間對齊測試
+python medsam_seg.py --test_alignment --patient_id A0001
+
+# 只創建 DICOM 參考 NIfTI
+python medsam_seg.py --create_reference --patient_id A0001
+
+# 驗證兩個 NIfTI 檔案的空間對齊
+python medsam_seg.py --verify_alignment reference.nii.gz segmentation.nii.gz
 ```
 
-## 配置選項
+### 進階選項
 
-### 模型配置
+```bash
+# 指定數據目錄
+python medsam_seg.py --data_dir /path/to/patient/data --patient_id A0001
 
-默認使用 `facebook/sam-vit-huge` 模型，可以通過以下方式修改：
+# 完整工作流程示例
+python medsam_seg.py --test_alignment --patient_id A0001 --data_dir all_patient_data
+```
+
+## 📊 核心功能
+
+### 1. MedSAMSegmentator 類別
+
+主要的分割處理類別，包含：
+
+- **`load_patient_data()`**: 載入 DICOM 和 XML 檔案
+- **`segment_with_medsam()`**: 執行 MedSAM 分割 (支援模擬模式)
+- **`create_3d_mask_volume()`**: 創建空間對齊的 3D 分割體積
+- **`save_masks_as_nifti()`**: 儲存為 3D Slicer 相容的 NIfTI 格式
+- **`create_reference_nifti()`**: 創建 DICOM 參考 NIfTI 檔案
+
+### 2. AlignmentVerifier 類別
+
+專門的空間對齊驗證工具：
+
+- **`verify_alignment()`**: 比較兩個 NIfTI 檔案的空間屬性
+- **`print_verification_results()`**: 輸出易讀的驗證報告
+
+### 3. test_spatial_alignment() 函數
+
+整合的測試工作流程：
+1. 創建 DICOM 參考 NIfTI
+2. 執行 MedSAM 分割
+3. 自動驗證空間對齊
+4. 提供 3D Slicer 使用指導
+
+## 📈 輸出結果
+
+### 1. 分割結果
+
+```
+segmentation_result/
+├── A0001/
+│   ├── segmentation_20250729_120000.nii.gz    # 分割遮罩
+│   ├── reference_20250729_120000.nii.gz       # DICOM 參考
+│   └── medsam_seg.log                          # 處理日誌
+└── ...
+```
+
+### 2. 空間對齊驗證報告
+
+```
+Spatial Alignment Verification
+==================================================
+Overall aligned: ✓ YES
+Shapes match: ✓
+Affines match: ✓
+Spacing match: ✓
+Origin distance: 0.000 mm
+Reference shape: (512, 512, 20)
+Segmentation shape: (512, 512, 20)
+
+🎉 Files should align perfectly in 3D Slicer!
+```
+
+## 🔧 技術特點
+
+### 空間對齊修復
+
+- **座標系統轉換**: 正確處理 DICOM RAS+ 到 NIfTI LPS+ 轉換
+- **仿射矩陣計算**: 精確的空間變換矩陣
+- **體素排序**: 按空間位置正確排序切片
+- **體積轉置**: 正確的軸向轉換 (z,y,x) → (x,y,z)
+
+### 智能模式切換
+
 ```python
-demo = MedSAMDemo(model_name="facebook/sam-vit-base")
+# 自動檢測 PyTorch 可用性
+if TORCH_AVAILABLE:
+    # 使用真實的 MedSAM 模型
+    masks = segment_with_medsam(image, bboxes)
+else:
+    # 自動切換到模擬模式
+    masks = generate_mock_masks(image, bboxes)
 ```
 
-### 支援的模型
+### 強健的錯誤處理
 
-- `facebook/sam-vit-huge` (默認，最佳效果)
-- `facebook/sam-vit-large`
-- `facebook/sam-vit-base` (最快速度)
+- 完整的異常捕獲和日誌記錄
+- 優雅的降級處理
+- 詳細的錯誤信息和解決建議
 
-## 注意事項
+## 📋 完整工作流程示例
 
-1. **GPU 支援**: 程式會自動檢測 CUDA 並使用 GPU 加速（如果可用）
-2. **記憶體需求**: SAM 模型需要較多記憶體，建議至少 8GB RAM
-3. **模型下載**: 首次運行時會自動下載 SAM 模型檔案
-4. **標註格式**: 支援 Pascal VOC XML 格式的邊界框標註
+```bash
+# 1. 查看可用病例
+python medsam_seg.py --list_patients
 
-## 故障排除
+# 2. 執行完整的空間對齊測試
+python medsam_seg.py --test_alignment --patient_id A0001
+
+# 3. 在 3D Slicer 中驗證結果
+# 載入 segmentation_result/A0001/ 中的兩個 .nii.gz 檔案
+# 它們應該完美對齊
+```
+
+輸出範例：
+```
+Testing spatial alignment for patient: A0001
+============================================================
+
+1. Creating DICOM reference NIfTI...
+   Reference created: reference_20250729_120000.nii.gz
+
+2. Processing segmentation...
+   Segmentation created: segmentation_20250729_120000.nii.gz
+   Processed 15 slices
+
+3. Verifying spatial alignment...
+Spatial Alignment Verification
+==================================================
+Overall aligned: ✓ YES
+Shapes match: ✓
+Affines match: ✓
+Spacing match: ✓
+Origin distance: 0.000 mm
+
+🎉 Files should align perfectly in 3D Slicer!
+
+3D Slicer Instructions:
+1. Load both NIfTI files
+2. Use 'Volumes' module to overlay them
+3. Adjust opacity to see alignment
+```
+
+## 🆚 版本對比
+
+| 功能 | 舊版本 (medsam_demo.py) | 新版本 (medsam_seg.py) |
+|------|----------------------|----------------------|
+| 程式碼行數 | ~1400 行 | ~660 行 |
+| 檔案數量 | 3 個分散檔案 | 1 個整合檔案 |
+| 空間對齊 | ✅ 已修復 | ✅ 完整整合 |
+| 對齊驗證 | 需要分別執行 | ✅ 內建自動驗證 |
+| 測試工具 | 分散在多個檔案 | ✅ 統一介面 |
+| 模擬模式 | 基本支援 | ✅ 完整的降級機制 |
+
+## 🔍 故障排除
 
 ### 常見問題
 
-1. **找不到病例資料**
-   - 檢查 `all_patient_data` 目錄是否存在
-   - 確認病例 ID 格式正確（如 A0001）
+1. **找不到病例數據**
+   ```bash
+   # 檢查數據目錄結構是否正確
+   python medsam_seg.py --list_patients --data_dir your_data_path
+   ```
 
-2. **模型載入失敗**
-   - 檢查網路連接（需要下載模型）
-   - 確認 PyTorch 和 transformers 版本兼容
+2. **PyTorch 相關錯誤**
+   - 程式會自動切換到模擬模式，不影響空間對齊測試
 
-3. **記憶體不足**
-   - 嘗試使用較小的模型（如 sam-vit-base）
-   - 減少批次處理的病例數量
+3. **空間對齊驗證失敗**
+   ```bash
+   # 使用驗證工具詳細檢查
+   python medsam_seg.py --verify_alignment ref.nii.gz seg.nii.gz
+   ```
 
-### 調試模式
+### 調試選項
 
-啟用詳細日誌：
 ```python
+# 在程式中啟用詳細日誌
 import logging
 logging.getLogger().setLevel(logging.DEBUG)
 ```
 
-## 範例輸出
+## 📄 授權
 
+本專案遵循原專案授權條款。MedSAM 模型遵循 Apache 2.0 授權。
+
+---
+
+**💡 提示**: 新的 `medsam_seg.py` 是推薦使用的版本，它整合了所有功能並提供更好的使用體驗！
+
+## 🔍 故障排除
+
+### 常見問題
+
+1. **找不到病例數據**
+   ```bash
+   # 檢查數據目錄結構是否正確
+   python medsam_seg.py --list_patients --data_dir your_data_path
+   ```
+
+2. **PyTorch 相關錯誤**
+   - 程式會自動切換到模擬模式，不影響空間對齊測試
+
+3. **空間對齊驗證失敗**
+   ```bash
+   # 使用驗證工具詳細檢查
+   python medsam_seg.py --verify_alignment ref.nii.gz seg.nii.gz
+   ```
+
+### 調試選項
+
+```python
+# 在程式中啟用詳細日誌
+import logging
+logging.getLogger().setLevel(logging.DEBUG)
 ```
-🏥 MedSAM Demo for Chest Tumor Segmentation
-==================================================
 
-📊 Found 119 patients in the dataset
+## 📄 授權
 
-👥 Available patients (first 10):
-  1. A0001
-  2. A0002
-  3. A0003
-  ...
+本專案遵循原專案授權條款。MedSAM 模型遵循 Apache 2.0 授權。
 
-🎯 Selected patient for demo: A0001
+---
 
-📁 Patient data summary:
-  - DICOM files: 20
-  - Annotations: 20
-
-🔍 Running MedSAM demo on slice 10...
-
-✅ Demo completed successfully!
-  - Patient: A0001
-  - Slice: 10
-  - Image shape: (512, 512, 3)
-  - Tumors detected: 1
-  - Masks generated: 1
-  - Visualization saved: medsam_demo_A0001_slice10_20250728_143022.png
-
-📋 Tumor annotations found:
-  1. Type: A, BBox: (286, 310) -> (355, 402)
-```
-
-## 授權
-
-本專案遵循原專案的授權條款。SAM 模型遵循 Apache 2.0 授權。
+**💡 提示**: 新的 `medsam_seg.py` 是推薦使用的版本，它整合了所有功能並提供更好的使用體驗！
