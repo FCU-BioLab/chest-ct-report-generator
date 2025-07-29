@@ -343,18 +343,29 @@ class MedSAMSegmentator:
             spacing = metadata.get('spacing', (1.0, 1.0, 1.0))
             
             # DICOM orientation vectors
-            row_cosines = image_orientation[:3]
-            col_cosines = image_orientation[3:6]
+            row_cosines = image_orientation[:3]  # Image row direction (j direction)
+            col_cosines = image_orientation[3:6]  # Image column direction (i direction)
             
-            # Calculate normal vector
+            # Calculate normal vector (k direction)
             normal_vector = np.cross(row_cosines, col_cosines)
             normal_vector = normal_vector / np.linalg.norm(normal_vector) if np.linalg.norm(normal_vector) > 0 else normal_vector
             
-            # Build direction matrix
+            # For NIfTI format after transpose from (z,y,x) to (x,y,z):
+            # - First column (X): corresponds to original column direction (i) with x-spacing
+            # - Second column (Y): corresponds to original row direction (j) with y-spacing  
+            # - Third column (Z): corresponds to slice direction (k) with z-spacing
+            # 
+            # Note: spacing = (z_spacing, y_spacing, x_spacing) from metadata
+            # But we need (x_spacing, y_spacing, z_spacing) for NIfTI
+            x_spacing = spacing[2] if len(spacing) > 2 else spacing[1]  # pixel_spacing[1] -> x
+            y_spacing = spacing[1]  # pixel_spacing[0] -> y  
+            z_spacing = spacing[0]  # slice spacing -> z
+            
+            # Build direction matrix for NIfTI (after transpose)
             direction_matrix = np.column_stack([
-                col_cosines * spacing[1],
-                row_cosines * spacing[0],
-                normal_vector * spacing[2]
+                col_cosines * x_spacing,    # X direction
+                row_cosines * y_spacing,    # Y direction  
+                normal_vector * z_spacing   # Z direction
             ])
             
             # Create 4x4 affine matrix
