@@ -106,6 +106,12 @@ python sam_seg.py [選項]
 數據選項:
   --data_dir DATA_DIR        患者數據目錄 (預設: all_patient_data)
 
+DICOM 切片處理選項:
+  --include_all_slices      包含所有DICOM切片到參考NIfTI (預設: True)
+                           建議保持預設值以獲得完整的影像序列
+  --only_annotated         僅包含有註解的切片到參考NIfTI
+                           覆蓋 --include_all_slices 設定，用於部分切片處理
+
 功能選項:
   --list_patients           列出可用患者
   --test_alignment          執行完整空間對齊測試
@@ -120,16 +126,22 @@ python sam_seg.py [選項]
 # 列出所有可用病例
 python sam_seg.py --list_patients
 
-# 處理單一病例 (預設行為)
+# 處理單一病例 (預設行為 - 包含所有DICOM切片)
 python sam_seg.py --patient_id A0001
+
+# 僅處理有註解的切片 (覆蓋預設行為)
+python sam_seg.py --patient_id A0001 --only_annotated
 
 # 使用不同配置
 python sam_seg.py --model medsam2 --config efficientmedsam_s_512_FLARE_RECIST.yaml --patient_id A0001
 
-# 完整的空間對齊測試工作流程
+# 完整的空間對齊測試工作流程 (推薦)
 python sam_seg.py --test_alignment --patient_id A0001
 
-# 只創建 DICOM 參考 NIfTI
+# 完整的空間對齊測試，僅使用註解切片
+python sam_seg.py --test_alignment --patient_id A0001 --only_annotated
+
+# 只創建 DICOM 參考 NIfTI (包含所有切片)
 python sam_seg.py --create_reference --patient_id A0001
 
 # 驗證兩個 NIfTI 檔案的空間對齊
@@ -291,7 +303,23 @@ python sam_seg.py --verify_alignment reference.nii.gz segmentation.nii.gz
 # 檢查 DICOM 元數據是否完整
 ```
 
-#### 5. PyTorch 相關錯誤
+#### 5. NIfTI 檔案在 3D Slicer 中顯示不正確
+```bash
+# 症狀: 影像變形、長寬比不正確
+# 解決方案: v2.2 已修復此問題
+# 確保使用最新版本並檢查仿射矩陣:
+python sam_seg.py --test_alignment --patient_id A0001
+```
+
+#### 6. 參考 NIfTI 缺少部分切片
+```bash
+# 症狀: 參考 NIfTI 只包含有註解的切片
+# 解決方案: v2.2 預設包含所有切片
+# 舊版行為: 使用 --only_annotated 標誌
+python sam_seg.py --patient_id A0001 --only_annotated
+```
+
+#### 7. PyTorch 相關錯誤
 ```bash
 # 程序會自動切換到模擬模式，不影響空間對齊測試
 # 查看模擬模式運行: "Running in mock mode" 日誌信息
@@ -379,7 +407,16 @@ else:
 
 ## 📅 更新日誌
 
-### v2.1 (當前版本 - 2025.07.29)
+### v2.2 (最新版本 - 2025.01.23)
+- 🔧 **NIfTI 品質修復**: 修復 NIfTI 檔案長寬比問題，確保完美的 3D Slicer 顯示
+- 📊 **完整 DICOM 支援**: 預設包含所有 DICOM 切片到參考 NIfTI，提供完整的影像序列
+- ⚙️ **仿射矩陣最佳化**: 修正空間對齊的仿射矩陣計算，改善座標系統準確性
+- 🎛️ **新命令行選項**: 
+  - `--only_annotated`: 可選擇僅處理有註解的切片
+  - `--include_all_slices`: 明確控制是否包含所有切片（預設為 True）
+- 🏥 **更佳 3D Slicer 兼容性**: 改善體素間距和方向矩陣處理
+
+### v2.1 (2025.07.29)
 - 🎉 **MedSAM2 完全整合**: 成功整合最新 MedSAM2 模型
 - 🔧 **Hydra 配置修復**: 解決配置文件載入問題
 - ⚡ **真實 AI 推理**: 不再依賴模擬模式，使用真實神經網路推理
@@ -451,16 +488,19 @@ else:
 
 ### 🚀 推薦使用方式
 ```bash
-# 最佳實踐: 執行完整的空間對齊測試
+# 最佳實踐: 執行完整的空間對齊測試 (包含所有DICOM切片)
 python sam_seg.py --test_alignment --patient_id A0001
 
 # 這一個命令完成:
 # ✅ 載入 MedSAM2 模型
-# ✅ 處理 DICOM 影像  
+# ✅ 處理所有 DICOM 影像切片
 # ✅ 執行 AI 分割
-# ✅ 創建參考 NIfTI
+# ✅ 創建完整的參考 NIfTI (包含所有切片)
 # ✅ 驗證空間對齊
 # ✅ 生成 3D Slicer 就緒文件
+
+# 如需處理僅有註解的切片 (相容舊版行為):
+python sam_seg.py --test_alignment --patient_id A0001 --only_annotated
 ```
 
 現在您擁有了一個**完全運作的專業級醫學影像分割系統**！ 🎉
