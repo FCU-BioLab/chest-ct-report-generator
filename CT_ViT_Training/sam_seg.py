@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-MedSAM/MedSAM2 Segmentation with Spatial Alignment
-=================================================
+MedSAM2 Segmentation for Chest Tumor
+===================================
 
-Optimized MedSAM implementation for chest tumor segmentation.
+Simplified MedSAM2 implementation for chest tumor segmentation.
 
 Usage:
-    python sam_seg.py --model medsam2 --patient_id A0001
-    python sam_seg.py --model facebook/sam-vit-huge --patient_id A0001
+    python sam_seg.py --patient_id A0001  # Process specific patient
+    python sam_seg.py                      # Process all patients
 """
 
 import sys
@@ -28,17 +28,9 @@ try:
     import torch
     from sam2_train.build_sam import build_sam2_video_predictor
     from sam2_train.sam2_image_predictor import SAM2ImagePredictor
-    TORCH_AVAILABLE = True
     MEDSAM2_AVAILABLE = True
 except ImportError:
-    try:
-        import torch
-        from transformers import SamModel, SamProcessor
-        TORCH_AVAILABLE = True
-        MEDSAM2_AVAILABLE = False
-    except ImportError:
-        TORCH_AVAILABLE = False
-        MEDSAM2_AVAILABLE = False
+    MEDSAM2_AVAILABLE = False
 
 
 def setup_logging(log_dir: str = "segmentation_result") -> logging.Logger:
@@ -61,61 +53,48 @@ logger = setup_logging()
 
 
 class MedSAMSegmentator:
-    """Optimized MedSAM segmentation with spatial alignment"""
+    """Simplified MedSAM2 segmentation"""
     
-    def __init__(self, data_dir: str = "all_patient_data", model_name: str = "medsam2", 
-                 config_file: str = "sam2.1_hiera_t512.yaml"):
+    def __init__(self, data_dir: str = "all_patient_data", config_file: str = "sam2.1_hiera_t512.yaml"):
         self.data_dir = Path(data_dir)
         self.segmentation_result_base = Path("segmentation_result")
-        self.model_name = model_name
         self.config_file = config_file
         self.model = None
-        self.processor = None
         self.predictor = None
-        self.device = "cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu" if TORCH_AVAILABLE else None
+        self.device = "cuda" if MEDSAM2_AVAILABLE and torch.cuda.is_available() else "cpu" if MEDSAM2_AVAILABLE else None
         
-        if TORCH_AVAILABLE:
-            self._load_model()
+        if MEDSAM2_AVAILABLE:
+            self._load_medsam2()
         else:
-            logger.warning("PyTorch unavailable. Running in mock mode.")
+            logger.warning("MedSAM2 unavailable. Running in mock mode.")
         
-        logger.info(f"MedSAM initialized - Model: {self.model_name}, Device: {self.device}")
+        logger.info(f"MedSAM2 initialized - Device: {self.device}")
     
-    def _load_model(self):
-        """Load SAM model"""
+    def _load_medsam2(self):
+        """Load MedSAM2 model"""
         try:
-            if self.model_name.startswith("medsam2") and MEDSAM2_AVAILABLE:
-                checkpoint_path = "MedSAM2/checkpoints/MedSAM2_latest.pt"
-                
-                from hydra import initialize_config_dir
-                from hydra.core.global_hydra import GlobalHydra
-                import os
-                
-                if GlobalHydra.instance().is_initialized():
-                    GlobalHydra.instance().clear()
-                
-                config_dir = os.path.abspath("MedSAM2/sam2/configs")
-                initialize_config_dir(config_dir=config_dir, version_base="1.2")
-                config_name = self.config_file.replace('.yaml', '')
-                
-                self.model = build_sam2_video_predictor(
-                    config_file=config_name, ckpt_path=checkpoint_path, device=self.device
-                )
-                self.predictor = SAM2ImagePredictor(sam_model=self.model)
-                logger.info(f"MedSAM2 loaded: {config_name}")
-                
-            elif not self.model_name.startswith("medsam2"):
-                from transformers import SamModel, SamProcessor
-                self.model = SamModel.from_pretrained(self.model_name)
-                self.processor = SamProcessor.from_pretrained(self.model_name)
-                if self.device:
-                    self.model.to(self.device)
-                logger.info(f"SAM loaded: {self.model_name}")
-                
+            checkpoint_path = "MedSAM2/checkpoints/MedSAM2_latest.pt"
+            
+            from hydra import initialize_config_dir
+            from hydra.core.global_hydra import GlobalHydra
+            import os
+            
+            if GlobalHydra.instance().is_initialized():
+                GlobalHydra.instance().clear()
+            
+            config_dir = os.path.abspath("MedSAM2/sam2/configs")
+            initialize_config_dir(config_dir=config_dir, version_base="1.2")
+            config_name = self.config_file.replace('.yaml', '')
+            
+            self.model = build_sam2_video_predictor(
+                config_file=config_name, ckpt_path=checkpoint_path, device=self.device
+            )
+            self.predictor = SAM2ImagePredictor(sam_model=self.model)
+            logger.info(f"MedSAM2 loaded: {config_name}")
+            
         except Exception as e:
-            logger.error(f"Model loading failed: {e}. Using mock mode.")
+            logger.error(f"MedSAM2 loading failed: {e}. Using mock mode.")
             self.model = None
-            self.processor = None
             self.predictor = None
     
     def get_patient_list(self) -> List[str]:
@@ -223,43 +202,27 @@ class MedSAMSegmentator:
             logger.error(f"Failed to find annotation for {dicom_path}: {e}")
             return None
     
-    def segment_with_medsam(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
-        """Perform segmentation using MedSAM"""
-        if not TORCH_AVAILABLE or (self.model is None and self.predictor is None):
+    def segment_with_medsam2(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
+        """Perform segmentation using MedSAM2"""
+        if not MEDSAM2_AVAILABLE or self.predictor is None:
             return self._generate_mock_masks(image, bounding_boxes)
         
         try:
             masks = []
+            rgb_image = image if len(image.shape) == 3 else np.stack([image] * 3, axis=-1)
+            self.predictor.set_image(rgb_image)
             
-            if self.predictor is not None:  # MedSAM2
-                rgb_image = image if len(image.shape) == 3 else np.stack([image] * 3, axis=-1)
-                self.predictor.set_image(rgb_image)
-                
-                for bbox in bounding_boxes:
-                    input_box = np.array(bbox)
-                    masks_pred, scores, logits = self.predictor.predict(
-                        point_coords=None, point_labels=None, box=input_box[None, :], multimask_output=False
-                    )
-                    masks.append(masks_pred[0].astype(np.uint8))
-                    
-            else:  # Original SAM
-                for bbox in bounding_boxes:
-                    inputs = self.processor(image, input_boxes=[[bbox]], return_tensors="pt")
-                    if self.device:
-                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                    
-                    with torch.no_grad():
-                        outputs = self.model(**inputs)
-                    
-                    mask = self.processor.image_processor.post_process_masks(
-                        outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu()
-                    )[0]
-                    masks.append((mask[0, 0].numpy() > 0.5).astype(np.uint8))
+            for bbox in bounding_boxes:
+                input_box = np.array(bbox)
+                masks_pred, scores, logits = self.predictor.predict(
+                    point_coords=None, point_labels=None, box=input_box[None, :], multimask_output=False
+                )
+                masks.append(masks_pred[0].astype(np.uint8))
             
             return masks
             
         except Exception as e:
-            logger.error(f"Segmentation failed: {e}")
+            logger.error(f"MedSAM2 segmentation failed: {e}")
             return self._generate_mock_masks(image, bounding_boxes)
     
     def _generate_mock_masks(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
@@ -381,81 +344,6 @@ class MedSAMSegmentator:
         
         return volume_3d, volume_metadata
     
-    def process_patient(self, patient_id: str, save_results: bool = True, create_reference: bool = True) -> Dict:
-        """Process a patient with MedSAM segmentation"""
-        logger.info(f"Processing patient: {patient_id}")
-        
-        # Load patient data
-        patient_data = self.load_patient_data(patient_id)
-        if not patient_data or not patient_data['dicom_files']:
-            return {'status': 'error', 'message': 'No patient data found'}
-        
-        # Create reference NIfTI if requested
-        reference_path = None
-        if create_reference and save_results:
-            logger.info("Creating DICOM reference NIfTI...")
-            reference_path = self.create_reference_nifti(patient_id)
-            if reference_path:
-                logger.info(f"Reference NIfTI created: {Path(reference_path).name}")
-        
-        # Process annotated slices
-        slice_results = []
-        for dicom_path in patient_data['dicom_files']:
-            xml_path = self.find_matching_annotation(dicom_path, patient_data['xml_files'])
-            if not xml_path:
-                continue
-            
-            image, metadata = self.load_dicom_image(dicom_path)
-            annotations = self.parse_xml_annotation(xml_path)
-            
-            if image is None or not annotations:
-                continue
-            
-            # Perform segmentation
-            bounding_boxes = [ann['bbox'] for ann in annotations]
-            masks = self.segment_with_medsam(image, bounding_boxes)
-            
-            slice_results.append({
-                'dicom_file': dicom_path.name,
-                'xml_file': xml_path.name,
-                'metadata': metadata,
-                'annotations': annotations,
-                'masks': masks
-            })
-        
-        if not slice_results:
-            return {'status': 'error', 'message': 'No annotated slices found'}
-        
-        # Create and save 3D volume
-        volume_3d, volume_metadata = self.create_3d_mask_volume(slice_results)
-        nifti_path = None
-        
-        if save_results and volume_3d.size > 0:
-            output_dir = self.segmentation_result_base / patient_id
-            output_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            nifti_path = output_dir / f"segmentation_{timestamp}.nii.gz"
-            self.save_masks_as_nifti(volume_3d, str(nifti_path), volume_metadata)
-        
-        # Verify alignment
-        alignment_verified = False
-        if reference_path and nifti_path:
-            logger.info("Verifying spatial alignment...")
-            verification = AlignmentVerifier.verify_alignment(reference_path, str(nifti_path))
-            alignment_verified = verification.get('aligned', False)
-            logger.info(f"Alignment verified: {alignment_verified}")
-        
-        return {
-            'status': 'success',
-            'patient_id': patient_id,
-            'processed_slices': len(slice_results),
-            'slice_results': slice_results,
-            'volume_shape': volume_3d.shape if volume_3d.size > 0 else None,
-            'nifti_path': str(nifti_path) if nifti_path else None,
-            'reference_path': reference_path,
-            'alignment_verified': alignment_verified
-        }
-    
     def create_reference_nifti(self, patient_id: str) -> Optional[str]:
         """Create reference NIfTI file from DICOM images"""
         logger.info(f"Creating reference NIfTI for patient {patient_id}")
@@ -531,176 +419,171 @@ class MedSAMSegmentator:
         except Exception as e:
             logger.error(f"Failed to save reference NIfTI: {e}")
             return None
-
-
-class AlignmentVerifier:
-    """Verify spatial alignment between NIfTI files"""
     
-    @staticmethod
-    def verify_alignment(reference_path: str, segmentation_path: str) -> Dict:
-        """Verify spatial alignment between two NIfTI files"""
-        try:
-            ref_img = nib.load(reference_path)
-            seg_img = nib.load(segmentation_path)
-            
-            # Compare key properties
-            shapes_match = ref_img.shape == seg_img.shape
-            affine_diff = np.abs(ref_img.affine - seg_img.affine)
-            max_affine_diff = np.max(affine_diff)
-            affines_match = max_affine_diff < 1e-3
-            
-            # Compare voxel spacing
-            ref_pixdim = ref_img.header['pixdim'][1:4]
-            seg_pixdim = seg_img.header['pixdim'][1:4]
-            spacing_diff = np.abs(ref_pixdim - seg_pixdim)
-            max_spacing_diff = np.max(spacing_diff)
-            spacing_match = max_spacing_diff < 1e-3
-            
-            overall_aligned = shapes_match and affines_match and spacing_match
-            
-            return {
-                'aligned': overall_aligned,
-                'shapes_match': shapes_match,
-                'affines_match': affines_match,
-                'spacing_match': spacing_match,
-                'max_affine_diff': float(max_affine_diff),
-                'max_spacing_diff': float(max_spacing_diff),
-                'reference_shape': ref_img.shape,
-                'segmentation_shape': seg_img.shape
-            }
-            
-        except Exception as e:
-            logger.error(f"Alignment verification failed: {e}")
-            return {'aligned': False, 'error': str(e)}
-    
-    @staticmethod
-    def print_verification_results(results: Dict):
-        """Print verification results"""
-        print("Spatial Alignment Verification")
-        print("=" * 50)
+    def process_patient(self, patient_id: str, save_results: bool = True, create_reference: bool = True) -> Dict:
+        """Process a patient with MedSAM2 segmentation"""
+        logger.info(f"Processing patient: {patient_id}")
         
-        if 'error' in results:
-            print(f"Error: {results['error']}")
-            return
+        # Load patient data
+        patient_data = self.load_patient_data(patient_id)
+        if not patient_data or not patient_data['dicom_files']:
+            return {'status': 'error', 'message': 'No patient data found'}
+            return {'status': 'error', 'message': 'No patient data found'}
         
-        print(f"Overall aligned: {'[YES]' if results['aligned'] else '[NO]'}")
-        print(f"Shapes match: {'[YES]' if results['shapes_match'] else '[NO]'}")
-        print(f"Affines match: {'[YES]' if results['affines_match'] else '[NO]'}")
-        print(f"Spacing match: {'[YES]' if results['spacing_match'] else '[NO]'}")
-        print(f"Reference shape: {results['reference_shape']}")
-        print(f"Segmentation shape: {results['segmentation_shape']}")
+        # Create reference NIfTI if requested
+        reference_path = None
+        if create_reference and save_results:
+            logger.info("Creating DICOM reference NIfTI...")
+            reference_path = self.create_reference_nifti(patient_id)
+            if reference_path:
+                logger.info(f"Reference NIfTI created: {Path(reference_path).name}")
         
-        if results['aligned']:
-            print("\n[SUCCESS] Files should align perfectly in 3D Slicer!")
-        else:
-            print("\n[WARNING] Files may not align properly in 3D Slicer")
-
-
-def test_spatial_alignment(patient_id: str = "A0001", model_name: str = "medsam2", config_file: str = "sam2.1_hiera_t512.yaml"):
-    """Test spatial alignment for a patient"""
-    print(f"Testing spatial alignment for patient: {patient_id}")
-    print(f"Using model: {model_name}")
-    print("=" * 60)
-    
-    segmentator = MedSAMSegmentator(model_name=model_name, config_file=config_file)
-    
-    # Create reference NIfTI
-    print("\n1. Creating DICOM reference NIfTI...")
-    reference_path = segmentator.create_reference_nifti(patient_id)
-    
-    if reference_path:
-        print(f"   Reference created: {Path(reference_path).name}")
-    else:
-        print("   Failed to create reference")
-        return
-    
-    # Process segmentation
-    print("\n2. Processing segmentation...")
-    results = segmentator.process_patient(patient_id, save_results=True)
-    
-    if results['status'] == 'success' and results.get('nifti_path'):
-        print(f"   Segmentation created: {Path(results['nifti_path']).name}")
-        print(f"   Processed {results['processed_slices']} slices")
+        # Process annotated slices
+        slice_results = []
+        for dicom_path in patient_data['dicom_files']:
+            xml_path = self.find_matching_annotation(dicom_path, patient_data['xml_files'])
+            if not xml_path:
+                continue
+            
+            image, metadata = self.load_dicom_image(dicom_path)
+            annotations = self.parse_xml_annotation(xml_path)
+            
+            if image is None or not annotations:
+                continue
+            
+            # Perform segmentation
+            bounding_boxes = [ann['bbox'] for ann in annotations]
+            masks = self.segment_with_medsam2(image, bounding_boxes)
+            
+            slice_results.append({
+                'dicom_file': dicom_path.name,
+                'xml_file': xml_path.name,
+                'metadata': metadata,
+                'annotations': annotations,
+                'masks': masks
+            })
         
-        # Verify alignment
-        print("\n3. Verifying spatial alignment...")
-        verification = AlignmentVerifier.verify_alignment(reference_path, results['nifti_path'])
-        AlignmentVerifier.print_verification_results(verification)
+        if not slice_results:
+            return {'status': 'error', 'message': 'No annotated slices found'}
         
-        if verification['aligned']:
-            print("\n3D Slicer Instructions:")
-            print("1. Load both NIfTI files")
-            print("2. Use 'Volumes' module to overlay them")
-            print("3. Adjust opacity to see alignment")
-    else:
-        print("   Segmentation failed")
-
+        # Create and save 3D volume
+        volume_3d, volume_metadata = self.create_3d_mask_volume(slice_results)
+        nifti_path = None
+        
+        if save_results and volume_3d.size > 0:
+            output_dir = self.segmentation_result_base / patient_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            nifti_path = output_dir / f"segmentation_{timestamp}.nii.gz"
+            self.save_masks_as_nifti(volume_3d, str(nifti_path), volume_metadata)
+        
+        return {
+            'status': 'success',
+            'patient_id': patient_id,
+            'processed_slices': len(slice_results),
+            'volume_shape': volume_3d.shape if volume_3d.size > 0 else None,
+            'nifti_path': str(nifti_path) if nifti_path else None,
+            'reference_path': reference_path
+        }
+    
+    def process_all_patients(self, save_results: bool = True, create_reference: bool = True) -> Dict:
+        """Process all available patients"""
+        patients = self.get_patient_list()
+        if not patients:
+            return {'status': 'error', 'message': 'No patients found'}
+        
+        logger.info(f"Processing {len(patients)} patients: {', '.join(patients)}")
+        
+        results = {}
+        for patient_id in patients:
+            try:
+                result = self.process_patient(patient_id, save_results=save_results, create_reference=create_reference)
+                results[patient_id] = result
+                if result['status'] == 'success':
+                    logger.info(f"✓ {patient_id}: {result['processed_slices']} slices processed")
+                    if result.get('reference_path'):
+                        logger.info(f"  Reference created: {Path(result['reference_path']).name}")
+                else:
+                    logger.warning(f"✗ {patient_id}: {result.get('message', 'Failed')}")
+            except Exception as e:
+                logger.error(f"✗ {patient_id}: Error - {e}")
+                results[patient_id] = {'status': 'error', 'message': str(e)}
+        
+        successful = sum(1 for r in results.values() if r['status'] == 'success')
+        logger.info(f"Processing completed: {successful}/{len(patients)} patients successful")
+        
+        return {
+            'status': 'success',
+            'total_patients': len(patients),
+            'successful_patients': successful,
+            'results': results
+        }
+    
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description="MedSAM Segmentation with Spatial Alignment")
-    parser.add_argument("--patient_id", type=str, default="A0001", help="Patient ID to process")
+    parser = argparse.ArgumentParser(description="MedSAM2 Segmentation for Chest Tumor")
+    parser.add_argument("--patient_id", type=str, help="Patient ID to process (if not specified, process all patients)")
     parser.add_argument("--data_dir", type=str, default="all_patient_data", help="Patient data directory")
-    parser.add_argument("--model", type=str, default="medsam2", 
-                       help="Model type: 'medsam2' or 'facebook/sam-vit-huge'")
-    parser.add_argument("--config", type=str, default="sam2.1_hiera_t512.yaml", 
-                       help="MedSAM2 config file")
+    parser.add_argument("--config", type=str, default="sam2.1_hiera_t512.yaml", help="MedSAM2 config file")
     parser.add_argument("--list_patients", action="store_true", help="List available patients")
-    parser.add_argument("--test_alignment", action="store_true", help="Test spatial alignment")
-    parser.add_argument("--create_reference", action="store_true", help="Create reference NIfTI only")
+    parser.add_argument("--create_reference_only", action="store_true", help="Only create reference NIfTI from DICOM (no segmentation)")
     parser.add_argument("--no_reference", action="store_true", help="Skip creating reference NIfTI")
-    parser.add_argument("--verify_alignment", nargs=2, metavar=('REF', 'SEG'), 
-                       help="Verify alignment between two NIfTI files")
     
     args = parser.parse_args()
     
-    segmentator = MedSAMSegmentator(data_dir=args.data_dir, model_name=args.model, config_file=args.config)
+    segmentator = MedSAMSegmentator(data_dir=args.data_dir, config_file=args.config)
     
     if args.list_patients:
         patients = segmentator.get_patient_list()
         print(f"Available patients ({len(patients)}): {', '.join(patients)}")
         return
     
-    if args.test_alignment:
-        test_spatial_alignment(args.patient_id, args.model, args.config)
-        return
-    
-    if args.create_reference:
-        reference_path = segmentator.create_reference_nifti(args.patient_id)
-        if reference_path:
-            print(f"Reference NIfTI created: {reference_path}")
+    if args.create_reference_only:
+        # Only create reference NIfTI
+        if args.patient_id:
+            reference_path = segmentator.create_reference_nifti(args.patient_id)
+            if reference_path:
+                print(f"Reference NIfTI created for {args.patient_id}: {reference_path}")
+            else:
+                print(f"Failed to create reference NIfTI for {args.patient_id}")
         else:
-            print("Failed to create reference NIfTI")
+            # Create reference for all patients
+            patients = segmentator.get_patient_list()
+            for patient_id in patients:
+                reference_path = segmentator.create_reference_nifti(patient_id)
+                if reference_path:
+                    print(f"✓ {patient_id}: Reference created - {Path(reference_path).name}")
+                else:
+                    print(f"✗ {patient_id}: Failed to create reference")
         return
     
-    if args.verify_alignment:
-        ref_path, seg_path = args.verify_alignment
-        if not Path(ref_path).exists():
-            print(f"Reference file not found: {ref_path}")
-            return
-        if not Path(seg_path).exists():
-            print(f"Segmentation file not found: {seg_path}")
-            return
-        
-        verification = AlignmentVerifier.verify_alignment(ref_path, seg_path)
-        AlignmentVerifier.print_verification_results(verification)
-        return
-    
-    # Default: process patient
     create_ref = not args.no_reference
-    results = segmentator.process_patient(args.patient_id, create_reference=create_ref)
     
-    if results['status'] == 'success':
-        print(f"Patient {results['patient_id']} processed successfully")
-        print(f"Processed {results['processed_slices']} slices")
-        if results.get('reference_path'):
-            print(f"Reference DICOM saved: {results['reference_path']}")
-        if results.get('nifti_path'):
-            print(f"Segmentation saved: {results['nifti_path']}")
-        if results.get('alignment_verified'):
-            print("[SUCCESS] Spatial alignment verified!")
+    if args.patient_id:
+        # Process specific patient
+        results = segmentator.process_patient(args.patient_id, create_reference=create_ref)
+        if results['status'] == 'success':
+            print(f"Patient {results['patient_id']} processed successfully")
+            print(f"Processed {results['processed_slices']} slices")
+            if results.get('reference_path'):
+                print(f"Reference DICOM saved: {results['reference_path']}")
+            if results.get('nifti_path'):
+                print(f"Segmentation saved: {results['nifti_path']}")
+        else:
+            print(f"Processing failed: {results.get('message', 'Unknown error')}")
     else:
-        print(f"Processing failed: {results.get('message', 'Unknown error')}")
+        # Process all patients
+        results = segmentator.process_all_patients(create_reference=create_ref)
+        if results['status'] == 'success':
+            print(f"Processing completed: {results['successful_patients']}/{results['total_patients']} patients successful")
+            
+            # Show summary of failed patients
+            failed_patients = [pid for pid, result in results['results'].items() if result['status'] != 'success']
+            if failed_patients:
+                print(f"Failed patients: {', '.join(failed_patients)}")
+        else:
+            print(f"Processing failed: {results.get('message', 'Unknown error')}")
 
 
 if __name__ == "__main__":

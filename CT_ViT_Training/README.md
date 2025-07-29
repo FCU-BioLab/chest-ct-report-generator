@@ -151,11 +151,17 @@ python evaluate_model.py
 # 測試 MedSAM2 設置
 python test_medsam2_setup.py
 
-# 執行 SAM 分割
-python sam_seg.py \
-    --input_dir ../all_patient_data/A0001/dicom_files \
-    --output_dir segmentation_result/A0001 \
-    --model_type medsam2
+# 處理特定病例 (包含原始 DICOM 3D NIfTI)
+python sam_seg.py --patient_id A0001
+
+# 處理所有病例
+python sam_seg.py
+
+# 只創建原始 DICOM 3D NIfTI 參考檔案
+python sam_seg.py --patient_id A0001 --create_reference_only
+
+# 列出可用病例
+python sam_seg.py --list_patients
 ```
 
 ### 7. 批次執行腳本
@@ -243,14 +249,25 @@ python test_medsam2_setup.py
 python sam_seg.py --help
 ```
 
-### SAM2 訓練
+### SAM2 訓練與分割
 ```bash
 # 進入 SAM2 訓練目錄
 cd sam2_train/
 
 # 查看可用的訓練腳本
 ls -la
+
+# 執行簡化版 MedSAM2 分割
+cd ..
+python sam_seg.py --help
 ```
+
+**簡化版 sam_seg.py 功能：**
+- 專注於 MedSAM2 模型，移除其他 SAM 模型支援
+- 自動處理病例資料載入和 XML 註釋配對
+- 創建原始 DICOM 的完整 3D NIfTI 參考檔案
+- 生成高精度腫瘤分割遮罩
+- 支援單一病例或批次處理所有病例
 
 ## 📊 模型性能比較
 
@@ -369,10 +386,16 @@ python inference.py --device cpu --batch_size 4
 ### 分割優化
 ```bash
 # 使用 MedSAM2 進行高精度分割  
-python sam_seg.py \
-    --model_type medsam2 \
-    --confidence_threshold 0.8 \
-    --post_process True
+python sam_seg.py --patient_id A0001
+
+# 批次處理所有病例
+python sam_seg.py
+
+# 創建完整的 DICOM 3D NIfTI 參考檔案
+python sam_seg.py --patient_id A0001 --create_reference_only
+
+# 自訂配置檔案
+python sam_seg.py --patient_id A0001 --config sam2.1_hiera_t512.yaml
 ```
 
 ## 🔍 故障排除
