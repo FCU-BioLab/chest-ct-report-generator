@@ -22,6 +22,9 @@ import numpy as np
 import cv2
 import nibabel as nib
 import pydicom
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.colors import ListedColormap
 
 # Model availability check
 try:
@@ -229,6 +232,291 @@ class MedSAMSegmentator:
         """Generate mock segmentation masks"""
         h, w = image.shape[:2]
         masks = []
+        
+        for x1, y1, x2, y2 in bounding_boxes:
+            mask = np.zeros((h, w), dtype=np.uint8)
+            center = ((x1 + x2) // 2, (y1 + y2) // 2)
+            radius = ((x2 - x1) // 2, (y2 - y1) // 2)
+            cv2.ellipse(mask, center, radius, 0, 0, 360, 1, -1)
+            masks.append(mask)
+        
+        return masks
+    
+    def save_visualization_images(self, patient_id: str, image: np.ndarray, annotations: List[Dict], 
+                                 masks: List[np.ndarray], dicom_filename: str, slice_index: int) -> None:
+        """Save visualization images with bounding boxes and segmentation overlay"""
+        try:
+            # Create visualization directory
+            vis_dir = self.segmentation_result_base / patient_id / "visualizations"
+            vis_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Convert image to display format
+            if len(image.shape) == 3:
+                display_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            else:
+                display_image = image.copy()
+            
+            # Normalize for display
+            display_image = ((display_image - display_image.min()) / 
+                           (display_image.max() - display_image.min()) * 255).astype(np.uint8)
+            
+            # Create figure with subplots
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+            
+            # Original image with bounding boxes
+            ax1.imshow(display_image, cmap='gray')
+            ax1.set_title(f'Original with Bounding Boxes\n{dicom_filename}', fontsize=12)
+            ax1.axis('off')
+            
+            # Draw bounding boxes
+            for i, ann in enumerate(annotations):
+                bbox = ann['bbox']  # [xmin, ymin, xmax, ymax]
+                x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+                
+                # Create rectangle patch
+                rect = patches.Rectangle((x, y), w, h, linewidth=2, 
+                                       edgecolor='red', facecolor='none', alpha=0.8)
+                ax1.add_patch(rect)
+                
+                # Add label
+                label = ann.get('name', f'lesion_{i+1}')
+                ax1.text(x, y-5, label, color='red', fontsize=10, 
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
+            
+            # Image with segmentation overlay
+            ax2.imshow(display_image, cmap='gray')
+            ax2.set_title(f'Segmentation Overlay\n{dicom_filename}', fontsize=12)
+            ax2.axis('off')
+            
+            # Create combined mask
+            if masks:
+                combined_mask = np.zeros_like(display_image, dtype=np.uint8)
+                for mask in masks:
+                    if mask.shape[:2] == display_image.shape[:2]:
+                        combined_mask = np.logical_or(combined_mask, mask > 0)
+                    else:
+                        # Resize mask if dimensions don't match
+                        resized_mask = cv2.resize(mask.astype(np.uint8), 
+                                                (display_image.shape[1], display_image.shape[0]))
+                        combined_mask = np.logical_or(combined_mask, resized_mask > 0)
+                
+                # Create overlay
+                overlay = np.zeros((*display_image.shape, 4))
+                overlay[combined_mask, :] = [1, 0, 0, 0.5]  # Red with alpha
+                ax2.imshow(overlay)
+                
+                # Also draw bounding boxes for reference
+                for i, ann in enumerate(annotations):
+                    bbox = ann['bbox']
+                    x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+                    rect = patches.Rectangle((x, y), w, h, linewidth=1, 
+                                           edgecolor='yellow', facecolor='none', alpha=0.6)
+                    ax2.add_patch(rect)
+            
+            plt.tight_layout()
+            
+            # Save the figure
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            vis_filename = f"slice_{slice_index:03d}_{timestamp}.png"
+            vis_path = vis_dir / vis_filename
+            
+            plt.savefig(str(vis_path), dpi=150, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none')
+            plt.close()
+            
+            logger.info(f"Visualization saved: {vis_filename}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save visualization for {dicom_filename}: {e}")
+    
+    def save_individual_images(self, patient_id: str, image: np.ndarray, annotations: List[Dict], 
+                              masks: List[np.ndarray], dicom_filename: str, slice_index: int) -> None:
+        """Save individual PNG images for original and segmentation"""
+        try:
+            # Create individual images directory
+            img_dir = self.segmentation_result_base / patient_id / "individual_images"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Convert image to display format
+            if len(image.shape) == 3:
+                display_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            else:
+                display_image = image.copy()
+            
+            # Normalize for display
+            display_image = ((display_image - display_image.min()) / 
+                           (display_image.max() - display_image.min()) * 255).astype(np.uint8)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_filename = f"slice_{slice_index:03d}_{timestamp}"
+            
+            # Save original image with bounding boxes
+            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+            ax.imshow(display_image, cmap='gray')
+            ax.set_title(f'Original Image with Annotations\n{dicom_filename}', fontsize=14)
+            ax.axis('off')
+            
+            # Draw bounding boxes
+            for i, ann in enumerate(annotations):
+                bbox = ann['bbox']
+                x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+                
+                rect = patches.Rectangle((x, y), w, h, linewidth=3, 
+                                       edgecolor='red', facecolor='none', alpha=0.9)
+                ax.add_patch(rect)
+                
+                label = ann.get('name', f'lesion_{i+1}')
+                ax.text(x, y-8, label, color='red', fontsize=12, fontweight='bold',
+                        bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9))
+            
+            original_path = img_dir / f"{base_filename}_original.png"
+            plt.savefig(str(original_path), dpi=200, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none')
+            plt.close()
+            
+            # Save segmentation overlay image
+            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+            ax.imshow(display_image, cmap='gray')
+            ax.set_title(f'Segmentation Result\n{dicom_filename}', fontsize=14)
+            ax.axis('off')
+            
+            # Create and apply mask overlay
+            if masks:
+                combined_mask = np.zeros_like(display_image, dtype=np.uint8)
+                for mask in masks:
+                    if mask.shape[:2] == display_image.shape[:2]:
+                        combined_mask = np.logical_or(combined_mask, mask > 0)
+                    else:
+                        resized_mask = cv2.resize(mask.astype(np.uint8), 
+                                                (display_image.shape[1], display_image.shape[0]))
+                        combined_mask = np.logical_or(combined_mask, resized_mask > 0)
+                
+                # Create colored overlay
+                overlay = np.zeros((*display_image.shape, 4))
+                overlay[combined_mask, :] = [1, 0.2, 0.2, 0.6]  # Semi-transparent red
+                ax.imshow(overlay)
+                
+                # Add mask contours for better visibility
+                contours, _ = cv2.findContours(combined_mask.astype(np.uint8), 
+                                             cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for contour in contours:
+                    contour = contour.squeeze()
+                    if len(contour.shape) == 2 and contour.shape[0] > 2:
+                        ax.plot(contour[:, 0], contour[:, 1], 'yellow', linewidth=2, alpha=0.8)
+                
+                # Also show original bounding boxes for comparison
+                for i, ann in enumerate(annotations):
+                    bbox = ann['bbox']
+                    x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+                    rect = patches.Rectangle((x, y), w, h, linewidth=2, 
+                                           edgecolor='cyan', facecolor='none', alpha=0.7,
+                                           linestyle='--')
+                    ax.add_patch(rect)
+            
+            segmentation_path = img_dir / f"{base_filename}_segmentation.png"
+            plt.savefig(str(segmentation_path), dpi=200, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none')
+            plt.close()
+            
+            logger.info(f"Individual images saved: {base_filename}_original.png, {base_filename}_segmentation.png")
+            
+        except Exception as e:
+            logger.error(f"Failed to save individual images for {dicom_filename}: {e}")
+    
+    def create_summary_visualization(self, patient_id: str, slice_results: List[Dict]) -> None:
+        """Create a summary visualization showing all processed slices"""
+        try:
+            if not slice_results:
+                return
+            
+            summary_dir = self.segmentation_result_base / patient_id / "summary"
+            summary_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Limit to maximum 16 slices for display
+            display_slices = slice_results[:16] if len(slice_results) > 16 else slice_results
+            n_slices = len(display_slices)
+            
+            # Calculate grid dimensions
+            cols = min(4, n_slices)
+            rows = (n_slices + cols - 1) // cols
+            
+            fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
+            if rows == 1:
+                axes = [axes] if cols == 1 else axes
+            elif cols == 1:
+                axes = [[ax] for ax in axes]
+            
+            for idx, result in enumerate(display_slices):
+                row, col = idx // cols, idx % cols
+                ax = axes[row][col] if rows > 1 else axes[col]
+                
+                # Load the corresponding DICOM image
+                patient_data = self.load_patient_data(patient_id)
+                dicom_path = next((f for f in patient_data['dicom_files'] 
+                                 if f.name == result['dicom_file']), None)
+                
+                if dicom_path:
+                    image, _ = self.load_dicom_image(dicom_path)
+                    if image is not None:
+                        # Convert to grayscale if needed
+                        if len(image.shape) == 3:
+                            display_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+                        else:
+                            display_image = image.copy()
+                        
+                        # Normalize
+                        display_image = ((display_image - display_image.min()) / 
+                                       (display_image.max() - display_image.min()) * 255).astype(np.uint8)
+                        
+                        ax.imshow(display_image, cmap='gray')
+                        
+                        # Add segmentation overlay
+                        if result['masks']:
+                            combined_mask = np.zeros_like(display_image, dtype=np.uint8)
+                            for mask in result['masks']:
+                                if mask.shape[:2] == display_image.shape[:2]:
+                                    combined_mask = np.logical_or(combined_mask, mask > 0)
+                            
+                            overlay = np.zeros((*display_image.shape, 4))
+                            overlay[combined_mask, :] = [1, 0, 0, 0.5]
+                            ax.imshow(overlay)
+                        
+                        # Add bounding boxes
+                        for ann in result['annotations']:
+                            bbox = ann['bbox']
+                            x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+                            rect = patches.Rectangle((x, y), w, h, linewidth=1, 
+                                                   edgecolor='yellow', facecolor='none')
+                            ax.add_patch(rect)
+                
+                ax.set_title(f"Slice {idx+1}\n{result['dicom_file'][:15]}...", fontsize=8)
+                ax.axis('off')
+            
+            # Hide unused subplots
+            for idx in range(n_slices, rows * cols):
+                row, col = idx // cols, idx % cols
+                ax = axes[row][col] if rows > 1 else axes[col]
+                ax.axis('off')
+            
+            plt.suptitle(f'Patient {patient_id} - Segmentation Summary\n'
+                        f'{len(slice_results)} slices processed', fontsize=16)
+            plt.tight_layout()
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            summary_path = summary_dir / f"segmentation_summary_{timestamp}.png"
+            plt.savefig(str(summary_path), dpi=150, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none')
+            plt.close()
+            
+            logger.info(f"Summary visualization saved: segmentation_summary_{timestamp}.png")
+            
+        except Exception as e:
+            logger.error(f"Failed to create summary visualization: {e}")
+    
+    def _generate_mock_masks(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
+        """Generate mock segmentation masks from bounding boxes for demonstration purposes"""
+        masks = []
+        h, w = image.shape[:2]
         
         for x1, y1, x2, y2 in bounding_boxes:
             mask = np.zeros((h, w), dtype=np.uint8)
@@ -471,21 +759,21 @@ class MedSAMSegmentator:
         
         # Process annotated slices
         slice_results = []
-        for dicom_path in patient_data['dicom_files']:
+        for i, dicom_path in enumerate(patient_data['dicom_files']):
             xml_path = self.find_matching_annotation(dicom_path, patient_data['xml_files'])
             if not xml_path:
                 continue
-            
+
             image, metadata = self.load_dicom_image(dicom_path)
             annotations = self.parse_xml_annotation(xml_path)
-            
+
             if image is None or not annotations:
                 continue
-            
+
             # Perform segmentation
             bounding_boxes = [ann['bbox'] for ann in annotations]
             masks = self.segment_with_medsam2(image, bounding_boxes)
-            
+
             slice_results.append({
                 'dicom_file': dicom_path.name,
                 'xml_file': xml_path.name,
@@ -493,10 +781,42 @@ class MedSAMSegmentator:
                 'annotations': annotations,
                 'masks': masks
             })
+
+            # Save visualization images
+            if save_results:
+                try:
+                    # Save combined visualization (side-by-side comparison)
+                    self.save_visualization_images(
+                        patient_id=patient_id,
+                        image=image,
+                        annotations=annotations,
+                        masks=masks,
+                        dicom_filename=dicom_path.name,
+                        slice_index=i
+                    )
+                    
+                    # Save individual images (original and segmentation separately)
+                    self.save_individual_images(
+                        patient_id=patient_id,
+                        image=image,
+                        annotations=annotations,
+                        masks=masks,
+                        dicom_filename=dicom_path.name,
+                        slice_index=i
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to save visualization for {dicom_path.name}: {e}")
         
         if not slice_results:
             return {'status': 'error', 'message': 'No annotated slices found'}
-        
+
+        # Create summary visualization
+        if save_results:
+            try:
+                self.create_summary_visualization(patient_id, slice_results)
+            except Exception as e:
+                logger.warning(f"Failed to create summary visualization: {e}")
+
         # Create and save 3D volume
         volume_3d, volume_metadata = self.create_3d_mask_volume(slice_results)
         nifti_path = None
