@@ -312,15 +312,30 @@ class MedSAMSegmentator:
         
         sorted_results = sorted(slice_results, key=sort_key)
         
-        # Create 3D volume
-        first_mask = sorted_results[0]['masks'][0] if sorted_results[0]['masks'] else np.zeros((512, 512), dtype=np.uint8)
-        depth = len(sorted_results)
+        # Check if all masks have the same dimensions
+        first_mask = None
+        for result in sorted_results:
+            if result['masks']:
+                first_mask = result['masks'][0]
+                break
+        
+        if first_mask is None:
+            logger.warning("No valid masks found in slice results")
+            return np.array([]), {}
+        
         height, width = first_mask.shape
+        depth = len(sorted_results)
         volume_3d = np.zeros((depth, height, width), dtype=np.uint8)
         
         for i, result in enumerate(sorted_results):
             if result['masks']:
                 combined_mask = np.logical_or.reduce(result['masks']) if len(result['masks']) > 1 else result['masks'][0]
+                
+                # Check if mask dimensions match
+                if combined_mask.shape != (height, width):
+                    logger.warning(f"Mask dimension mismatch at slice {i}: expected {height}x{width}, got {combined_mask.shape}")
+                    combined_mask = cv2.resize(combined_mask.astype(np.uint8), (width, height))
+                
                 volume_3d[i] = combined_mask.astype(np.uint8)
         
         # Create metadata
@@ -371,10 +386,27 @@ class MedSAMSegmentator:
         
         sorted_slices = sorted(slice_data, key=sort_key)
         
-        # Create 3D volume
-        depth = len(sorted_slices)
+        # Check if all images have the same dimensions
         first_image = sorted_slices[0]['image']
         height, width = first_image.shape[:2]
+        
+        # Verify all images have consistent dimensions
+        for i, slice_info in enumerate(sorted_slices):
+            img_h, img_w = slice_info['image'].shape[:2]
+            if img_h != height or img_w != width:
+                logger.warning(f"Inconsistent image dimensions detected:")
+                logger.warning(f"  Expected: {height}x{width}, Got: {img_h}x{img_w} at slice {i}")
+                logger.warning(f"  Resizing slice {i} to match first slice dimensions")
+                
+                # Resize the image to match the first slice
+                if len(slice_info['image'].shape) == 3:
+                    resized_image = cv2.resize(slice_info['image'], (width, height))
+                else:
+                    resized_image = cv2.resize(slice_info['image'], (width, height))
+                slice_info['image'] = resized_image
+        
+        # Create 3D volume
+        depth = len(sorted_slices)
         volume_3d = np.zeros((depth, height, width), dtype=np.uint16)
         
         for i, slice_info in enumerate(sorted_slices):
@@ -427,7 +459,6 @@ class MedSAMSegmentator:
         # Load patient data
         patient_data = self.load_patient_data(patient_id)
         if not patient_data or not patient_data['dicom_files']:
-            return {'status': 'error', 'message': 'No patient data found'}
             return {'status': 'error', 'message': 'No patient data found'}
         
         # Create reference NIfTI if requested
