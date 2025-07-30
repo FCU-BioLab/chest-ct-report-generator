@@ -7,7 +7,9 @@
 - 🎯 **專注 MedSAM2**: 只支援 MedSAM2 模型，確保最佳分割效果
 - 🔄 **自動化處理**: 自動載入 DICOM 檔案和配對的 XML 註釋
 - 📐 **完整 3D NIfTI**: 創建原始 DICOM 的完整 3D NIfTI 參考檔案
-- 🔧 **批次處理**: 支援單一病例或所有病例的批次處理
+- �️ **PNG 可視化**: 自動生成高品質 PNG 圖像，包含邊界框和分割結果對比
+- 📊 **摘要報告**: 創建網格式摘要圖，一覽所有處理切片的分割結果
+- �🔧 **批次處理**: 支援單一病例或所有病例的批次處理
 - 🛠️ **簡化操作**: 最少的命令列參數，易於使用
 - ✅ **空間對齊**: 確保分割結果與原始 DICOM 完美對齊
 
@@ -43,7 +45,7 @@ pip install torch torchvision
 pip install numpy opencv-python nibabel pydicom
 pip install hydra-core
 
-# 資料處理
+# 資料處理和可視化
 pip install matplotlib scikit-learn
 ```
 
@@ -72,6 +74,57 @@ all_patient_data/
         ├── annotation001.xml
         └── ...
 ```
+
+## 🖼️ PNG 可視化功能
+
+### 自動生成可視化圖像
+程序在處理每個患者時會自動生成三種類型的 PNG 可視化圖像：
+
+#### 1. 並排比較可視化 (`visualizations/`)
+- **左側圖像**: 原始 DICOM 圖像 + 紅色邊界框標註
+- **右側圖像**: 分割結果疊加顯示 + 黃色參考邊界框
+- **用途**: 快速對比原始圖像和分割效果
+- **檔名格式**: `slice_001_20250730_143025.png`
+
+#### 2. 獨立高解析度圖像 (`individual_images/`)
+- **原始圖**: 帶有紅色邊界框和病灶標籤的原始 DICOM 圖像
+- **分割圖**: 半透明紅色分割遮罩 + 黃色輪廓線 + 青色虛線參考框
+- **用途**: 製作報告、論文插圖、臨床展示
+- **解析度**: 200 DPI，適合打印
+- **檔名格式**: 
+  - `slice_001_20250730_143025_original.png`
+  - `slice_001_20250730_143025_segmentation.png`
+
+#### 3. 摘要網格可視化 (`summary/`)
+- **格式**: 4×4 網格布局（最多顯示 16 個切片）
+- **內容**: 每個切片的分割疊加效果 + 邊界框
+- **用途**: 整體分割效果一覽、品質評估
+- **檔名格式**: `segmentation_summary_20250730_143025.png`
+
+### 可視化特色
+- 🎨 **多色標註系統**:
+  - 紅色：病灶邊界框和分割遮罩
+  - 黃色：分割輪廓線和參考邊界框
+  - 青色：對比用虛線邊界框
+- 📏 **智能尺寸處理**: 自動調整不同尺寸的 DICOM 圖像
+- 🏷️ **自動標籤**: 病灶名稱和切片信息自動標註
+- ⏰ **時間戳命名**: 避免檔案覆蓋，保留歷史記錄
+
+### 使用建議
+```bash
+# 處理後查看可視化結果
+cd segmentation_result/A0001/
+
+# 快速檢視並排比較圖
+ls visualizations/
+
+# 查看高解析度獨立圖像
+ls individual_images/
+
+# 檢視整體摘要
+ls summary/
+```
+
 ## 💻 使用方法
 
 ### 命令列選項
@@ -135,6 +188,16 @@ segmentation_result/
 └── {patient_id}/
     ├── segmentation_{timestamp}.nii.gz    # 腫瘤分割遮罩
     ├── reference_{timestamp}.nii.gz       # 原始 DICOM 3D NIfTI (可選)
+    ├── visualizations/                     # PNG 可視化圖像
+    │   ├── slice_001_{timestamp}.png       # 並排比較 (原始+分割)
+    │   ├── slice_002_{timestamp}.png
+    │   └── ...
+    ├── individual_images/                  # 獨立 PNG 圖像
+    │   ├── slice_001_{timestamp}_original.png      # 原始圖像+邊界框
+    │   ├── slice_001_{timestamp}_segmentation.png  # 分割結果疊加
+    │   └── ...
+    ├── summary/                           # 摘要可視化
+    │   └── segmentation_summary_{timestamp}.png    # 網格式總覽
     └── medsam_seg.log                     # 處理日誌
 ```
 
@@ -149,7 +212,12 @@ segmentation_result/
    - 保持完整的空間資訊和所有切片
    - 用於與分割結果對照檢視
 
-3. **日誌檔案** (`medsam_seg.log`):
+3. **可視化圖像**:
+   - **並排比較** (`visualizations/`): 左側原始圖+右側分割疊加，便於快速比較
+   - **獨立圖像** (`individual_images/`): 分別保存原始圖和分割結果，適合報告製作
+   - **摘要圖** (`summary/`): 網格展示所有切片，提供整體分割效果一覽
+
+4. **日誌檔案** (`medsam_seg.log`):
    - 詳細的處理記錄
    - 錯誤訊息和警告
    - 性能統計資訊
@@ -179,15 +247,32 @@ segmentation_result/
 - 設定適當的像素單位和時間單位
 - 確保與 3D Slicer 等軟體的完全兼容
 
+### 5. PNG 可視化生成
+- **並排比較**: 原始 DICOM 與分割結果的直觀對比
+- **獨立圖像**: 分別保存帶標註的原始圖和分割疊加圖
+- **摘要視圖**: 網格布局展示所有處理切片的總覽
+- **高品質輸出**: 150-200 DPI，適合打印和展示
+
 ## 🎯 核心功能
 
 ### 1. MedSAMSegmentator 類別
 主要的分割處理類別，包含：
 - **`load_patient_data()`**: 載入 DICOM 和 XML 檔案
-- **`segment_with_medsam()`**: 執行 MedSAM/MedSAM2 分割 (支援模擬模式)
+- **`segment_with_medsam2()`**: 執行 MedSAM2 分割 (支援模擬模式)
 - **`create_3d_mask_volume()`**: 創建空間對齊的 3D 分割體積
 - **`save_masks_as_nifti()`**: 儲存為 3D Slicer 相容的 NIfTI 格式
 - **`create_reference_nifti()`**: 創建 DICOM 參考 NIfTI 檔案
+- **`save_visualization_images()`**: 生成並排比較的 PNG 可視化圖像
+- **`save_individual_images()`**: 保存獨立的原始圖和分割圖 PNG 檔案
+- **`create_summary_visualization()`**: 創建網格式摘要可視化圖
+
+### 2. PNG 可視化功能
+專業的醫學影像可視化工具：
+- **並排比較視圖**: 左右對比原始 DICOM 和分割結果
+- **獨立高解析度圖像**: 分別保存原始圖像和分割疊加圖
+- **智能標註**: 自動添加病灶標籤、邊界框和輪廓線
+- **多色彩標記**: 紅色病灶區域、黃色輪廓、青色參考框
+- **摘要網格**: 最多 16 個切片的網格總覽圖
 
 ### 2. AlignmentVerifier 類別
 專門的空間對齊驗證工具：
@@ -411,7 +496,21 @@ else:
 
 ## 📅 更新日誌
 
-### v2.2 (最新版本 - 2025.01.23)
+### v2.3 (最新版本 - 2025.07.30)
+- 🖼️ **PNG 可視化功能**: 全新的圖像可視化系統
+  - **並排比較**: 左右對比原始 DICOM 和分割結果
+  - **獨立高解析度圖像**: 分別保存原始圖和分割圖，200 DPI 品質
+  - **摘要網格**: 4×4 網格展示所有處理切片的總覽
+- 🎨 **智能標註系統**: 
+  - 多色彩標記（紅色病灶、黃色輪廓、青色參考）
+  - 自動病灶標籤和切片信息標註
+  - 智能尺寸調整和輪廓提取
+- 📊 **臨床應用增強**: 
+  - 高品質圖像適合報告製作和論文發表
+  - 自動時間戳命名避免檔案覆蓋
+  - 三種視圖滿足不同使用需求
+
+### v2.2 (2025.01.23)
 - 🔧 **NIfTI 品質修復**: 修復 NIfTI 檔案長寬比問題，確保完美的 3D Slicer 顯示
 - 📊 **完整 DICOM 支援**: 預設包含所有 DICOM 切片到參考 NIfTI，提供完整的影像序列
 - ⚙️ **仿射矩陣最佳化**: 修正空間對齊的仿射矩陣計算，改善座標系統準確性
@@ -557,13 +656,14 @@ segmentationNode.GetDisplayNode().SetAndObserveColorNodeID("vtkMRMLColorTableNod
 ### ✅ 核心優勢
 - **🎯 專注 MedSAM2**: 移除複雜選項，專注核心功能
 - **⚡ 真實 AI 分割**: 高精度腫瘤檢測與分割
-- **📐 完美對齊**: 確保與原始 DICOM 的精確對齊
+- **�️ 完整可視化**: 三種 PNG 可視化方案，滿足不同需求
+- **�📐 完美對齊**: 確保與原始 DICOM 的精確對齊
 - **🛠️ 簡化操作**: 最少參數，最大效果
 - **🔧 智能處理**: 自動錯誤處理和模式切換
 
 ### 🚀 推薦使用方式
 ```bash
-# 最佳實踐: 處理單一病例 (包含完整 DICOM 3D NIfTI)
+# 最佳實踐: 處理單一病例 (包含完整輸出)
 python sam_seg.py --patient_id A0001
 
 # 這一個命令完成:
@@ -572,12 +672,13 @@ python sam_seg.py --patient_id A0001
 # ✅ 執行 AI 腫瘤分割
 # ✅ 創建完整的 DICOM 參考 NIfTI
 # ✅ 生成 3D Slicer 就緒檔案
+# ✅ 自動生成三種類型的 PNG 可視化圖像
 
 # 批次處理所有病例:
 python sam_seg.py
 ```
 
-現在您擁有了一個**簡潔高效的專業級醫學影像分割系統**！ 🎉
+現在您擁有了一個**具備完整可視化功能的專業級醫學影像分割系統**！ 🎉
 
 ---
 
