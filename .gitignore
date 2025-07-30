@@ -10,4 +10,5 @@ venv
 CT_ViT
 CT_ViT_Training/__pycache__
 CT_ViT_Training/src/__pycache__
+medsam2_segmentation/MedSAM2
 datasets
