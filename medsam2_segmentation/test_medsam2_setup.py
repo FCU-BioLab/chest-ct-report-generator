@@ -54,13 +54,21 @@ def test_imports():
     
     # 測試 MedSAM2
     try:
-        from sam2_train.build_sam import build_sam2_video_predictor
-        from sam2_train.sam2_image_predictor import SAM2ImagePredictor
+        import sys
+        from pathlib import Path
+        
+        # Add MedSAM2 path to sys.path
+        medsam2_path = Path("MedSAM2")
+        if medsam2_path.exists():
+            sys.path.insert(0, str(medsam2_path))
+        
+        from sam2.build_sam import build_sam2_video_predictor
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
         print("✓ MedSAM2 模組可用")
         return True
     except ImportError as e:
         print(f"✗ MedSAM2 模組不可用: {e}")
-        print("  請按照 MEDSAM2_SETUP.md 安裝 MedSAM2")
+        print("  請確保 MedSAM2 目錄存在並包含 sam2 模組")
         
         # 測試原始 SAM 作為備用
         try:
@@ -75,6 +83,7 @@ def test_model_files():
     """測試模型檔案是否存在"""
     print("\n測試模型檔案...")
     
+    # 檢查MedSAM2目錄中的checkpoints
     checkpoint_dir = Path("MedSAM2/checkpoints")
     
     if not checkpoint_dir.exists():
@@ -110,10 +119,15 @@ def test_patient_data():
     """測試患者數據是否存在"""
     print("\n測試患者數據...")
     
-    data_dir = Path("all_patient_data")
+    # 先嘗試從項目根目錄的datasets目錄查找
+    data_dir = Path("../datasets/all_patient_data")
     if not data_dir.exists():
-        print(f"✗ 患者數據目錄不存在: {data_dir}")
-        return False
+        # 嘗試當前目錄
+        data_dir = Path("all_patient_data")
+        if not data_dir.exists():
+            print(f"✗ 患者數據目錄不存在: {data_dir}")
+            print("  請確保患者數據位於 datasets/all_patient_data 目錄中")
+            return False
     
     patients = [d for d in data_dir.iterdir() if d.is_dir()]
     if patients:
@@ -177,9 +191,11 @@ def main():
     if imports_ok:
         print("\n建議的執行命令:")
         if models_ok:
-            print("  python sam_seg.py --model medsam2 --config sam2_hiera_s --patient_id A0001")
+            print("  python sam_seg.py --patient_id A0001")
         else:
-            print("  python sam_seg.py --model facebook/sam-vit-huge --patient_id A0001")
+            print("  python sam_seg.py --patient_id A0001")
+        print("\n註意：如果從項目根目錄執行，請使用:")
+        print("  python medsam2_segmentation/sam_seg.py --patient_id A0001")
     else:
         print("\n請先解決導入問題，然後重新測試")
     

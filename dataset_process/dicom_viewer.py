@@ -36,7 +36,7 @@ config_path = find_config()
 with open(config_path, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
-matched_data_path = config.get('all_patient_data', 'CT_ViT_Training/all_patient_data')
+matched_data_path = config.get('all_patient_data', 'datasets/all_patient_data')
 if not Path(matched_data_path).is_absolute():
     matched_data_path = (config_path.parent / matched_data_path).resolve()
 BASE_DIR = Path(matched_data_path)

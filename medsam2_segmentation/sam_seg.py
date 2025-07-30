@@ -29,10 +29,19 @@ from matplotlib.colors import ListedColormap
 # Model availability check
 try:
     import torch
-    from sam2_train.build_sam import build_sam2_video_predictor
-    from sam2_train.sam2_image_predictor import SAM2ImagePredictor
+    import sys
+    from pathlib import Path
+    
+    # Add MedSAM2 path to sys.path
+    medsam2_path = Path(__file__).parent / "MedSAM2"
+    if medsam2_path not in sys.path:
+        sys.path.insert(0, str(medsam2_path))
+    
+    from sam2.build_sam import build_sam2_video_predictor
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
     MEDSAM2_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    print(f"MedSAM2 import error: {e}")
     MEDSAM2_AVAILABLE = False
 
 
@@ -58,7 +67,7 @@ logger = setup_logging()
 class MedSAMSegmentator:
     """Simplified MedSAM2 segmentation"""
     
-    def __init__(self, data_dir: str = "all_patient_data", config_file: str = "sam2.1_hiera_t512.yaml"):
+    def __init__(self, data_dir: str = "../datasets/all_patient_data", config_file: str = "sam2.1_hiera_t512.yaml"):
         self.data_dir = Path(data_dir)
         self.segmentation_result_base = Path("segmentation_result")
         self.config_file = config_file
@@ -875,7 +884,7 @@ def main():
     """Main function"""
     parser = argparse.ArgumentParser(description="MedSAM2 Segmentation for Chest Tumor")
     parser.add_argument("--patient_id", type=str, help="Patient ID to process (if not specified, process all patients)")
-    parser.add_argument("--data_dir", type=str, default="all_patient_data", help="Patient data directory")
+    parser.add_argument("--data_dir", type=str, default="../datasets/all_patient_data", help="Patient data directory")
     parser.add_argument("--config", type=str, default="sam2.1_hiera_t512.yaml", help="MedSAM2 config file")
     parser.add_argument("--list_patients", action="store_true", help="List available patients")
     parser.add_argument("--create_reference_only", action="store_true", help="Only create reference NIfTI from DICOM (no segmentation)")
