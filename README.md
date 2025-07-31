@@ -1,21 +1,22 @@
-# 🏥 胸部CT報告生成系## 📋 目錄
+# 🏥 胸部CT報告生成系統 (Chest CT Report Generation System)
+
+一個完整的端到端胸部CT影像分析和醫療報告生成系統，整合了CT-ViT目標檢測、MedSAM2分割、RAG知識檢索和智能報告生成功能。
+
+## 📋 目錄
 - [系統特色](#系統特色)
 - [系統性能](#系統性能) 
-- [資料集概況](#資料集概├── 🧬 medsam├── 🛠️ scripts/                # 系統腳本
-├── config.json                # 系統配置
-├── requirements.txt           # 依賴包列表
-├── dataset_analysis_report.md # 資料集分析報告
-├── dataset_analysis_detailed.json # 詳細資料集分析
-├── CT_ViT_Detection_Upgrade_Guide.md # 升級指南
-├── PROJECT_SUMMARY.md         # 專案總結
-└── README.md                  # 主要說明文件entation/     # MedSAM2分割系統)
+- [資料集概況](#資料集概況)
 - [專案結構](#專案結構)
 - [技術架構](#技術架構)
 - [快速開始](#快速開始)
+- [使用指南](#使用指南)
 - [配置說明](#配置說明)
 - [故障排除](#故障排除)
+- [開發路線圖](#開發路線圖)
+- [貢獻指南](#貢獻指南)
+- [支援與聯繫](#支援與聯繫)
 
-## 📈 系統性能t CT Report Generation System
+## 📈 系統性能
 
 一個完整的端到端胸部CT影像分析和醫療報告生成系統，整合了CT-ViT目標檢測、MedSAM2分割、RAG知識檢索和智能報告生成功能。
 
@@ -27,17 +28,6 @@
 ✅ **RAG智能報告** - 結合知識檢索生成專業醫學報告  
 ✅ **標準化輸出** - 支援JSON/HTML/PDF多格式報告  
 ✅ **模組化架構** - 完整的訓練、評估、推理流程
-
-## � 目錄
-- [系統特色](#系統特色)
-- [系統性能](#系統性能) 
-- [資料集概況](#資料集概況)
-- [專案結構](#專案結構)
-- [技術架構](#技術架構)
-- [快速開始](#快速開始)
-- [使用指南](#使用指南)
-- [配置說明](#配置說明)
-- [故障排除](#故障排除)
 
 | 指標 | 當前CT-ViT | 升級後檢測模型 | 提升幅度 |
 |------|------------|---------------|----------|
@@ -57,7 +47,7 @@
 
 ```
 chest-ct-report-generator/
-├── 🎯 CT_ViT_Training/          # 核心訓練模組 (主要工作區域)
+├── 🎯 CT_ViT/                  # 核心訓練模組 (主要工作區域)
 │   ├── src/                     # 源代碼模組
 │   │   ├── config.py           # 配置管理
 │   │   ├── data_processing.py  # 數據處理
@@ -99,30 +89,10 @@ chest-ct-report-generator/
 ├── PROJECT_SUMMARY.md         # 專案總結
 └── README.md                  # 主要說明文件
 ```
-├── � medsam2_segmentation/     # MedSAM2分割系統
-│   ├── sam_seg.py             # 分割主程式
-│   ├── test_medsam2_setup.py  # 環境測試
-│   ├── README_MEDSAM2.md      # MedSAM2使用說明
-│   └── MedSAM2/               # MedSAM2模型檔案
-├── 🤖 LLM/                     # 語言模型與RAG系統
-│   ├── RAG/                   # RAG報告生成
-│   └── Fine_Tune/             # 模型微調
-├── 📊 datasets/                # 資料集目錄
-│   ├── all_patient_data/      # 處理後的患者資料
-│   └── original_datasets/     # 原始資料集
-├── 📁 dataset_process/         # 資料處理工具
-├── 📄 report_data/            # 報告相關資料
-├── �️ scripts/                # 系統腳本
-├── config.json                # 系統配置
-├── requirements.txt           # 依賴包列表
-├── dataset_analysis_report.md # 資料集分析報告
-├── CT_ViT_Detection_Upgrade_Guide.md # 升級指南
-└── README.md                  # 主要說明文件
-```
 
 ### 🚀 主要功能模組
 
-#### 1. 核心訓練與評估 (CT_ViT_Training/)
+#### 1. 核心訓練與評估 (CT_ViT/)
 - **分類訓練**: `train.py` - 原始CT-ViT分類模型
 - **檢測訓練**: `train_detection.py` - 升級後的目標檢測模型
 - **模型評估**: `evaluate_model.py`, `unified_evaluator.py`
@@ -159,12 +129,12 @@ datasets/
 ```
 
 ##### 🔧 核心處理程式
-- **資料載入處理**: [`CT_ViT_Training/src/data_processing.py`](CT_ViT_Training/src/data_processing.py)
+- **資料載入處理**: [`CT_ViT/src/data_processing.py`](CT_ViT/src/data_processing.py)
   - `DICOMProcessor` 類：DICOM文件讀取與前處理
   - HU值轉換與肺窗調整（中心：-600，寬度：1200）
   - `CTDataset` 類：PyTorch資料集封裝
 
-- **檢測資料處理**: [`CT_ViT_Training/src/detection_dataset.py`](CT_ViT_Training/src/detection_dataset.py)
+- **檢測資料處理**: [`CT_ViT/src/detection_dataset.py`](CT_ViT/src/detection_dataset.py)
   - `XMLAnnotationParser` 類：Pascal VOC格式XML解析
   - 邊界框座標提取與類別映射
   - `CTDetectionDataset` 類：目標檢測任務資料集
@@ -184,7 +154,7 @@ PyTorch資料集 → 模型訓練/推理
 - **資料分析**: `dataset_analysis_report.md` - 資料集統計分析
 - **專案總結**: `PROJECT_SUMMARY.md` - 專案概覽和總結
 
-- **檢測資料處理**: [`CT_ViT_Training/src/detection_dataset.py`](CT_ViT_Training/src/detection_dataset.py)
+- **檢測資料處理**: [`CT_ViT/src/detection_dataset.py`](CT_ViT/src/detection_dataset.py)
   - `XMLAnnotationParser` 類：Pascal VOC格式XML解析
   - 邊界框座標提取與類別映射
   - `CTDetectionDataset` 類：目標檢測任務資料集
@@ -194,17 +164,15 @@ PyTorch資料集 → 模型訓練/推理
 原始資料集 (datasets/original_datasets/)
     ↓ 資料處理工具
 已處理資料 (datasets/all_patient_data/)  
-    ↓ dataset_splitter.py
-分割資料集 (datasets/splits/)
     ↓ data_processing.py / detection_dataset.py
 PyTorch資料集 → 模型訓練/推理
 ```
 
-#### 6. 系統測試與配置
-- **系統測試**: `CT_ViT_Training/test_system.py` - 完整系統測試
-- **配置管理**: `config.json` - 系統配置文件
+#### 6. 系統配置與文檔
+- **系統配置**: `config.json` - 主要系統配置文件
 - **升級指南**: `CT_ViT_Detection_Upgrade_Guide.md` - 系統升級說明
 - **資料分析**: `dataset_analysis_report.md` - 資料集統計分析
+- **專案總結**: `PROJECT_SUMMARY.md` - 專案概覽和總結
 
 ## 🏗️ 技術架構
 
@@ -351,7 +319,7 @@ cd chest-ct-report-generator
 pip install -r requirements.txt
 
 # 檢查系統狀態
-cd CT_ViT_Training
+cd CT_ViT
 python test_system.py
 ```
 
@@ -368,7 +336,7 @@ cd dataset_process/
 ### 3. 模型訓練
 
 ```bash
-cd CT_ViT_Training
+cd CT_ViT
 
 # 分類模型訓練
 python train.py
@@ -401,10 +369,10 @@ python GUI.py
 
 ```powershell
 # 使用智能資料集分割工具
-cd CT_ViT_Training\tools
+cd dataset_process
 python dataset_splitter.py `
-    --source_dir "..\..\matched_data_by_patient" `
-    --output_dir "..\..\dataset_splits" `
+    --source_dir "..\datasets\all_patient_data" `
+    --output_dir "..\datasets\dataset_splits" `
     --train_ratio 0.7 `
     --val_ratio 0.15 `
     --test_ratio 0.15
@@ -413,7 +381,7 @@ python dataset_splitter.py `
 ### 5. 模型訓練
 
 ```powershell
-cd CT_ViT_Training
+cd CT_ViT
 
 # 分類模型訓練
 python train.py
@@ -428,7 +396,7 @@ python unified_evaluator.py
 ### 6. 推理與評估
 
 ```powershell
-cd CT_ViT_Training
+cd CT_ViT
 
 # 分類推理
 python inference.py `
@@ -451,7 +419,7 @@ python inference.py `
 # 模型評估
 python inference.py `
     --model_path "models/classification_model" `
-    --input "../dataset_splits/test" `
+    --input "../datasets/dataset_splits/test" `
     --mode evaluate
 ```
 
@@ -459,7 +427,7 @@ python inference.py `
 
 ```powershell
 # 啟動RAG報告生成系統
-cd RAG
+cd LLM/RAG
 python GUI.py
 ```
 
@@ -467,14 +435,14 @@ python GUI.py
 
 ```powershell
 # 檢查特定患者數據
-cd matched_data_by_patient\A0001
+cd datasets\all_patient_data\A0001
 dir
 
 # 使用推理腳本處理單個DICOM文件
-cd ..\..\CT_ViT_Training
+cd ..\..\..\CT_ViT
 python inference.py `
     --model_path "models/classification_model" `
-    --input "../matched_data_by_patient/A0001/dicom_files/A0001000.dcm" `
+    --input "../datasets/all_patient_data/A0001/dicom_files/A0001000.dcm" `
     --mode single
 ```
 
@@ -482,17 +450,17 @@ python inference.py `
 
 ```powershell
 # 使用資料集工具進行批量分析
-cd CT_ViT_Training\tools
+cd dataset_process
 python dataset_splitter.py `
-    --source_dir "../../matched_data_by_patient" `
-    --output_dir "../../dataset_splits" `
+    --source_dir "../datasets/all_patient_data" `
+    --output_dir "../datasets/dataset_splits" `
     --analyze_only
 
 # 批量推理
-cd ..
+cd ../CT_ViT
 python inference.py `
     --model_path "models/classification_model" `
-    --input "../dataset_splits/test" `
+    --input "../datasets/dataset_splits/test" `
     --mode batch
 ```
 
@@ -503,8 +471,8 @@ python inference.py `
 ```json
 {
   "models": {
-    "detection_model_path": "CT_ViT_Training/models/best_detection_model.pth",
-    "classification_model_path": "CT_ViT_Training/models/best_classification_model.pth"
+    "detection_model_path": "CT_ViT/models/best_detection_model.pth",
+    "classification_model_path": "CT_ViT/models/best_classification_model.pth"
   },
   "processing": {
     "image_size": 224,
@@ -518,12 +486,12 @@ python inference.py `
     }
   },
   "data": {
-    "patient_data_dir": "matched_data_by_patient",
-    "dataset_splits_dir": "dataset_splits",
+    "patient_data_dir": "datasets/all_patient_data",
+    "dataset_splits_dir": "datasets/dataset_splits",
     "output_base_dir": "workflow_outputs"
   },
   "rag": {
-    "knowledge_base_path": "RAG/medical_knowledge_base",
+    "knowledge_base_path": "LLM/RAG/medical_knowledge_base",
     "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     "top_k": 5,
     "similarity_threshold": 0.7,
@@ -550,7 +518,7 @@ python inference.py `
 }
 ```
 
-### 訓練配置 (`CT_ViT_Training/configs/default_config.yaml`)
+### 訓練配置 (`CT_ViT/configs/default_config.yaml`)
 
 ```yaml
 # 完整訓練配置
@@ -577,7 +545,7 @@ data:
   augmentation: true
 ```
 
-### RAG配置 (`RAG/config.json`)
+### RAG配置 (`LLM/RAG/config.json`)
 
 ```json
 {
@@ -657,7 +625,7 @@ batch_process_patients(patients)
 問題: FileNotFoundError: 找不到模型文件
 解決方案: 
 - 檢查模型路徑，確認模型檔案存在
-- 運行系統測試確認功能正常: cd CT_ViT_Training; python test_system.py
+- 運行系統測試確認功能正常: cd CT_ViT; python test_system.py
 ```
 
 #### 2. CUDA記憶體不足
@@ -822,83 +790,13 @@ batch_process_patients(patients)
 ## 🏥 **胸部CT報告生成系統** 
 ### *讓AI協助醫療診斷，提升診斷效率和準確性！*
 
-**版本**: v2.1.0 | **最後更新**: 2025年7月25日 | **維護者**: FCU-BioLab Team
-
-*本系統僅供研究和教育用途，實際臨床應用請遵循相關醫療法規和標準。*
-    "patient_id": "A0001",
-    "examination_date": "2025-01-XX",
-    "ai_system_version": "CT-ViT Detection v1.0"
-  },
-  "clinical_findings": {
-    "primary_findings": [
-      {
-        "description": "檢測到疑似Adenocarcinoma (惡性腺癌)",
-        "location": "右肺上葉",
-        "size": {"width_mm": "35.4", "height_mm": "46.8"},
-        "characteristics": {
-          "confidence": 0.892,
-          "risk_level": "High Risk (惡性)"
-        }
-      }
-    ]
-  },
-  "recommendations": [
-    "建議儘快安排PET-CT檢查以確認病灶性質",
-    "建議胸腔外科專科會診評估治療方案"
-  ]
-}
-```
-
-### 視覺化輸出
-- 🖼️ **檢測結果圖**: 標註邊界框和類別標籤
-- 📈 **特徵分析圖**: 統計特徵和品質指標
-- 🎯 **信心度分布**: 檢測結果可信度分析
-- 📊 **風險評估圖**: 視覺化風險等級
-
-### 批次處理範例
-```python
-import os
-from pathlib import Path
-
-# 使用現有的推理系統進行批次處理
-def batch_process_patients(patient_list):
-    """批次處理多個患者"""
-    for patient_id in patient_list:
-        patient_dir = Path(f"matched_data_by_patient/{patient_id}")
-        if patient_dir.exists():
-            dicom_files = list(patient_dir.glob("dicom_files/*.dcm"))
-            print(f"患者 {patient_id}: 找到 {len(dicom_files)} 個DICOM檔案")
-        else:
-            print(f"患者 {patient_id}: 目錄不存在")
-
-# 範例使用
-patients = ["A0001", "A0002", "A0003"]
-batch_process_patients(patients)
-```
-
-### 自定義配置範例
-```json
-{
-  "models": {
-    "detection_model_path": "CT_ViT_Training/models/best_detection_model.pth",
-    "confidence_threshold": 0.5
-  },
-  "processing": {
-    "image_size": 224,
-    "batch_size": 8,
-    "use_gpu": true
-  },
-  "output": {
-    "save_visualizations": true,
-  }
-}
-```
+**版本**: v2.1.0 | **最後更新**: 2025年7月31日 | **維護者**: FCU-BioLab Team
 
 ---
 
 ## 🏥 **胸部CT報告生成系統** 
 ### *讓AI協助醫療診斷，提升診斷效率和準確性！*
 
-**版本**: v2.1.0 | **最後更新**: 2025年7月30日 | **維護者**: FCU-BioLab Team
+**版本**: v2.1.0 | **最後更新**: 2025年7月31日 | **維護者**: FCU-BioLab Team
 
 *本系統僅供研究和教育用途，實際臨床應用請遵循相關醫療法規和標準。*

@@ -8,8 +8,8 @@ LLM/RAG/dist
 LLM/RAG/model
 venv
 CT_ViT
-CT_ViT_Training/__pycache__
-CT_ViT_Training/src/__pycache__
+CT_ViT/__pycache__
+CT_ViT/src/__pycache__
 medsam2_segmentation/MedSAM2
 medsam2_segmentation/segmentation_result
 datasets
