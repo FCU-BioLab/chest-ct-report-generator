@@ -16,7 +16,7 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 import argparse
 
-def load_config(config_path: str = "../../config.json") -> Dict:
+def load_config(config_path: str = "../config.json") -> Dict:
     """載入配置文件"""
     config_file = Path(__file__).parent / config_path
     if not config_file.exists():
@@ -35,7 +35,7 @@ class DatasetSplitter:
                  train_ratio: float = 0.8,
                  test_ratio: float = 0.2,
                  random_seed: int = 42,
-                 config_path: str = "../../config.json"):
+                 config_path: str = "../config.json"):
         """初始化資料集劃分器"""
         # 載入配置
         config = load_config(config_path)
@@ -251,13 +251,13 @@ def main():
                        help="源資料目錄路徑")
     parser.add_argument("--output_dir", type=str, default=None,
                        help="輸出目錄路徑")
-    parser.add_argument("--train_ratio", type=float, default=0.8,
-                       help="訓練集比例 (預設: 0.8)")
-    parser.add_argument("--test_ratio", type=float, default=0.2,
-                       help="測試集比例 (預設: 0.2)")
+    parser.add_argument("--train_ratio", type=float, default=0.9,
+                       help="訓練集比例 (預設: 90% )")
+    parser.add_argument("--test_ratio", type=float, default=0.1,
+                       help="測試集比例 (預設: 10% )")
     parser.add_argument("--random_seed", type=int, default=42,
                        help="隨機種子 (預設: 42)")
-    parser.add_argument("--config", type=str, default="../../config.json",
+    parser.add_argument("--config", type=str, default="../config.json",
                        help="配置文件路徑")
     
     args = parser.parse_args()
