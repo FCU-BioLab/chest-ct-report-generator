@@ -109,18 +109,20 @@ class XMLAnnotationParser:
 class CTDetectionDataset(Dataset):
     """CT目標檢測資料集"""
     
-    def __init__(self, data_root, split='train', transform=None, target_size=224):
+    def __init__(self, data_root, split='train', transform=None, target_size=224, specific_patients=None):
         """
         Args:
             data_root: 資料根目錄 (matched_data_by_patient)
             split: 資料分割 ('train', 'val', 'test')
             transform: 影像變換
             target_size: 目標影像尺寸
+            specific_patients: 指定的患者列表 (用於K-Fold交叉驗證)
         """
         self.data_root = data_root
         self.split = split
         self.transform = transform
         self.target_size = target_size
+        self.specific_patients = specific_patients
         
         # 初始化解析器
         self.xml_parser = XMLAnnotationParser()
@@ -134,40 +136,46 @@ class CTDetectionDataset(Dataset):
         """載入DICOM-XML配對資料"""
         data_pairs = []
         
-        # 使用預分割的資料集 - 修正路徑計算
-        # data_root 是 matched_data_by_patient 的完整路徑
-        # 需要找到它的父目錄，然後找到 dataset_splits
-        project_root = os.path.dirname(self.data_root)
-        dataset_splits_dir = os.path.join(project_root, 'dataset_splits')
-        
-        print(f"資料根目錄: {self.data_root}")
-        print(f"專案根目錄: {project_root}")
-        print(f"資料集分割目錄: {dataset_splits_dir}")
-        
-        # 根據split載入對應的患者列表
-        if self.split == 'val':
-            split_name = 'validation'
+        # 如果指定了特定患者列表（K-Fold模式），使用該列表
+        if self.specific_patients is not None:
+            target_patients = self.specific_patients
+            print(f"使用指定的患者列表: {len(target_patients)} 個患者")
         else:
-            split_name = self.split
+            # 使用預分割的資料集 - 從splited_dataset載入
+            if self.split == 'train':
+                patient_list_file = os.path.join(self.data_root, 'train_patients.txt')
+            elif self.split == 'test':
+                patient_list_file = os.path.join(self.data_root, 'test_patients.txt')
+            else:
+                # 如果是val，但沒有指定specific_patients，則使用train的一部分
+                patient_list_file = os.path.join(self.data_root, 'train_patients.txt')
             
-        patient_list_file = os.path.join(dataset_splits_dir, f'{split_name}_patients.txt')
+            if os.path.exists(patient_list_file):
+                # 從患者列表文件載入
+                with open(patient_list_file, 'r') as f:
+                    target_patients = [line.strip() for line in f if line.strip()]
+                print(f"從 {patient_list_file} 載入了 {len(target_patients)} 個患者")
+            else:
+                # 如果沒有分割文件，使用所有患者
+                print(f"找不到分割文件 {patient_list_file}，使用所有患者資料")
+                # 查找實際的患者資料目錄
+                data_dir = os.path.join(self.data_root, self.split)
+                if os.path.exists(data_dir):
+                    target_patients = [f for f in os.listdir(data_dir) 
+                                      if os.path.isdir(os.path.join(data_dir, f))]
+                else:
+                    print(f"找不到資料目錄: {data_dir}")
+                    return []
         
-        if os.path.exists(patient_list_file):
-            # 從患者列表文件載入
-            with open(patient_list_file, 'r') as f:
-                target_patients = [line.strip() for line in f if line.strip()]
-            print(f"從 {patient_list_file} 載入了 {len(target_patients)} 個患者")
-        else:
-            # 如果沒有分割文件，使用所有患者
-            print(f"找不到分割文件 {patient_list_file}，使用所有患者資料")
-            target_patients = [f for f in os.listdir(self.data_root) 
-                              if os.path.isdir(os.path.join(self.data_root, f))]
+        # 根據split確定實際的資料路徑
+        actual_data_dir = os.path.join(self.data_root, 'train')  # 所有患者資料都在train目錄下
         
         # 遍歷目標患者資料夾
         for patient_folder in target_patients:
-            patient_path = os.path.join(self.data_root, patient_folder)
+            patient_path = os.path.join(actual_data_dir, patient_folder)
             
             if not os.path.exists(patient_path):
+                print(f"警告: 找不到患者資料夾 {patient_path}")
                 continue
             
             # 檢查資料夾結構
@@ -176,6 +184,7 @@ class CTDetectionDataset(Dataset):
             json_file = os.path.join(patient_path, f'{patient_folder}_file_list.json')
             
             if not (os.path.exists(dicom_path) and os.path.exists(xml_path) and os.path.exists(json_file)):
+                print(f"警告: 患者 {patient_folder} 缺少必要檔案")
                 continue
             
             # 從JSON文件讀取配對關係

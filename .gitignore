@@ -13,3 +13,4 @@ CT_ViT/src/__pycache__
 medsam2_segmentation/MedSAM2
 medsam2_segmentation/segmentation_result
 datasets
+detection/__pycache__
