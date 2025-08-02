@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CT-ViT 目標檢測推理腳本
-使用訓練好的檢測模型進行腫瘤檢測和報告生成
+FPS-Former 目標檢測推理腳本
+使用訓練好的FPS-Former檢測模型進行腫瘤檢測和報告生成
 
 使用方式:
-python inference_detection.py --model_path CT_ViT_Detection/best_detection_model.pth --input_dicom path/to/dicom/file.dcm
+python inference_detection.py --model_path FPS_Former_Detection/best_detection_model.pth --input_dicom path/to/dicom/file.dcm
 
 主要功能：
-1. 載入訓練好的檢測模型
+1. 載入訓練好的FPS-Former檢測模型
 2. 處理DICOM檔案
 3. 執行腫瘤檢測
 4. 生成結構化醫療報告
 5. 視覺化檢測結果
 
 作者: GitHub Copilot
-日期: 2025-07-25
+日期: 2025-08-02（更新為FPS-Former）
 """
 
 import os
@@ -35,11 +35,10 @@ import cv2
 # 添加src路徑
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from detection_model import CTViTForDetection
-from transformers import ViTConfig
+from fps_former_model import FPSFormerForDetection, create_fps_former_detection_model
 
 class CTDetectionInference:
-    """CT目標檢測推理器"""
+    """CT目標檢測推理器（基於FPS-Former）"""
     
     def __init__(self, model_path, device='cuda'):
         """
@@ -69,28 +68,29 @@ class CTDetectionInference:
         }
         
     def _load_model(self, model_path):
-        """載入模型"""
-        print(f"載入模型: {model_path}")
+        """載入FPS-Former模型"""
+        print(f"載入FPS-Former模型: {model_path}")
         
         # 載入檢查點
         checkpoint = torch.load(model_path, map_location=self.device)
         
-        # 創建模型配置
-        config = ViTConfig(
-            image_size=224,
-            patch_size=16,
-            num_channels=3,
-            hidden_size=768,
-            num_hidden_layers=12,
-            num_attention_heads=12,
-            intermediate_size=3072,
-            num_labels=5,  # 包含背景
-            hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.1
-        )
+        # 創建FPS-Former模型配置
+        config = {
+            'num_classes': 5,  # 包含背景
+            'image_size': 224,
+            'patch_size': 4,
+            'num_channels': 3,
+            'embed_dim': 96,
+            'depths': [2, 2, 6, 2],
+            'num_heads': [3, 6, 12, 24],
+            'window_size': 7,
+            'drop_rate': 0.1,
+            'attn_drop_rate': 0.1,
+            'drop_path_rate': 0.1
+        }
         
-        # 創建模型
-        model = CTViTForDetection(config)
+        # 創建FPS-Former模型
+        model = FPSFormerForDetection(config)
         
         # 載入權重
         if 'model_state_dict' in checkpoint:
@@ -101,7 +101,7 @@ class CTDetectionInference:
         model.to(self.device)
         model.eval()
         
-        print(f"模型載入成功，設備: {self.device}")
+        print(f"FPS-Former模型載入成功，設備: {self.device}")
         return model
     
     def preprocess_dicom(self, dicom_path, target_size=224):
@@ -314,10 +314,10 @@ class CTDetectionInference:
         plt.show()
 
 def main():
-    parser = argparse.ArgumentParser(description='CT-ViT目標檢測推理')
+    parser = argparse.ArgumentParser(description='FPS-Former目標檢測推理')
     
     parser.add_argument('--model_path', type=str, required=True,
-                      help='訓練好的模型路徑')
+                      help='訓練好的FPS-Former模型路徑')
     parser.add_argument('--input_dicom', type=str, required=True,
                       help='輸入DICOM檔案路徑')
     parser.add_argument('--patient_id', type=str, default='Unknown',
@@ -333,7 +333,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     # 初始化推理器
-    print("初始化CT檢測推理器...")
+    print("初始化FPS-Former檢測推理器...")
     inference = CTDetectionInference(args.model_path)
     
     # 預處理影像

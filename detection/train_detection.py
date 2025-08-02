@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CT-ViT 目標檢測訓練腳本
-將現有的分類模型升級為目標檢測模型
+FPS-Former 目標檢測訓練腳本
+基於Feature Pyramid Swin Transformer的目標檢測模型
 
 🚀 快速使用方式:
 
@@ -17,7 +17,7 @@ CT-ViT 目標檢測訓練腳本
    python train_detection.py --mode custom --val_ratio 0.15 --num_epochs 100
 
 📋 主要功能：
-1. 從現有分類模型載入預訓練權重
+1. 基於FPS-Former的目標檢測模型
 2. 支援傳統訓練和K-Fold交叉驗證兩種模式
 3. 自動從train資料分割驗證集
 4. 訓練目標檢測模型（分類+邊界框回歸）
@@ -25,7 +25,7 @@ CT-ViT 目標檢測訓練腳本
 6. 完整的日誌記錄和TensorBoard監控
 
 作者: GitHub Copilot
-日期: 2025-08-01（更新）
+日期: 2025-08-02（更新為FPS-Former）
 """
 
 import os
@@ -51,9 +51,8 @@ from sklearn.model_selection import KFold
 # 添加src路徑
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from detection_model import CTViTForDetection, create_detection_model_from_classification
+from fps_former_model import FPSFormerForDetection, create_fps_former_detection_model, create_fps_former_from_classification
 from detection_dataset import CTDetectionDataset, create_detection_dataloaders
-from transformers import ViTConfig
 
 def setup_logging(log_dir):
     """設置日誌"""
@@ -252,26 +251,17 @@ def train_detection_model_kfold(args):
         
         # 創建模型
         if args.classification_model_path and os.path.exists(args.classification_model_path):
-            logger.info(f"從分類模型載入預訓練權重: {args.classification_model_path}")
-            model = create_detection_model_from_classification(
+            logger.info(f"嘗試從分類模型載入預訓練權重: {args.classification_model_path}")
+            model = create_fps_former_from_classification(
                 args.classification_model_path, 
                 num_classes=args.num_classes
             )
         else:
-            logger.info("創建新的檢測模型")
-            config = ViTConfig(
-                image_size=args.image_size,
-                patch_size=16,
-                num_channels=3,  # RGB格式
-                hidden_size=768,
-                num_hidden_layers=12,
-                num_attention_heads=12,
-                intermediate_size=3072,
-                num_labels=args.num_classes,
-                hidden_dropout_prob=0.1,
-                attention_probs_dropout_prob=0.1
+            logger.info("創建新的FPS-Former檢測模型")
+            model = create_fps_former_detection_model(
+                num_classes=args.num_classes, 
+                image_size=args.image_size
             )
-            model = CTViTForDetection(config)
         
         model = model.to(device)
         
@@ -457,26 +447,17 @@ def train_detection_model(args):
     
     # 創建模型
     if args.classification_model_path and os.path.exists(args.classification_model_path):
-        logger.info(f"從分類模型載入預訓練權重: {args.classification_model_path}")
-        model = create_detection_model_from_classification(
+        logger.info(f"嘗試從分類模型載入預訓練權重: {args.classification_model_path}")
+        model = create_fps_former_from_classification(
             args.classification_model_path, 
             num_classes=args.num_classes
         )
     else:
-        logger.info("創建新的檢測模型")
-        config = ViTConfig(
-            image_size=args.image_size,
-            patch_size=16,
-            num_channels=3,  # RGB格式
-            hidden_size=768,
-            num_hidden_layers=12,
-            num_attention_heads=12,
-            intermediate_size=3072,
-            num_labels=args.num_classes,
-            hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.1
+        logger.info("創建新的FPS-Former檢測模型")
+        model = create_fps_former_detection_model(
+            num_classes=args.num_classes, 
+            image_size=args.image_size
         )
-        model = CTViTForDetection(config)
     
     model = model.to(device)
     
@@ -620,7 +601,7 @@ def train_detection_model(args):
 def print_usage_examples():
     """打印使用範例"""
     print("\n" + "="*70)
-    print("📚 CT-ViT 目標檢測訓練腳本使用指南")
+    print("📚 FPS-Former 目標檢測訓練腳本使用指南")
     print("="*70)
     print("\n🚀 快速開始:")
     print("1. 傳統訓練模式（推薦用於最終模型訓練）:")
@@ -640,7 +621,7 @@ def print_usage_examples():
     print("   python train_detection.py --mode custom --batch_size 16 --learning_rate 5e-5")
     print()
     print("📊 結果分析（僅K-Fold模式）:")
-    print("   python analyze_kfold_results.py --results_dir CT_ViT_Detection")
+    print("   python analyze_kfold_results.py --results_dir FPS_Former_Detection")
     print()
     print("📋 參數說明:")
     print("- --mode: 執行模式 [traditional/kfold/custom]")
@@ -652,7 +633,7 @@ def print_usage_examples():
     print("="*70)
 
 def main():
-    parser = argparse.ArgumentParser(description='CT-ViT目標檢測訓練')
+    parser = argparse.ArgumentParser(description='FPS-Former目標檢測訓練')
     
     # 添加執行模式選擇
     parser.add_argument('--mode', type=str, choices=['traditional', 'kfold', 'custom'], 
@@ -668,13 +649,13 @@ def main():
     parser.add_argument('--data_root', type=str, default=default_data_root,
                       help='資料根目錄')
     
-    # 默認分類模型路徑
-    default_classification_model = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'CT_ViT', 'models', 'best_model.pth')
+    # 默認分類模型路徑（FPS-Former暫時沒有預訓練分類模型）
+    default_classification_model = ""  # 留空，因為FPS-Former是新模型
     parser.add_argument('--classification_model_path', type=str, default=default_classification_model,
-                      help='預訓練分類模型路徑')
+                      help='預訓練分類模型路徑（FPS-Former暫無預訓練模型）')
     
     # 默認輸出目錄
-    default_output_dir = os.path.join(os.path.dirname(__file__), 'CT_ViT_Detection')
+    default_output_dir = os.path.join(os.path.dirname(__file__), 'FPS_Former_Detection')
     parser.add_argument('--output_dir', type=str, default=default_output_dir,
                       help='輸出目錄')
     parser.add_argument('--num_classes', type=int, default=5,

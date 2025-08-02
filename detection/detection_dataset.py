@@ -192,11 +192,27 @@ class CTDetectionDataset(Dataset):
                 with open(json_file, 'r', encoding='utf-8') as f:
                     json_data = json.load(f)
                 
-                # 遍歷所有成功複製的文件對
-                for file_pair in json_data.get('copied_files', []):
+                # 建立DICOM和XML檔案的映射（基於UID配對）
+                dcm_files = {dcm['uid']: dcm for dcm in json_data.get('copied_dcm_files', [])}
+                
+                # 對於XML檔案，從檔案名稱中提取UID（檔案名就是UID.xml）
+                xml_files = {}
+                for xml in json_data.get('copied_xml_files', []):
+                    xml_filename = os.path.basename(xml['copied_file'])
+                    # 從XML檔案名稱中提取UID（去掉.xml副檔名）
+                    xml_uid = os.path.splitext(xml_filename)[0]
+                    xml_files[xml_uid] = xml
+                
+                # 找出有對應XML標註的DICOM檔案
+                common_uids = set(dcm_files.keys()) & set(xml_files.keys())
+                
+                for uid in common_uids:
+                    dcm_info = dcm_files[uid]
+                    xml_info = xml_files[uid]
+                    
                     # 提取檔案名稱
-                    dicom_filename = os.path.basename(file_pair['copied_dcm'])
-                    xml_filename = os.path.basename(file_pair['copied_xml'])
+                    dicom_filename = os.path.basename(dcm_info['copied_file'])
+                    xml_filename = os.path.basename(xml_info['copied_file'])
                     
                     # 檢查檔案是否存在
                     dicom_full_path = os.path.join(dicom_path, dicom_filename)
@@ -208,7 +224,7 @@ class CTDetectionDataset(Dataset):
                             'dicom_path': dicom_full_path,
                             'xml_path': xml_full_path,
                             'base_name': os.path.splitext(dicom_filename)[0],
-                            'uid': file_pair['uid']
+                            'uid': uid
                         })
                     else:
                         print(f"警告: 檔案不存在 - DICOM: {dicom_full_path}, XML: {xml_full_path}")
