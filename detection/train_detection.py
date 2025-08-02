@@ -662,9 +662,9 @@ def main():
                       help='類別數量（包含背景）')
     parser.add_argument('--image_size', type=int, default=224,
                       help='影像尺寸')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=16,
                       help='批次大小')
-    parser.add_argument('--num_epochs', type=int, default=50,
+    parser.add_argument('--num_epochs', type=int, default=500,
                       help='訓練輪數')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                       help='學習率')
