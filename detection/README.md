@@ -1,11 +1,11 @@
-# FPS-Former 目標檢測訓練系統
+# Faster R-CNN 目標檢測訓練系統
 
-基於 Feature Pyramid Swin Transformer 的胸部 CT 腫瘤目標檢測模型，支援分類和邊界框回歸。
+基於 Faster R-CNN 的胸部 CT 腫瘤目標檢測模型，專門針對二分類檢測任務（背景 vs 病灶）。
 
 ## 🌟 主要特色
 
-- **🎯 目標檢測**: 同時進行腫瘤分類和位置定位
-- **🏗️ FPS-Former架構**: 採用先進的 Swin Transformer 和特徵金字塔網路
+- **🎯 二分類檢測**: 精確區分背景與病灶並預測邊界框
+- **🏗️ Faster R-CNN架構**: 採用 ResNet50-FPN 作為骨幹網路
 - **🔄 多種訓練模式**: 支援傳統訓練和 K-Fold 交叉驗證
 - **🚀 一鍵執行**: 整合所有功能於單一腳本
 - **📊 智能分析**: 自動生成訓練報告和視覺化
@@ -18,311 +18,195 @@
 確保您的資料位於正確位置：
 ```
 E:\GitHub\chest-ct-report-generator\datasets\splited_dataset\
-├── train_patients.txt    # 訓練患者列表
-├── test_patients.txt     # 測試患者列表
-└── train/               # 患者資料目錄
-    ├── A0001/
-    │   ├── dicom_files/
-    │   ├── xml_annotations/
-    │   └── A0001_file_list.json
-    └── ...
+├── train/
+│   ├── train_patients.txt          # 訓練患者列表
+│   └── [patient_folders]/          # 患者資料夾
+│       ├── dicom_files/            # DICOM 檔案
+│       └── xml_annotations/        # XML 標註檔案
+└── test/
+    ├── test_patients.txt           # 測試患者列表
+    └── [patient_folders]/          # 患者資料夾
 ```
 
-### 1. 傳統訓練模式（推薦用於最終模型）
+### 🔥 一鍵訓練
+
+**1. 傳統訓練模式（推薦用於最終模型）**
+```bash
+python detection\train_detection.py --mode traditional
+```
+
+**2. K-Fold 交叉驗證（推薦用於模型評估）**
+```bash
+python detection\train_detection.py --mode kfold
+```
+
+**3. 快速測試（2個epoch）**
+```bash
+python detection\train_detection.py --mode traditional --num_epochs 2 --batch_size 2
+```
+
+## ⚙️ 進階配置
+
+### 自訂參數訓練
 
 ```bash
-python train_detection.py --mode traditional
+# 自訂傳統訓練
+python detection\train_detection.py --mode custom --val_ratio 0.15 --num_epochs 100 --learning_rate 5e-5
+
+# 自訂K-Fold訓練
+python detection\train_detection.py --mode custom --use_kfold --k_folds 10 --num_epochs 30
 ```
 
-**特點：**
-- 自動從 train 資料分割 20% 作為驗證集
-- 訓練單一最佳模型
-- 適合生產環境和最終部署
+### 📋 參數說明
 
-### 2. K-Fold 交叉驗證模式（推薦用於模型評估）
-
-```bash
-python train_detection.py --mode kfold
-```
-
-**特點：**
-- 5-Fold 交叉驗證
-- 獲得可靠的性能評估統計
-- 適合學術研究和模型比較
-
-### 3. 查看所有使用範例
-
-```bash
-python train_detection.py --help-examples
-```
-
-## ⚙️ 進階使用
-
-### 自訂傳統訓練參數
-
-```bash
-# 調整驗證集比例和訓練輪數
-python train_detection.py --mode custom --val_ratio 0.15 --num_epochs 100 --batch_size 16
-
-# 調整學習率和隨機種子
-python train_detection.py --mode custom --learning_rate 5e-5 --random_seed 123
-```
-
-### 自訂 K-Fold 訓練參數
-
-```bash
-# 10-Fold 交叉驗證，每個 fold 訓練 30 輪
-python train_detection.py --mode custom --use_kfold --k_folds 10 --num_epochs 30
-
-# 調整批次大小和學習率
-python train_detection.py --mode custom --use_kfold --batch_size 16 --learning_rate 1e-3
-```
-
-### 完全自訂模式
-
-```bash
-python train_detection.py --mode custom \
-    --data_root /path/to/your/data \
-    --output_dir /path/to/output \
-    --classification_model_path /path/to/pretrained/model.pth \
-    --num_classes 5 \
-    --image_size 256 \
-    --batch_size 12 \
-    --num_epochs 200 \
-    --learning_rate 2e-4 \
-    --val_ratio 0.25 \
-    --random_seed 42
-```
-
-## 📋 參數說明
-
-### 通用參數
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
-| `--mode` | `custom` | 執行模式: `traditional` / `kfold` / `custom` |
+| `--mode` | `custom` | 執行模式：traditional/kfold/custom |
 | `--num_epochs` | `50` | 訓練輪數 |
 | `--batch_size` | `8` | 批次大小 |
 | `--learning_rate` | `1e-4` | 學習率 |
-| `--random_seed` | `42` | 隨機種子 |
-| `--image_size` | `224` | 輸入影像尺寸 |
-| `--num_classes` | `5` | 類別數量（包含背景） |
-
-### 傳統訓練模式參數
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `--val_ratio` | `0.2` | 驗證集比例（20%） |
-
-### K-Fold 模式參數
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `--use_kfold` | `False` | 啟用 K-Fold 交叉驗證 |
-| `--k_folds` | `5` | Fold 數量 |
-
-### 路徑參數
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
+| `--val_ratio` | `0.2` | 驗證集比例 |
+| `--k_folds` | `5` | K-Fold 數量 |
+| `--num_classes` | `2` | 類別數量（背景+病灶） |
+| `--image_size` | `512` | 影像尺寸 |
 | `--data_root` | `../datasets/splited_dataset` | 資料根目錄 |
-| `--output_dir` | `./FPS_Former_Detection` | 輸出目錄 |
-| `--classification_model_path` | `` | 預訓練分類模型路徑（FPS-Former暫無） |
+| `--output_dir` | `./Faster_RCNN_Detection` | 輸出目錄 |
 
-## 📊 結果分析
+## 📊 訓練輸出
 
-### 傳統模式輸出結構
+### 傳統訓練模式
 ```
-FPS_Former_Detection/
-├── best_detection_model.pth     # 最佳模型權重
-├── logs/
-│   └── training.log            # 詳細訓練日誌
-├── training_args.json          # 訓練參數記錄
-└── predictions_epoch_X.png     # 預測結果視覺化
+Faster_RCNN_Detection/
+├── best_detection_model.pth       # 最佳模型
+├── training_args.json             # 訓練參數
+├── logs/                          # 訓練日誌
+│   ├── training.log              # 詳細日誌
+│   └── events.out.tfevents.*     # TensorBoard
+└── predictions_epoch_*.png        # 預測視覺化
 ```
 
-### K-Fold 模式輸出結構
+### K-Fold 訓練模式
 ```
-FPS_Former_Detection/
-├── fold_1/                     # Fold 1 結果
-│   ├── best_detection_model.pth
-│   ├── logs/training.log
-│   ├── fold_results.json
-│   └── predictions_epoch_X.png
-├── fold_2/                     # Fold 2 結果
-├── ...
-├── kfold_final_results.json    # 總體統計結果
-└── analysis/                   # 分析圖表（需運行分析腳本）
-    ├── fold_accuracy_comparison.png
-    ├── training_curves.png
-    └── kfold_analysis_report.md
+Faster_RCNN_Detection/
+├── kfold_final_results.json       # 總體結果
+├── fold_1/                        # Fold 1 結果
+│   ├── best_detection_model.pth   # 該fold最佳模型
+│   ├── fold_results.json          # 該fold詳細結果
+│   └── logs/                      # 該fold日誌
+├── fold_2/                        # Fold 2 結果
+└── ...
 ```
+
+## 📈 結果分析
 
 ### K-Fold 結果分析
-
-訓練完成後，使用以下命令生成詳細分析：
-
 ```bash
-python analyze_kfold_results.py --results_dir FPS_Former_Detection
+python detection\analyze_kfold_results.py --results_dir Faster_RCNN_Detection
 ```
 
-**分析內容包括：**
-- 📈 各 Fold 準確率比較圖
-- 📉 訓練過程曲線圖
-- 📋 詳細統計報告
-- 📊 性能穩定性分析
-
-## 🎯 推薦使用流程
-
-### 1. 模型評估階段
+### TensorBoard 監控
 ```bash
-# 使用 K-Fold 評估模型性能
-python train_detection.py --mode kfold
+# 傳統模式
+tensorboard --logdir Faster_RCNN_Detection/logs
 
-# 分析結果
-python analyze_kfold_results.py
+# K-Fold 模式
+tensorboard --logdir Faster_RCNN_Detection
 ```
 
-### 2. 超參數調優階段
-```bash
-# 測試不同的學習率
-python train_detection.py --mode kfold --learning_rate 5e-5
+## 🔍 模型推理
 
-# 測試不同的批次大小
-python train_detection.py --mode kfold --batch_size 16
+```bash
+python detection\inference_detection.py \
+  --model_path Faster_RCNN_Detection/best_detection_model.pth \
+  --input_dicom path/to/dicom.dcm \
+  --confidence_threshold 0.5
 ```
 
-### 3. 最終模型訓練階段
-```bash
-# 使用最佳參數訓練最終FPS-Former模型
-python train_detection.py --mode traditional --num_epochs 100
-```
+## 📝 訓練日誌
 
-## 🔄 推理使用
+### 傳統模式
+- **詳細日誌**: `Faster_RCNN_Detection/logs/training.log`
+- **TensorBoard**: `Faster_RCNN_Detection/logs/`
 
-### 基本推理
-```bash
-python inference_detection.py \
-  --model_path FPS_Former_Detection/best_detection_model.pth \
-  --input_dicom /path/to/dicom/file.dcm \
-  --patient_id P001 \
-  --output_dir results/
-```
+### K-Fold 模式
+- **總體結果**: `Faster_RCNN_Detection/kfold_final_results.json`
+- **各Fold日誌**: `Faster_RCNN_Detection/fold_X/logs/training.log`
 
-### 批量推理
-```bash
-# 處理整個資料夾
-for file in /path/to/dicom/*.dcm; do
-  python inference_detection.py \
-    --model_path FPS_Former_Detection/best_detection_model.pth \
-    --input_dicom "$file" \
-    --output_dir results/
-done
-```
+## 🏗️ 模型架構
 
-## 📈 性能指標
+### Faster R-CNN 組件
+- **骨幹網路**: ResNet50-FPN (預訓練於COCO)
+- **區域提議網路(RPN)**: 生成候選邊界框
+- **分類頭**: 二分類（背景 vs 病灶）
+- **回歸頭**: 邊界框座標預測
 
-### 模型架構
-- **骨幹網路**: FPS-Former (Feature Pyramid Swin Transformer)
-- **檢測頭**: 分類 + 邊界框回歸 + 物件存在性判斷
-- **特徵金字塔**: 多尺度特徵提取和融合
-- **損失函數**: 多任務學習（分類損失 + 邊界框損失 + 物件損失）
+### 主要優勢
+1. **端到端訓練**: 同時優化檢測和分類
+2. **成熟架構**: 經過大量驗證的目標檢測方法
+3. **預訓練權重**: 基於COCO資料集的預訓練模型
+4. **靈活輸入**: 支援灰階醫學影像
 
-### FPS-Former 優勢
-- **多尺度特徵**: 特徵金字塔網路提供更豐富的特徵表示
-- **局部-全局注意力**: Swin Transformer 的窗口注意力機制
-- **計算效率**: 相比全局注意力更加高效
-- **醫學影像適配**: 適合處理高分辨率醫學影像
-
-### 預期性能
-- **平均準確率**: 87-93%（比CT-ViT提升2-3%）
-- **邊界框精度**: L1 誤差 < 0.08
-- **處理速度**: 0.3-0.6 秒/影像
-- **模型穩定性**: K-Fold 標準差 < 0.04
-
-### 支援的腫瘤類型
-- **A類**: 惡性腫瘤 (Adenocarcinoma)
-- **B類**: 良性腫瘤
-- **E類**: E 類病變
-- **G類**: G 類病變
-- **背景**: 無腫瘤區域
-
-## 🔧 故障排除
+## 🛠️ 故障排除
 
 ### 常見問題
 
-#### 1. 記憶體不足
+**Q: 記憶體不足錯誤**
 ```bash
-# 解決方案：減少批次大小
-python train_detection.py --mode traditional --batch_size 4
+# 減少批次大小
+python detection\train_detection.py --mode traditional --batch_size 2
+
+# 減少工作程序
+# (程式已自動設為num_workers=0)
 ```
 
-#### 2. CUDA 錯誤
-- 檢查 GPU 記憶體使用情況
-- 程式會自動偵測並切換到 CPU（較慢）
+**Q: 沒有檢測到任何病灶**
+- 檢查置信度閾值設定
+- 確認標註檔案格式正確
+- 增加訓練輪數
 
-#### 3. 資料載入錯誤
-- 確認 `train_patients.txt` 檔案存在
-- 檢查患者資料夾結構是否正確
-- 驗證 DICOM 和 XML 檔案配對
+**Q: 訓練速度慢**
+- 確認使用GPU訓練
+- 檢查資料載入效率
+- 考慮使用較小的影像尺寸
 
-#### 4. 模型載入失敗
-- 檢查預訓練模型路徑是否正確
-- 確認模型檔案完整性
-
-### 日誌檢查
-
-**傳統模式日誌位置：**
-```
-FPS_Former_Detection/logs/training.log
-```
-
-**K-Fold 模式日誌位置：**
-```
-FPS_Former_Detection/fold_X/logs/training.log
-```
-
-### 除錯模式
-
+### 檢查系統狀態
 ```bash
-# 使用較小的參數進行快速測試
-python train_detection.py --mode traditional --num_epochs 5 --batch_size 2
+# 測試模型創建
+python detection\test_faster_rcnn.py
+
+# 檢查資料載入
+python detection\faster_rcnn_dataset.py
 ```
 
-## 📞 技術支援
+## 📚 技術細節
 
-### 環境要求
-- Python 3.8+
-- PyTorch 1.9+
-- transformers
-- scikit-learn
-- matplotlib
-- numpy
-- tqdm
+### 損失函數
+- **分類損失**: CrossEntropyLoss
+- **回歸損失**: SmoothL1Loss
+- **RPN損失**: 結合分類和回歸損失
 
-### 安裝依賴
-```bash
-pip install torch torchvision transformers scikit-learn matplotlib numpy tqdm tensorboard
-```
+### 評估指標
+- **Precision**: 檢測精度
+- **Recall**: 檢測召回率  
+- **F1-Score**: 綜合評估指標
+- **IoU**: 邊界框重疊度
 
-### 聯絡資訊
-如遇問題，請檢查：
-1. 資料路徑和格式是否正確
-2. 依賴套件是否完整安裝
-3. GPU 記憶體是否充足
-4. 日誌檔案中的具體錯誤訊息
+### 資料擴增
+- **隨機縮放**: 多尺度訓練
+- **正規化**: 基於ImageNet統計
+- **灰階轉RGB**: 適配預訓練模型
 
-## 🔄 版本更新
+## 🎯 最佳實踐
 
-### v2.0 (2025-08-01) - 整合版
-- ✅ 整合三個訓練腳本為單一檔案
-- ✅ 新增模式選擇功能（traditional/kfold/custom）
-- ✅ 改善用戶介面和錯誤處理
-- ✅ 完善文檔和使用範例
+1. **使用K-Fold評估模型性能**，獲得可靠的評估結果
+2. **傳統模式訓練最終模型**，確保最佳性能
+3. **監控訓練日誌**，及時調整參數
+4. **視覺化檢測結果**，驗證模型有效性
+5. **保存訓練參數**，確保結果可重現
 
-### v1.0 (2025-07-25) - 初始版
-- ✅ 基本目標檢測功能
-- ✅ K-Fold 交叉驗證支援
-- ✅ 預訓練模型載入
+## 🚨 注意事項
 
----
-
-**開發者**: GitHub Copilot  
-**最後更新**: 2025-08-01  
-**授權**: MIT License
+- 確保 DICOM 檔案與 XML 標註的 SOPInstanceUID 匹配
+- 訓練前建議先運行測試腳本驗證環境
+- K-Fold 模式需要更長時間但提供更可靠的評估
+- 模型權重檔案較大，注意儲存空間

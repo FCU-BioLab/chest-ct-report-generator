@@ -14,4 +14,4 @@ medsam2_segmentation/MedSAM2
 medsam2_segmentation/segmentation_result
 datasets
 detection/__pycache__
-detection/FPS_Former_Detection
+detection/Faster_RCNN_Detection
