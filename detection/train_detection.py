@@ -799,7 +799,7 @@ def main():
     
     parser.add_argument('--data_dir', type=str, default=os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset'), 
                        help='數據集目錄路徑')
-    parser.add_argument('--k_folds', type=int, default=2, 
+    parser.add_argument('--k_folds', type=int, default=5, 
                        help='K-fold交叉驗證的fold數量')
     parser.add_argument('--num_epochs', type=int, default=50, 
                        help='每個fold的訓練輪數')
