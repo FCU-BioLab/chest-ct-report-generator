@@ -6,12 +6,13 @@ Faster R-CNN 目標檢測資料處理模組
 
 主要功能：
 1. 解析XML標註檔案（Pascal VOC格式）
-2. 二分類：背景(0) vs 病灶(1)
+2. 只載入有標註的DICOM檔案（病灶檢測）
 3. 生成Faster R-CNN格式的資料集
 4. 資料擴增和預處理
 
 作者: GitHub Copilot
 日期: 2025-08-06
+更新: 2025-08-07 - 修改為只載入有XML標註的資料
 """
 
 import os
@@ -35,13 +36,13 @@ class XMLAnnotationParser:
     def __init__(self, logger=None):
         self.logger = logger or logging.getLogger(__name__)
         
-        # 二分類映射：背景(0) vs 病灶(1)
+        # 單一病灶類別映射（只有病灶，無背景）
         self.class_mapping = {
             'A': 1,  # 所有病灶類型都歸類為1
             'B': 1, 
             'E': 1,
             'G': 1,
-            'background': 0
+            'background': 0  # 保留，但實際不會使用
         }
         
     def parse_xml(self, xml_path: str) -> Dict[str, Any]:
@@ -107,7 +108,7 @@ class XMLAnnotationParser:
 class CTDetectionDataset(Dataset):
     """
     CT目標檢測資料集 - Faster R-CNN版本
-    二分類：背景 vs 病灶
+    只載入有XML標註的病灶資料
     """
     
     def __init__(self, 
@@ -150,7 +151,7 @@ class CTDetectionDataset(Dataset):
                 T.Normalize(mean=[0.485], std=[0.229])  # 灰階影像正規化
             ])
         
-        self.logger.info(f"載入 {split} 資料集: {len(self.samples)} 個樣本")
+        self.logger.info(f"載入 {split} 資料集: {len(self.samples)} 個有標註的樣本")
     
     def _load_samples(self, specific_patients: Optional[List[str]] = None) -> List[Dict]:
         """載入樣本資料"""
@@ -173,9 +174,47 @@ class CTDetectionDataset(Dataset):
                 else:
                     patients_to_load = []
         
+        # 檢查是否找到患者
+        if len(patients_to_load) == 0:
+            print(f"❌ 錯誤：在 {self.data_root} 中找不到任何患者資料")
+            print(f"   請檢查路徑是否正確或患者列表檔案是否存在")
+            
+            # 詳細的路徑診斷
+            abs_data_root = os.path.abspath(self.data_root)
+            print(f"\n🔍 路徑診斷:")
+            print(f"   相對路徑: {self.data_root}")
+            print(f"   絕對路徑: {abs_data_root}")
+            print(f"   路徑存在: {os.path.exists(abs_data_root)}")
+            
+            if os.path.exists(abs_data_root):
+                print(f"   目錄內容:")
+                try:
+                    contents = os.listdir(abs_data_root)
+                    for item in contents:
+                        item_path = os.path.join(abs_data_root, item)
+                        item_type = "📁" if os.path.isdir(item_path) else "📄"
+                        print(f"     {item_type} {item}")
+                except Exception as e:
+                    print(f"     無法讀取目錄內容: {e}")
+            
+            patients_file = os.path.join(self.data_root, f'{self.split}_patients.txt')
+            print(f"   患者列表檔案: {patients_file}")
+            print(f"   檔案存在: {os.path.exists(patients_file)}")
+            
+            split_dir = os.path.join(self.data_root, self.split)
+            print(f"   分割目錄: {split_dir}")
+            print(f"   目錄存在: {os.path.exists(split_dir)}")
+            
+            return samples
+        
         # 為每個患者載入樣本
         total_patients = len(patients_to_load)
-        print(f"開始載入 {total_patients} 位患者的資料...")
+        print(f"開始載入 {total_patients} 位患者的有標註資料...")
+        
+        total_annotated_files = 0
+        failed_patients = []
+        patients_without_annotations = []
+        pydicom_errors = []
         
         for i, patient_id in enumerate(patients_to_load):
             # 更頻繁的進度顯示
@@ -185,6 +224,8 @@ class CTDetectionDataset(Dataset):
             try:
                 patient_dir = os.path.join(self.data_root, self.split, patient_id)
                 if not os.path.exists(patient_dir):
+                    print(f"⚠️  患者目錄不存在: {patient_dir}")
+                    failed_patients.append(patient_id)
                     continue
                 
                 # 檢查DICOM檔案和XML標註的目錄結構
@@ -195,77 +236,146 @@ class CTDetectionDataset(Dataset):
                     # 新的目錄結構：dicom_files/ 和 xml_annotations/
                     dicom_files = [f for f in os.listdir(dicom_dir) if f.endswith('.dcm')]
                     
+                    if len(dicom_files) == 0:
+                        print(f"⚠️  患者 {patient_id}: 找不到DICOM檔案")
+                        failed_patients.append(patient_id)
+                        continue
+                    
                     # 載入XML標註檔案，創建UID到XML路徑的映射
                     xml_uid_to_path = {}
                     if os.path.exists(xml_dir):
                         xml_files = [f for f in os.listdir(xml_dir) if f.endswith('.xml')]
+                        if len(xml_files) == 0:
+                            print(f"⚠️  患者 {patient_id}: 找不到XML標註檔案")
+                            patients_without_annotations.append(patient_id)
+                            continue
+                        
                         for xml_file in xml_files:
                             # XML檔名就是SOPInstanceUID
                             xml_uid = os.path.splitext(xml_file)[0]
                             xml_uid_to_path[xml_uid] = os.path.join(xml_dir, xml_file)
+                    else:
+                        print(f"⚠️  患者 {patient_id}: XML標註目錄不存在")
+                        patients_without_annotations.append(patient_id)
+                        continue
                     
-                    # 處理所有 DICOM 檔案（完全移除抽樣限制）
+                    # 檢查pydicom可用性
+                    if pydicom is None:
+                        if patient_id not in pydicom_errors:
+                            print(f"❌ 錯誤：pydicom未安裝，無法匹配DICOM檔案和XML標註")
+                            print(f"   請執行: pip install pydicom")
+                            pydicom_errors.append(patient_id)
+                        continue
+                    
+                    # 處理所有 DICOM 檔案，但只保留有XML標註的
                     file_count = 0
                     for dcm_file in dicom_files:
                         dcm_path = os.path.join(dicom_dir, dcm_file)
                         
                         try:
                             # 讀取DICOM檔案的SOPInstanceUID（快速模式）
-                            if pydicom is None:
-                                sop_instance_uid = None
-                            else:
-                                # 只讀取必要的標籤，提高速度
-                                ds = pydicom.dcmread(dcm_path, stop_before_pixels=True)
-                                sop_instance_uid = str(ds.SOPInstanceUID)
+                            ds = pydicom.dcmread(dcm_path, stop_before_pixels=True)
+                            sop_instance_uid = str(ds.SOPInstanceUID)
                             
                             # 根據UID查找對應的XML標註
-                            xml_path = xml_uid_to_path.get(sop_instance_uid) if sop_instance_uid else None
+                            xml_path = xml_uid_to_path.get(sop_instance_uid)
                             
-                            samples.append({
-                                'patient_id': patient_id,
-                                'dcm_path': dcm_path,
-                                'xml_path': xml_path,
-                                'file_name': dcm_file,
-                                'sop_instance_uid': sop_instance_uid,
-                                'has_annotation': xml_path is not None
-                            })
-                            file_count += 1
+                            # 只保留有XML標註的DICOM檔案
+                            if xml_path is not None:
+                                samples.append({
+                                    'patient_id': patient_id,
+                                    'dcm_path': dcm_path,
+                                    'xml_path': xml_path,
+                                    'file_name': dcm_file,
+                                    'sop_instance_uid': sop_instance_uid,
+                                    'has_annotation': True
+                                })
+                                file_count += 1
+                                total_annotated_files += 1
                             
                         except Exception as e:
                             # 靜默處理個別檔案錯誤，避免中斷整個載入過程
-                            samples.append({
-                                'patient_id': patient_id,
-                                'dcm_path': dcm_path,
-                                'xml_path': None,
-                                'file_name': dcm_file,
-                                'sop_instance_uid': None,
-                                'has_annotation': False
-                            })
-                            file_count += 1
+                            if i < 5:  # 只顯示前5位患者的錯誤詳情
+                                print(f"   ⚠️ 檔案 {dcm_file} 讀取失敗: {str(e)[:50]}...")
+                            continue
                     
-                    # 顯示患者檔案統計
+                    # 顯示患者檔案統計（只統計有標註的檔案）
                     if i < 10:  # 只顯示前10位患者的詳細信息
-                        print(f"  患者 {patient_id}: {file_count} 個檔案")
+                        if file_count > 0:
+                            print(f"  ✅ 患者 {patient_id}: {file_count} 個有標註的檔案")
+                        else:
+                            print(f"  ⚠️  患者 {patient_id}: 沒有找到匹配的標註檔案")
+                            patients_without_annotations.append(patient_id)
                             
                 else:
-                    # 舊的目錄結構：直接在患者目錄下
+                    # 舊的目錄結構：直接在患者目錄下，只保留有XML標註的
                     dcm_files = [f for f in os.listdir(patient_dir) if f.endswith('.dcm')]
                     
+                    if len(dcm_files) == 0:
+                        print(f"⚠️  患者 {patient_id}: 舊格式目錄中找不到DICOM檔案")
+                        failed_patients.append(patient_id)
+                        continue
+                    
+                    file_count = 0
                     for file_name in dcm_files:
                         dcm_path = os.path.join(patient_dir, file_name)
                         xml_path = os.path.join(patient_dir, file_name.replace('.dcm', '.xml'))
                         
-                        samples.append({
-                            'patient_id': patient_id,
-                            'dcm_path': dcm_path,
-                            'xml_path': xml_path if os.path.exists(xml_path) else None,
-                            'file_name': file_name,
-                            'has_annotation': os.path.exists(xml_path)
-                        })
+                        # 只保留有XML標註的DICOM檔案
+                        if os.path.exists(xml_path):
+                            samples.append({
+                                'patient_id': patient_id,
+                                'dcm_path': dcm_path,
+                                'xml_path': xml_path,
+                                'file_name': file_name,
+                                'has_annotation': True
+                            })
+                            total_annotated_files += 1
+                            file_count += 1
+                    
+                    if i < 10 and file_count > 0:
+                        print(f"  ✅ 患者 {patient_id}: {file_count} 個有標註的檔案（舊格式）")
                         
             except Exception as e:
                 print(f"  ⚠️  患者 {patient_id} 載入失敗: {e}")
+                failed_patients.append(patient_id)
                 continue
+        
+        # 詳細的載入結果報告
+        print(f"\n{'='*60}")
+        print(f"📊 資料載入結果報告")
+        print(f"{'='*60}")
+        print(f"✅ 成功載入: {len(samples)} 個有標註的DICOM檔案")
+        print(f"👥 有效患者: {len([p for p in patients_to_load if any(s['patient_id'] == p for s in samples)])} 位")
+        print(f"📁 總患者數: {total_patients} 位")
+        
+        if len(failed_patients) > 0:
+            print(f"\n❌ 載入失敗的患者 ({len(failed_patients)} 位):")
+            for patient in failed_patients[:10]:  # 只顯示前10個
+                print(f"   - {patient}")
+            if len(failed_patients) > 10:
+                print(f"   ... 還有 {len(failed_patients) - 10} 位")
+        
+        if len(patients_without_annotations) > 0:
+            print(f"\n⚠️ 沒有標註的患者 ({len(patients_without_annotations)} 位):")
+            for patient in patients_without_annotations[:10]:
+                print(f"   - {patient}")
+            if len(patients_without_annotations) > 10:
+                print(f"   ... 還有 {len(patients_without_annotations) - 10} 位")
+        
+        if len(pydicom_errors) > 0:
+            print(f"\n🔧 需要安裝pydicom來讀取DICOM檔案:")
+            print(f"   pip install pydicom")
+        
+        if len(samples) == 0:
+            print(f"\n❌ 嚴重錯誤：沒有載入任何有標註的資料！")
+            print(f"可能的原因：")
+            print(f"1. pydicom未安裝 - 執行: pip install pydicom")
+            print(f"2. 資料路徑錯誤 - 檢查: {self.data_root}")
+            print(f"3. XML標註檔案和DICOM檔案不匹配")
+            print(f"4. 資料集結構問題")
+        
+        print(f"{'='*60}")
         
         return samples
     
@@ -303,16 +413,8 @@ class CTDetectionDataset(Dataset):
         # 載入影像
         image = self._load_dicom_image(sample['dcm_path'])
         
-        # 載入標註（如果有的話）
-        if sample['xml_path'] is not None:
-            annotations = self.xml_parser.parse_xml(sample['xml_path'])
-        else:
-            # 沒有標註的情況，創建空標註
-            annotations = {
-                'image_size': (image.shape[1], image.shape[0]),
-                'annotations': [],
-                'num_objects': 0
-            }
+        # 載入標註（所有載入的檔案都有XML標註）
+        annotations = self.xml_parser.parse_xml(sample['xml_path'])
         
         # 準備Faster R-CNN格式的資料
         boxes = []
@@ -341,10 +443,11 @@ class CTDetectionDataset(Dataset):
                 boxes.append([x1, y1, x2, y2])
                 labels.append(ann['class_id'])
         
-        # 如果沒有標註，創建一個假的背景邊界框
+        # 如果解析後沒有有效的邊界框，跳過這個樣本（理論上不應該發生）
         if len(boxes) == 0:
-            boxes = [[0, 0, 10, 10]]  # 小的假邊界框
-            labels = [0]  # 背景類別
+            print(f"警告：患者 {sample['patient_id']} 的 {sample['file_name']} 沒有有效的標註")
+            boxes = [[0, 0, 10, 10]]  # 建立最小的假邊界框
+            labels = [1]  # 病灶類別
         
         # 轉換為tensor
         boxes = torch.tensor(boxes, dtype=torch.float32)
@@ -447,17 +550,25 @@ def create_detection_dataloaders(data_root: str,
 
 # 測試程式碼
 if __name__ == "__main__":
-    print("測試 Faster R-CNN 資料集...")
-    data_root = "../../datasets/splited_dataset"
+    print("測試 Faster R-CNN 資料集（只載入有標註的資料）...")
+    # 從當前工作目錄到datasets目錄 - 當從根目錄執行時
+    data_root = "datasets/splited_dataset"
+    
+    print(f"🔍 當前工作目錄: {os.getcwd()}")
+    print(f"📁 嘗試資料路徑: {data_root}")
+    print(f"📍 絕對路徑: {os.path.abspath(data_root)}")
+    print(f"✅ 路徑存在: {os.path.exists(data_root)}")
+    print()
     
     try:
         dataset = CTDetectionDataset(data_root=data_root, split='train', target_size=512)
-        print(f"✅ 資料集大小: {len(dataset)}")
+        print(f"✅ 有標註的資料集大小: {len(dataset)}")
         
         if len(dataset) > 0:
             sample = dataset[0]
             print(f"✅ 樣本載入成功 - 患者: {sample['patient_id']}")
             print(f"   影像: {sample['image'].shape}")
-            print(f"   標籤: {len(sample['target']['labels'])} 個")
+            print(f"   病灶標籤: {len(sample['target']['labels'])} 個")
+            print(f"   所有標籤都是病灶類別: {sample['target']['labels'].tolist()}")
     except Exception as e:
         print(f"❌ 測試失敗: {e}")
