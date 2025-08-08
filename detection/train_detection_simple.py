@@ -21,6 +21,10 @@ from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.colors import LinearSegmentedColormap
+import cv2
 
 from faster_rcnn_dataset import CTDetectionDataset
 
@@ -143,6 +147,195 @@ def calculate_iou_matrix(boxes1, boxes2):
     return iou_matrix
 
 
+def visualize_predictions(images, predictions, targets, save_dir, num_samples=10, 
+                         confidence_threshold=0.5, prefix="final_predictions"):
+    """可視化預測結果並保存圖片"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 限制可視化的樣本數量
+    num_samples = min(num_samples, len(images))
+    
+    for i in range(num_samples):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
+        
+        # 獲取圖片和預測結果
+        image = images[i]
+        pred = predictions[i]
+        target = targets[i]
+        
+        # 將tensor轉換為numpy格式用於顯示
+        if isinstance(image, torch.Tensor):
+            if image.dim() == 3 and image.shape[0] in [1, 3]:
+                # CHW格式轉換為HWC
+                image_np = image.permute(1, 2, 0).cpu().numpy()
+            else:
+                image_np = image.cpu().numpy()
+            
+            # 如果是單通道，轉換為三通道
+            if image_np.shape[-1] == 1:
+                image_np = np.repeat(image_np, 3, axis=-1)
+            elif len(image_np.shape) == 2:
+                image_np = np.stack([image_np] * 3, axis=-1)
+        else:
+            image_np = image
+            
+        # 確保像素值在[0,1]範圍內
+        if image_np.max() > 1.0:
+            image_np = image_np / 255.0
+        
+        # 顯示原圖和真實標註 (左側)
+        ax1.imshow(image_np, cmap='gray' if image_np.shape[-1] == 1 else None)
+        ax1.set_title(f'Ground Truth (Sample {i+1})')
+        ax1.axis('off')
+        
+        # 繪製真實邊界框
+        if 'boxes' in target and len(target['boxes']) > 0:
+            gt_boxes = target['boxes']
+            if isinstance(gt_boxes, torch.Tensor):
+                gt_boxes = gt_boxes.cpu().numpy()
+            
+            for box in gt_boxes:
+                x1, y1, x2, y2 = box
+                width = x2 - x1
+                height = y2 - y1
+                rect = patches.Rectangle((x1, y1), width, height, 
+                                       linewidth=2, edgecolor='green', 
+                                       facecolor='none', label='Ground Truth')
+                ax1.add_patch(rect)
+        
+        # 顯示原圖和預測結果 (右側)
+        ax2.imshow(image_np, cmap='gray' if image_np.shape[-1] == 1 else None)
+        ax2.set_title(f'Predictions (Sample {i+1})')
+        ax2.axis('off')
+        
+        # 繪製預測邊界框
+        if 'boxes' in pred and len(pred['boxes']) > 0:
+            pred_boxes = pred['boxes']
+            pred_scores = pred['scores']
+            
+            if isinstance(pred_boxes, torch.Tensor):
+                pred_boxes = pred_boxes.cpu().numpy()
+            if isinstance(pred_scores, torch.Tensor):
+                pred_scores = pred_scores.cpu().numpy()
+            
+            # 過濾低置信度預測
+            valid_indices = pred_scores > confidence_threshold
+            pred_boxes = pred_boxes[valid_indices]
+            pred_scores = pred_scores[valid_indices]
+            
+            for box, score in zip(pred_boxes, pred_scores):
+                x1, y1, x2, y2 = box
+                width = x2 - x1
+                height = y2 - y1
+                
+                # 根據置信度設置顏色
+                color = 'red' if score > 0.7 else 'orange' if score > 0.5 else 'yellow'
+                
+                rect = patches.Rectangle((x1, y1), width, height, 
+                                       linewidth=2, edgecolor=color, 
+                                       facecolor='none')
+                ax2.add_patch(rect)
+                
+                # 添加置信度標籤
+                ax2.text(x1, y1-5, f'{score:.2f}', 
+                        color=color, fontsize=10, fontweight='bold')
+        
+        # 添加圖例
+        legend_elements = [
+            patches.Patch(color='green', label='Ground Truth'),
+            patches.Patch(color='red', label='High Conf (>0.7)'),
+            patches.Patch(color='orange', label='Med Conf (>0.5)'),
+            patches.Patch(color='yellow', label='Low Conf (>threshold)')
+        ]
+        fig.legend(handles=legend_elements, loc='upper center', 
+                  bbox_to_anchor=(0.5, 0.95), ncol=4)
+        
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.85)
+        
+        # 保存圖片
+        save_path = os.path.join(save_dir, f'{prefix}_sample_{i+1}.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    logging.info(f"可視化結果已保存到: {save_dir}")
+    return save_dir
+
+
+def create_prediction_summary(predictions, targets, save_dir, prefix="prediction_summary"):
+    """創建預測結果統計摘要圖"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 統計數據
+    pred_counts = []
+    target_counts = []
+    confidence_scores = []
+    
+    for pred, target in zip(predictions, targets):
+        pred_counts.append(len(pred['boxes']))
+        target_counts.append(len(target['boxes']))
+        if len(pred['scores']) > 0:
+            confidence_scores.extend(pred['scores'].cpu().numpy())
+    
+    # 創建統計圖
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # 1. 預測框數量分佈
+    axes[0, 0].hist(pred_counts, bins=20, alpha=0.7, color='blue', label='Predictions')
+    axes[0, 0].hist(target_counts, bins=20, alpha=0.7, color='green', label='Ground Truth')
+    axes[0, 0].set_xlabel('Number of Boxes per Image')
+    axes[0, 0].set_ylabel('Frequency')
+    axes[0, 0].set_title('Distribution of Box Counts')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 2. 置信度分佈
+    if confidence_scores:
+        axes[0, 1].hist(confidence_scores, bins=50, alpha=0.7, color='orange')
+        axes[0, 1].axvline(x=0.5, color='red', linestyle='--', label='Threshold=0.5')
+        axes[0, 1].set_xlabel('Confidence Score')
+        axes[0, 1].set_ylabel('Frequency')
+        axes[0, 1].set_title('Confidence Score Distribution')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+    
+    # 3. 預測 vs 真實框數量散點圖
+    axes[1, 0].scatter(target_counts, pred_counts, alpha=0.6, color='purple')
+    max_count = max(max(pred_counts), max(target_counts))
+    axes[1, 0].plot([0, max_count], [0, max_count], 'r--', label='Perfect Prediction')
+    axes[1, 0].set_xlabel('Ground Truth Box Count')
+    axes[1, 0].set_ylabel('Predicted Box Count')
+    axes[1, 0].set_title('Predicted vs Ground Truth Box Counts')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # 4. 置信度區間統計
+    if confidence_scores:
+        thresholds = [0.3, 0.5, 0.7, 0.9]
+        counts = [sum(1 for score in confidence_scores if score > thresh) for thresh in thresholds]
+        
+        axes[1, 1].bar([f'>{thresh}' for thresh in thresholds], counts, color='lightblue')
+        axes[1, 1].set_xlabel('Confidence Threshold')
+        axes[1, 1].set_ylabel('Number of Predictions')
+        axes[1, 1].set_title('Predictions by Confidence Threshold')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        # 添加數值標籤
+        for i, count in enumerate(counts):
+            axes[1, 1].text(i, count + max(counts)*0.01, str(count), 
+                           ha='center', va='bottom')
+    
+    plt.tight_layout()
+    
+    # 保存統計圖
+    save_path = os.path.join(save_dir, f'{prefix}.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    logging.info(f"預測統計摘要已保存到: {save_path}")
+    return save_path
+
+
 def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
     """創建訓練/驗證數據集分割"""
     # 載入完整數據集
@@ -174,11 +367,14 @@ def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
     return train_dataset, val_dataset
 
 
-def evaluate_model(model, val_loader, device):
+def evaluate_model(model, val_loader, device, return_samples=False, max_samples=10):
     """評估模型"""
     model.eval()
     all_predictions = []
     all_targets = []
+    sample_images = []
+    sample_predictions = []
+    sample_targets = []
     
     val_pbar = tqdm(val_loader, desc="評估模型", unit="batch", ncols=100)
     
@@ -187,7 +383,7 @@ def evaluate_model(model, val_loader, device):
             images = [img.to(device) for img in images]
             predictions = model(images)
             
-            for pred, target in zip(predictions, targets):
+            for i, (pred, target) in enumerate(zip(predictions, targets)):
                 all_predictions.append({
                     'boxes': pred['boxes'].cpu(),
                     'scores': pred['scores'].cpu(),
@@ -197,6 +393,19 @@ def evaluate_model(model, val_loader, device):
                     'boxes': target['boxes'],
                     'labels': target['labels']
                 })
+                
+                # 收集樣本用於可視化
+                if return_samples and len(sample_images) < max_samples:
+                    sample_images.append(images[i].cpu())
+                    sample_predictions.append({
+                        'boxes': pred['boxes'].cpu(),
+                        'scores': pred['scores'].cpu(),
+                        'labels': pred['labels'].cpu()
+                    })
+                    sample_targets.append({
+                        'boxes': target['boxes'],
+                        'labels': target['labels']
+                    })
             
             val_pbar.set_postfix({'Samples': f'{len(all_predictions)}'})
     
@@ -204,7 +413,11 @@ def evaluate_model(model, val_loader, device):
     
     # 計算指標
     metrics = calculate_detection_metrics(all_predictions, all_targets, iou_threshold=0.5)
-    return metrics
+    
+    if return_samples:
+        return metrics, sample_images, sample_predictions, sample_targets
+    else:
+        return metrics
 
 
 def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001, 
@@ -241,7 +454,7 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
     
     # 創建模型
     logging.info("載入預訓練模型...")
-    model = fasterrcnn_resnet50_fpn(pretrained=True)
+    model = fasterrcnn_resnet50_fpn(weights='DEFAULT')
     num_classes = 2  # 背景 + 病灶
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
@@ -361,9 +574,54 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
     
     # 載入最佳模型進行最終評估
     logging.info("載入最佳模型進行最終評估...")
-    checkpoint = torch.load(os.path.join(save_dir, 'best_model.pth'))
+    checkpoint = torch.load(os.path.join(save_dir, 'best_model.pth'), weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
-    final_metrics = evaluate_model(model, val_loader, device)
+    
+    # 進行最終評估並獲取可視化樣本
+    logging.info("進行最終評估並生成可視化結果...")
+    final_metrics, sample_images, sample_predictions, sample_targets = evaluate_model(
+        model, val_loader, device, return_samples=True, max_samples=15
+    )
+    
+    # 創建可視化目錄
+    vis_dir = os.path.join(save_dir, 'visualizations')
+    
+    # 生成預測結果可視化
+    try:
+        logging.info("生成預測結果可視化...")
+        visualize_predictions(
+            sample_images, sample_predictions, sample_targets, 
+            vis_dir, num_samples=15, confidence_threshold=0.3,
+            prefix="final_predictions"
+        )
+        
+        # 生成統計摘要圖
+        logging.info("生成預測統計摘要...")
+        # 使用所有驗證集的預測結果進行統計
+        all_predictions, all_targets = [], []
+        model.eval()
+        with torch.no_grad():
+            for images, targets in val_loader:
+                images = [img.to(device) for img in images]
+                predictions = model(images)
+                
+                for pred, target in zip(predictions, targets):
+                    all_predictions.append({
+                        'boxes': pred['boxes'].cpu(),
+                        'scores': pred['scores'].cpu(),
+                        'labels': pred['labels'].cpu()
+                    })
+                    all_targets.append({
+                        'boxes': target['boxes'],
+                        'labels': target['labels']
+                    })
+        
+        create_prediction_summary(all_predictions, all_targets, vis_dir, "final_summary")
+        
+    except Exception as e:
+        logging.warning(f"可視化生成失敗: {str(e)}")
+        logging.warning("繼續保存其他結果...")
+    
     
     # 保存訓練結果
     results = {

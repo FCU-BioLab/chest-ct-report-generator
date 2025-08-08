@@ -77,6 +77,7 @@ python detection\train_detection_simple.py --num_epochs 5 --val_split 0.1 --batc
 | `--learning_rate` | `0.0001` | 學習率 |
 | `--save_dir` | `./Faster_RCNN_Detection/models` | 模型保存目錄 |
 | `--log_dir` | `./Faster_RCNN_Detection/logs` | 日誌保存目錄 |
+| `--random_seed` | `42` | 隨機種子 |
 
 ### 📋 簡單訓練參數 (`train_detection_simple.py`)
 
@@ -100,6 +101,9 @@ python detection\train_detection.py --k_folds 10 --learning_rate 0.0005
 # K-Fold: 減少記憶體使用
 python detection\train_detection.py --batch_size 4 --num_epochs 30
 
+# K-Fold: 自訂隨機種子
+python detection\train_detection.py --k_folds 5 --random_seed 123
+
 # 簡單訓練: 小驗證集，快速訓練
 python detection\train_detection_simple.py --val_split 0.1 --num_epochs 30
 
@@ -117,11 +121,20 @@ detection/Faster_RCNN_Detection/
 │   ├── best_model_fold_2.pth      # Fold 2 最佳模型
 │   ├── ...                        # 其他 fold 模型
 │   └── kfold_results.json         # K-fold 總體結果
-└── logs/
-    ├── fold_1/                    # Fold 1 TensorBoard 記錄
-    ├── fold_2/                    # Fold 2 TensorBoard 記錄
-    ├── ...                        # 其他 fold 記錄
-    └── kfold_training_*.log       # 訓練日誌
+├── logs/
+│   ├── fold_1/                    # Fold 1 TensorBoard 記錄
+│   ├── fold_2/                    # Fold 2 TensorBoard 記錄
+│   ├── ...                        # 其他 fold 記錄
+│   └── kfold_training_*.log       # 訓練日誌
+├── visualizations_fold_1/
+│   ├── fold_1_predictions_sample_1.png  # Fold 1 預測結果可視化
+│   ├── fold_1_predictions_sample_2.png
+│   ├── ...
+│   └── fold_1_summary.png         # Fold 1 統計摘要
+├── visualizations_fold_2/
+│   └── ...                        # 其他 fold 可視化
+└── kfold_summary_visualizations/
+    └── kfold_summary.png          # K-fold 整體結果摘要
 ```
 
 ### 簡單訓練結果 (`train_detection_simple.py`)
@@ -132,9 +145,14 @@ detection/Simple_Training/
 │   ├── best_model_weights.pth     # 純模型權重（用於推理）
 │   ├── checkpoint_epoch_*.pth     # 定期檢查點
 │   └── training_results.json     # 詳細訓練結果
-└── logs/
-    ├── events.out.tfevents.*      # TensorBoard 記錄
-    └── simple_training_*.log      # 訓練日誌
+├── logs/
+│   ├── events.out.tfevents.*      # TensorBoard 記錄
+│   └── simple_training_*.log      # 訓練日誌
+└── visualizations/
+    ├── final_predictions_sample_1.png  # 預測結果可視化
+    ├── final_predictions_sample_2.png
+    ├── ...
+    └── final_summary.png          # 訓練統計摘要
 ```
 
 ### 結果分析文件
@@ -149,6 +167,18 @@ detection/Simple_Training/
 - 最終模型性能指標
 - 完整訓練歷史（每個 epoch 的 loss 和指標）
 - 訓練配置和數據集統計
+
+### 🎨 自動可視化功能
+
+**兩種訓練方法都會自動生成：**
+- **預測結果對比圖**：真實標註 vs 模型預測的視覺對比
+- **統計摘要圖表**：預測框數量分佈、置信度分佈等統計分析
+- **K-fold 專用**：各 fold 性能比較圖表和整體結果摘要
+
+**可視化特色：**
+- 根據置信度使用不同顏色標示預測框
+- 詳細的統計圖表和分佈分析
+- 自動保存高清 PNG 格式圖片
 
 ## 📈 監控和分析
 
@@ -271,6 +301,32 @@ python detection\train_detection_simple.py --num_epochs 20
 - **快速測試想法**: 使用簡單訓練
 - **第一次訓練**: 建議先用簡單訓練熟悉流程
 
+**Q: PyTorch 載入警告或錯誤**
+```bash
+# 如果遇到 torch.load 相關警告，代碼已自動處理
+# 確保使用 PyTorch 2.6+ 版本
+pip install torch>=2.0.0
+
+# 檢查版本
+python -c "import torch; print(torch.__version__)"
+```
+
+**Q: 可視化生成失敗**
+```bash
+# 檢查可視化依賴
+pip install matplotlib>=3.7.0 opencv-python>=4.8.0
+
+# 如果可視化失敗，訓練仍會繼續，檢查日誌：
+tail -f detection/Simple_Training/logs/simple_training_*.log
+```
+
+**Q: 結果不可重現**
+```bash
+# 使用固定的隨機種子
+python detection\train_detection.py --random_seed 42
+python detection\train_detection_simple.py --random_seed 42
+```
+
 ### 檢查系統狀態
 ```bash
 # 測試數據載入
@@ -293,6 +349,14 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 - **學習率調度**: CosineAnnealingLR
 - **損失函數**: Faster R-CNN 內建損失（分類 + 回歸 + RPN）
 - **模型輸入**: 512x512 灰階影像轉 RGB
+- **隨機種子**: 支援全局隨機種子設定確保結果可重現
+- **PyTorch 兼容**: 支援 PyTorch 2.6+ 版本
+
+### 🔄 最新更新功能
+- **🎯 隨機種子支援**: 兩種訓練方法都支援 `--random_seed` 參數
+- **🔧 PyTorch 2.6+ 兼容**: 修正 `torch.load` 和模型載入相關警告
+- **🎨 自動可視化**: 訓練完成後自動生成預測結果和統計圖表
+- **📊 增強記錄**: 更詳細的訓練日誌和進度顯示
 
 ### K-Fold 流程
 1. 載入完整數據集
@@ -366,3 +430,13 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 - `README.md`: 本文檔
 - `requirements.txt`: Python 依賴套件
 - `config/`: 配置文件目錄（如果存在）
+
+## 📋 更新歷史
+
+### 最新更新 (2025-08)
+- ✅ **PyTorch 2.6+ 兼容性**: 修正 `torch.load` 和模型載入警告
+- ✅ **隨機種子支援**: 兩種訓練方法都支援 `--random_seed` 參數
+- ✅ **自動可視化**: 添加預測結果和統計圖表自動生成
+- ✅ **增強記錄**: 更詳細的訓練過程記錄和進度顯示
+- ✅ **代碼同步**: 確保兩個訓練腳本功能一致性
+- ✅ **文檔整合**: 將所有更新信息整合到主 README 文檔中

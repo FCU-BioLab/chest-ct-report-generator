@@ -22,6 +22,10 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from sklearn.model_selection import KFold
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.colors import LinearSegmentedColormap
+import cv2
 
 from faster_rcnn_dataset import CTDetectionDataset
 
@@ -62,18 +66,21 @@ def setup_logging(log_dir):
     return log_file
 
 
-def evaluate_detection_model(model, data_loader, device, iou_threshold=0.5):
+def evaluate_detection_model(model, data_loader, device, iou_threshold=0.5, return_samples=False, max_samples=10):
     """評估檢測模型性能"""
     model.eval()
     all_predictions = []
     all_targets = []
+    sample_images = []
+    sample_predictions = []
+    sample_targets = []
     
     with torch.no_grad():
         for images, targets in data_loader:
             images = [img.to(device) for img in images]
             predictions = model(images)
             
-            for pred, target in zip(predictions, targets):
+            for i, (pred, target) in enumerate(zip(predictions, targets)):
                 all_predictions.append({
                     'boxes': pred['boxes'].cpu(),
                     'scores': pred['scores'].cpu(),
@@ -83,9 +90,26 @@ def evaluate_detection_model(model, data_loader, device, iou_threshold=0.5):
                     'boxes': target['boxes'],
                     'labels': target['labels']
                 })
+                
+                # 收集樣本用於可視化
+                if return_samples and len(sample_images) < max_samples:
+                    sample_images.append(images[i].cpu())
+                    sample_predictions.append({
+                        'boxes': pred['boxes'].cpu(),
+                        'scores': pred['scores'].cpu(),
+                        'labels': pred['labels'].cpu()
+                    })
+                    sample_targets.append({
+                        'boxes': target['boxes'],
+                        'labels': target['labels']
+                    })
     
     metrics = calculate_detection_metrics(all_predictions, all_targets, iou_threshold)
-    return metrics
+    
+    if return_samples:
+        return metrics, sample_images, sample_predictions, sample_targets
+    else:
+        return metrics
 
 
 def calculate_detection_metrics(predictions, targets, iou_threshold=0.5):
@@ -170,7 +194,298 @@ def calculate_iou_matrix(boxes1, boxes2):
     return iou_matrix
 
 
-def create_kfold_datasets(data_dir, k_folds=5):
+def visualize_predictions(images, predictions, targets, save_dir, num_samples=10, 
+                         confidence_threshold=0.5, prefix="final_predictions"):
+    """可視化預測結果並保存圖片"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 限制可視化的樣本數量
+    num_samples = min(num_samples, len(images))
+    
+    for i in range(num_samples):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
+        
+        # 獲取圖片和預測結果
+        image = images[i]
+        pred = predictions[i]
+        target = targets[i]
+        
+        # 將tensor轉換為numpy格式用於顯示
+        if isinstance(image, torch.Tensor):
+            if image.dim() == 3 and image.shape[0] in [1, 3]:
+                # CHW格式轉換為HWC
+                image_np = image.permute(1, 2, 0).cpu().numpy()
+            else:
+                image_np = image.cpu().numpy()
+            
+            # 如果是單通道，轉換為三通道
+            if image_np.shape[-1] == 1:
+                image_np = np.repeat(image_np, 3, axis=-1)
+            elif len(image_np.shape) == 2:
+                image_np = np.stack([image_np] * 3, axis=-1)
+        else:
+            image_np = image
+            
+        # 確保像素值在[0,1]範圍內
+        if image_np.max() > 1.0:
+            image_np = image_np / 255.0
+        
+        # 顯示原圖和真實標註 (左側)
+        ax1.imshow(image_np, cmap='gray' if image_np.shape[-1] == 1 else None)
+        ax1.set_title(f'Ground Truth (Sample {i+1})')
+        ax1.axis('off')
+        
+        # 繪製真實邊界框
+        if 'boxes' in target and len(target['boxes']) > 0:
+            gt_boxes = target['boxes']
+            if isinstance(gt_boxes, torch.Tensor):
+                gt_boxes = gt_boxes.cpu().numpy()
+            
+            for box in gt_boxes:
+                x1, y1, x2, y2 = box
+                width = x2 - x1
+                height = y2 - y1
+                rect = patches.Rectangle((x1, y1), width, height, 
+                                       linewidth=2, edgecolor='green', 
+                                       facecolor='none', label='Ground Truth')
+                ax1.add_patch(rect)
+        
+        # 顯示原圖和預測結果 (右側)
+        ax2.imshow(image_np, cmap='gray' if image_np.shape[-1] == 1 else None)
+        ax2.set_title(f'Predictions (Sample {i+1})')
+        ax2.axis('off')
+        
+        # 繪製預測邊界框
+        if 'boxes' in pred and len(pred['boxes']) > 0:
+            pred_boxes = pred['boxes']
+            pred_scores = pred['scores']
+            
+            if isinstance(pred_boxes, torch.Tensor):
+                pred_boxes = pred_boxes.cpu().numpy()
+            if isinstance(pred_scores, torch.Tensor):
+                pred_scores = pred_scores.cpu().numpy()
+            
+            # 過濾低置信度預測
+            valid_indices = pred_scores > confidence_threshold
+            pred_boxes = pred_boxes[valid_indices]
+            pred_scores = pred_scores[valid_indices]
+            
+            for box, score in zip(pred_boxes, pred_scores):
+                x1, y1, x2, y2 = box
+                width = x2 - x1
+                height = y2 - y1
+                
+                # 根據置信度設置顏色
+                color = 'red' if score > 0.7 else 'orange' if score > 0.5 else 'yellow'
+                
+                rect = patches.Rectangle((x1, y1), width, height, 
+                                       linewidth=2, edgecolor=color, 
+                                       facecolor='none')
+                ax2.add_patch(rect)
+                
+                # 添加置信度標籤
+                ax2.text(x1, y1-5, f'{score:.2f}', 
+                        color=color, fontsize=10, fontweight='bold')
+        
+        # 添加圖例
+        legend_elements = [
+            patches.Patch(color='green', label='Ground Truth'),
+            patches.Patch(color='red', label='High Conf (>0.7)'),
+            patches.Patch(color='orange', label='Med Conf (>0.5)'),
+            patches.Patch(color='yellow', label='Low Conf (>threshold)')
+        ]
+        fig.legend(handles=legend_elements, loc='upper center', 
+                  bbox_to_anchor=(0.5, 0.95), ncol=4)
+        
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.85)
+        
+        # 保存圖片
+        save_path = os.path.join(save_dir, f'{prefix}_sample_{i+1}.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    logging.info(f"可視化結果已保存到: {save_dir}")
+    return save_dir
+
+
+def create_prediction_summary(predictions, targets, save_dir, prefix="prediction_summary"):
+    """創建預測結果統計摘要圖"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 統計數據
+    pred_counts = []
+    target_counts = []
+    confidence_scores = []
+    
+    for pred, target in zip(predictions, targets):
+        pred_counts.append(len(pred['boxes']))
+        target_counts.append(len(target['boxes']))
+        if len(pred['scores']) > 0:
+            confidence_scores.extend(pred['scores'].cpu().numpy())
+    
+    # 創建統計圖
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # 1. 預測框數量分佈
+    axes[0, 0].hist(pred_counts, bins=20, alpha=0.7, color='blue', label='Predictions')
+    axes[0, 0].hist(target_counts, bins=20, alpha=0.7, color='green', label='Ground Truth')
+    axes[0, 0].set_xlabel('Number of Boxes per Image')
+    axes[0, 0].set_ylabel('Frequency')
+    axes[0, 0].set_title('Distribution of Box Counts')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 2. 置信度分佈
+    if confidence_scores:
+        axes[0, 1].hist(confidence_scores, bins=50, alpha=0.7, color='orange')
+        axes[0, 1].axvline(x=0.5, color='red', linestyle='--', label='Threshold=0.5')
+        axes[0, 1].set_xlabel('Confidence Score')
+        axes[0, 1].set_ylabel('Frequency')
+        axes[0, 1].set_title('Confidence Score Distribution')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+    
+    # 3. 預測 vs 真實框數量散點圖
+    axes[1, 0].scatter(target_counts, pred_counts, alpha=0.6, color='purple')
+    max_count = max(max(pred_counts), max(target_counts))
+    axes[1, 0].plot([0, max_count], [0, max_count], 'r--', label='Perfect Prediction')
+    axes[1, 0].set_xlabel('Ground Truth Box Count')
+    axes[1, 0].set_ylabel('Predicted Box Count')
+    axes[1, 0].set_title('Predicted vs Ground Truth Box Counts')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # 4. 置信度區間統計
+    if confidence_scores:
+        thresholds = [0.3, 0.5, 0.7, 0.9]
+        counts = [sum(1 for score in confidence_scores if score > thresh) for thresh in thresholds]
+        
+        axes[1, 1].bar([f'>{thresh}' for thresh in thresholds], counts, color='lightblue')
+        axes[1, 1].set_xlabel('Confidence Threshold')
+        axes[1, 1].set_ylabel('Number of Predictions')
+        axes[1, 1].set_title('Predictions by Confidence Threshold')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        # 添加數值標籤
+        for i, count in enumerate(counts):
+            axes[1, 1].text(i, count + max(counts)*0.01, str(count), 
+                           ha='center', va='bottom')
+    
+    plt.tight_layout()
+    
+    # 保存統計圖
+    save_path = os.path.join(save_dir, f'{prefix}.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    logging.info(f"預測統計摘要已保存到: {save_path}")
+    return save_path
+
+
+def create_kfold_summary_plots(all_fold_results, save_dir):
+    """創建K-fold交叉驗證結果摘要圖"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 提取每個fold的指標
+    folds = [result['fold'] for result in all_fold_results]
+    precisions = [result['metrics']['precision'] for result in all_fold_results]
+    recalls = [result['metrics']['recall'] for result in all_fold_results]
+    f1_scores = [result['metrics']['f1_score'] for result in all_fold_results]
+    training_times = [result['training_time'] for result in all_fold_results]
+    
+    # 創建2x2的子圖
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # 1. 各fold指標比較
+    x = np.arange(len(folds))
+    width = 0.25
+    
+    axes[0, 0].bar(x - width, precisions, width, label='Precision', alpha=0.8)
+    axes[0, 0].bar(x, recalls, width, label='Recall', alpha=0.8)
+    axes[0, 0].bar(x + width, f1_scores, width, label='F1-Score', alpha=0.8)
+    
+    axes[0, 0].set_xlabel('Fold')
+    axes[0, 0].set_ylabel('Score')
+    axes[0, 0].set_title('Performance Metrics by Fold')
+    axes[0, 0].set_xticks(x)
+    axes[0, 0].set_xticklabels([f'Fold {f}' for f in folds])
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 添加數值標籤
+    for i, (p, r, f) in enumerate(zip(precisions, recalls, f1_scores)):
+        axes[0, 0].text(i - width, p + 0.01, f'{p:.3f}', ha='center', va='bottom', fontsize=8)
+        axes[0, 0].text(i, r + 0.01, f'{r:.3f}', ha='center', va='bottom', fontsize=8)
+        axes[0, 0].text(i + width, f + 0.01, f'{f:.3f}', ha='center', va='bottom', fontsize=8)
+    
+    # 2. F1分數趨勢
+    axes[0, 1].plot(folds, f1_scores, 'bo-', linewidth=2, markersize=8)
+    axes[0, 1].axhline(y=np.mean(f1_scores), color='r', linestyle='--', 
+                       label=f'Mean: {np.mean(f1_scores):.3f}')
+    axes[0, 1].fill_between(folds, 
+                           [np.mean(f1_scores) - np.std(f1_scores)] * len(folds),
+                           [np.mean(f1_scores) + np.std(f1_scores)] * len(folds),
+                           alpha=0.2, color='red', 
+                           label=f'±1 Std: {np.std(f1_scores):.3f}')
+    axes[0, 1].set_xlabel('Fold')
+    axes[0, 1].set_ylabel('F1-Score')
+    axes[0, 1].set_title('F1-Score Across Folds')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # 3. 訓練時間比較
+    colors = plt.cm.viridis(np.linspace(0, 1, len(folds)))
+    bars = axes[1, 0].bar(folds, [t/3600 for t in training_times], color=colors, alpha=0.7)
+    axes[1, 0].set_xlabel('Fold')
+    axes[1, 0].set_ylabel('Training Time (hours)')
+    axes[1, 0].set_title('Training Time by Fold')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # 添加時間標籤
+    for i, (fold, time) in enumerate(zip(folds, training_times)):
+        axes[1, 0].text(fold, time/3600 + max(training_times)/3600*0.01, 
+                       f'{time/3600:.1f}h', ha='center', va='bottom')
+    
+    # 4. 指標分佈箱線圖
+    metrics_data = [precisions, recalls, f1_scores]
+    metrics_labels = ['Precision', 'Recall', 'F1-Score']
+    
+    box_plot = axes[1, 1].boxplot(metrics_data, labels=metrics_labels, patch_artist=True)
+    
+    # 設置箱線圖顏色
+    colors = ['lightblue', 'lightgreen', 'lightcoral']
+    for patch, color in zip(box_plot['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    
+    axes[1, 1].set_ylabel('Score')
+    axes[1, 1].set_title('Metrics Distribution Across Folds')
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    # 添加統計信息
+    stats_text = f"K-Fold Summary (k={len(folds)}):\n"
+    stats_text += f"Precision: {np.mean(precisions):.3f} ± {np.std(precisions):.3f}\n"
+    stats_text += f"Recall: {np.mean(recalls):.3f} ± {np.std(recalls):.3f}\n"
+    stats_text += f"F1-Score: {np.mean(f1_scores):.3f} ± {np.std(f1_scores):.3f}\n"
+    stats_text += f"Total Time: {sum(training_times)/3600:.1f} hours"
+    
+    fig.text(0.02, 0.98, stats_text, fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    plt.tight_layout()
+    plt.subplots_adjust(left=0.15, top=0.93)
+    
+    # 保存圖表
+    save_path = os.path.join(save_dir, 'kfold_summary.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    logging.info(f"K-fold摘要圖已保存到: {save_path}")
+    return save_path
+
+
+def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
     """創建K-fold數據集分割"""
     dataset = CTDetectionDataset(
         data_root=data_dir,
@@ -183,7 +498,7 @@ def create_kfold_datasets(data_dir, k_folds=5):
     )
     
     indices = list(range(len(dataset)))
-    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=random_seed)
     
     fold_datasets = []
     for fold, (train_idx, val_idx) in enumerate(kfold.split(indices)):
@@ -197,7 +512,7 @@ def create_kfold_datasets(data_dir, k_folds=5):
 
 
 def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=0.001, 
-                save_dir='./models', log_dir='./logs'):
+                save_dir='./models', log_dir='./logs', random_seed=42):
     """K-fold交叉驗證訓練"""
     
     # 設置設備
@@ -208,7 +523,7 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
     os.makedirs(save_dir, exist_ok=True)
     
     # 創建K-fold數據集
-    fold_datasets = create_kfold_datasets(data_dir, k_folds)
+    fold_datasets = create_kfold_datasets(data_dir, k_folds, random_seed)
     
     # 存儲所有fold的結果
     all_fold_results = []
@@ -246,7 +561,7 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
         
         logging.info("開始載入預訓練模型...")
         # 創建模型
-        model = fasterrcnn_resnet50_fpn(pretrained=True)
+        model = fasterrcnn_resnet50_fpn(weights='DEFAULT')
         logging.info("預訓練模型載入完成")
         num_classes = 2  # 背景 + 病灶
         in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -364,9 +679,49 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
         
         fold_time = time.time() - fold_start_time
         
-        # 最終評估
-        model.load_state_dict(torch.load(os.path.join(save_dir, f'best_model_fold_{fold + 1}.pth')))
-        final_metrics = evaluate_detection_model(model, val_loader, device)
+        # 最終評估和可視化
+        model.load_state_dict(torch.load(os.path.join(save_dir, f'best_model_fold_{fold + 1}.pth'), weights_only=False))
+        final_metrics, sample_images, sample_predictions, sample_targets = evaluate_detection_model(
+            model, val_loader, device, return_samples=True, max_samples=10
+        )
+        
+        # 生成當前fold的可視化結果
+        try:
+            fold_vis_dir = os.path.join(save_dir, f'visualizations_fold_{fold + 1}')
+            logging.info(f"生成 Fold {fold + 1} 可視化結果...")
+            
+            # 生成預測結果可視化
+            visualize_predictions(
+                sample_images, sample_predictions, sample_targets, 
+                fold_vis_dir, num_samples=10, confidence_threshold=0.3,
+                prefix=f"fold_{fold + 1}_predictions"
+            )
+            
+            # 生成統計摘要圖
+            # 使用當前fold的所有驗證集預測結果進行統計
+            all_fold_predictions, all_fold_targets = [], []
+            model.eval()
+            with torch.no_grad():
+                for images, targets in val_loader:
+                    images = [img.to(device) for img in images]
+                    predictions = model(images)
+                    
+                    for pred, target in zip(predictions, targets):
+                        all_fold_predictions.append({
+                            'boxes': pred['boxes'].cpu(),
+                            'scores': pred['scores'].cpu(),
+                            'labels': pred['labels'].cpu()
+                        })
+                        all_fold_targets.append({
+                            'boxes': target['boxes'],
+                            'labels': target['labels']
+                        })
+            
+            create_prediction_summary(all_fold_predictions, all_fold_targets, 
+                                    fold_vis_dir, f"fold_{fold + 1}_summary")
+            
+        except Exception as e:
+            logging.warning(f"Fold {fold + 1} 可視化生成失敗: {str(e)}")
         
         fold_result = {
             'fold': fold + 1,
@@ -414,6 +769,18 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
     with open(os.path.join(save_dir, 'kfold_results.json'), 'w') as f:
         json.dump(results, f, indent=2)
     
+    # 生成K-fold總體結果摘要圖
+    try:
+        logging.info("生成K-fold總體結果摘要...")
+        kfold_summary_dir = os.path.join(save_dir, 'kfold_summary_visualizations')
+        os.makedirs(kfold_summary_dir, exist_ok=True)
+        
+        # 創建K-fold結果比較圖
+        create_kfold_summary_plots(all_fold_results, kfold_summary_dir)
+        
+    except Exception as e:
+        logging.warning(f"K-fold總體摘要可視化生成失敗: {str(e)}")
+    
     # 輸出最終結果
     logging.info(f"\n=== K-Fold 交叉驗證結果 ===")
     logging.info(f"平均精確度: {avg_metrics['precision']:.4f} ± {avg_metrics['precision_std']:.4f}")
@@ -444,8 +811,14 @@ def main():
                        help='模型保存目錄')
     parser.add_argument('--log_dir', type=str, default=os.path.join(script_dir, 'Faster_RCNN_Detection', 'logs'), 
                        help='日誌保存目錄')
+    parser.add_argument('--random_seed', type=int, default=42, 
+                       help='隨機種子')
     
     args = parser.parse_args()
+    
+    # 設置隨機種子
+    torch.manual_seed(args.random_seed)
+    np.random.seed(args.random_seed)
     
     # 設置日誌
     log_file = setup_logging(args.log_dir)
@@ -465,6 +838,7 @@ def main():
     logging.info(f"學習率: {args.learning_rate}")
     logging.info(f"模型保存目錄: {args.save_dir}")
     logging.info(f"日誌目錄: {args.log_dir}")
+    logging.info(f"隨機種子: {args.random_seed}")
     
     # 開始訓練
     start_time = time.time()
@@ -475,7 +849,8 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         save_dir=args.save_dir,
-        log_dir=args.log_dir
+        log_dir=args.log_dir,
+        random_seed=args.random_seed
     )
     
     total_time = time.time() - start_time
