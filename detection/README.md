@@ -92,22 +92,56 @@ python detection\train_detection_simple.py --num_epochs 5 --val_split 0.1 --batc
 | `--log_dir` | `./Simple_Training/logs` | 日誌保存目錄 |
 | `--random_seed` | `42` | 隨機種子 |
 
-### 範例命令
+## 🔧 詳細訓練配置說明
 
+### 📝 當前預設配置（適合快速測試）
+
+#### 基本參數
+- **K-Fold數量**: 2 (減少以加快測試)
+- **訓練輪數**: 50 (標準訓練，快速測試可調整為 5)
+- **批次大小**: 16 (標準值，記憶體不足時可調整為 4)
+- **學習率**: 0.0001 (標準值)
+
+#### 優化參數
+- **梯度累積批次數**: 2 (補償較小的批次大小)
+- **驗證檢查間隔**: 1 (每個epoch都驗證，便於觀察進度)
+- **隨機種子**: 42 (保證結果可重現)
+
+#### 目錄設置
+- **K-Fold模型保存目錄**: `detection/Faster_RCNN_Detection/models`
+- **K-Fold日誌保存目錄**: `detection/Faster_RCNN_Detection/logs`
+- **簡單訓練模型保存目錄**: `detection/Simple_Training/models`
+- **簡單訓練日誌保存目錄**: `detection/Simple_Training/logs`
+
+### ⚡ 預期效果
+- **訓練時間**: 約 30-60 分鐘（視硬件而定）
+- **內存使用**: 相對較低（適合普通GPU）
+- **進度顯示**: 每個epoch都會顯示驗證結果
+
+### 🔄 進階配置與範例
+
+#### 完整訓練配置（生產環境推薦）
 ```bash
-# K-Fold: 10-fold 交叉驗證，較高學習率
-python detection\train_detection.py --k_folds 10 --learning_rate 0.0005
+# K-Fold: 5-fold 交叉驗證，完整訓練
+python detection\train_detection.py --k_folds 5 --num_epochs 50 --batch_size 16
 
-# K-Fold: 減少記憶體使用
-python detection\train_detection.py --batch_size 4 --num_epochs 30
+# 簡單訓練: 完整配置
+python detection\train_detection_simple.py --num_epochs 50 --batch_size 16 --val_split 0.2
+```
 
-# K-Fold: 自訂隨機種子
-python detection\train_detection.py --k_folds 5 --random_seed 123
+#### 記憶體優化配置
+```bash
+# 減少批次大小和 fold 數量
+python detection\train_detection.py --batch_size 2 --k_folds 3
+python detection\train_detection_simple.py --batch_size 2
+```
 
-# 簡單訓練: 小驗證集，快速訓練
-python detection\train_detection_simple.py --val_split 0.1 --num_epochs 30
+#### 自訂配置範例
+```bash
+# 高學習率與自訂種子
+python detection\train_detection.py --learning_rate 0.0005 --random_seed 123
 
-# 簡單訓練: 自訂路徑和種子
+# 自訂保存路徑
 python detection\train_detection_simple.py --save_dir "./custom_models" --random_seed 123
 ```
 
@@ -182,7 +216,12 @@ detection/Simple_Training/
 
 ## 📈 監控和分析
 
-### TensorBoard 視覺化
+### 🖥️ 實時監控
+- **詳細進度條**: 終端會顯示詳細的訓練進度
+- **關鍵指標**: 包含Loss、F1分數等關鍵指標的實時更新
+- **驗證結果**: 每個epoch的驗證結果即時顯示
+
+### 📊 TensorBoard 視覺化
 
 **K-Fold 訓練：**
 ```bash
@@ -199,24 +238,24 @@ tensorboard --logdir detection/Faster_RCNN_Detection/logs/fold_1
 tensorboard --logdir detection/Simple_Training/logs
 ```
 
-### 查看結果
+### 📋 查看結果
 
 **K-Fold 結果：**
-```bash
+```powershell
 # 查看 K-fold 總體結果
-cat detection/Faster_RCNN_Detection/models/kfold_results.json
+type detection\Faster_RCNN_Detection\models\kfold_results.json
 
-# 查看訓練日誌
-tail -f detection/Faster_RCNN_Detection/logs/kfold_training_*.log
+# 查看訓練日誌 (可使用 PowerShell 或文本編輯器)
+Get-Content detection\Faster_RCNN_Detection\logs\kfold_training_*.log -Tail 20
 ```
 
 **簡單訓練結果：**
-```bash
+```powershell
 # 查看訓練結果
-cat detection/Simple_Training/models/training_results.json
+type detection\Simple_Training\models\training_results.json
 
 # 查看訓練日誌
-tail -f detection/Simple_Training/logs/simple_training_*.log
+Get-Content detection\Simple_Training\logs\simple_training_*.log -Tail 20
 ```
 
 ## 🔍 模型推理
@@ -224,19 +263,13 @@ tail -f detection/Simple_Training/logs/simple_training_*.log
 **K-Fold 訓練的模型：**
 ```bash
 # 使用最佳 fold 模型進行推理
-python detection\inference_detection.py \
-  --model_path Faster_RCNN_Detection/models/best_model_fold_1.pth \
-  --input_dicom path/to/dicom.dcm \
-  --confidence_threshold 0.5
+python detection\inference_detection.py --model_path Faster_RCNN_Detection\models\best_model_fold_1.pth --input_dicom path\to\dicom.dcm --confidence_threshold 0.5
 ```
 
 **簡單訓練的模型：**
 ```bash
 # 使用簡單訓練的最佳模型進行推理
-python detection\inference_detection.py \
-  --model_path Simple_Training/models/best_model_weights.pth \
-  --input_dicom path/to/dicom.dcm \
-  --confidence_threshold 0.5
+python detection\inference_detection.py --model_path Simple_Training\models\best_model_weights.pth --input_dicom path\to\dicom.dcm --confidence_threshold 0.5
 ```
 
 ## 🏗️ 模型架構
@@ -278,13 +311,13 @@ python detection\train_detection_simple.py --batch_size 4
 ```
 
 **Q: 數據集找不到**
-```bash
+```powershell
 # 檢查數據路徑（兩種方法相同）
 python detection\train_detection.py --data_dir "./datasets/splited_dataset"
 python detection\train_detection_simple.py --data_dir "./datasets/splited_dataset"
 
 # 確認數據集結構正確
-ls datasets/splited_dataset/train/
+dir datasets\splited_dataset\train\
 ```
 
 **Q: 訓練時間過長**
@@ -301,10 +334,9 @@ python detection\train_detection_simple.py --num_epochs 20
 - **快速測試想法**: 使用簡單訓練
 - **第一次訓練**: 建議先用簡單訓練熟悉流程
 
-**Q: PyTorch 載入警告或錯誤**
+**Q: PyTorch 版本相關問題**
 ```bash
-# 如果遇到 torch.load 相關警告，代碼已自動處理
-# 確保使用 PyTorch 2.6+ 版本
+# 確保使用支援的 PyTorch 版本
 pip install torch>=2.0.0
 
 # 檢查版本
@@ -315,17 +347,22 @@ python -c "import torch; print(torch.__version__)"
 ```bash
 # 檢查可視化依賴
 pip install matplotlib>=3.7.0 opencv-python>=4.8.0
-
-# 如果可視化失敗，訓練仍會繼續，檢查日誌：
-tail -f detection/Simple_Training/logs/simple_training_*.log
 ```
 
-**Q: 結果不可重現**
-```bash
-# 使用固定的隨機種子
-python detection\train_detection.py --random_seed 42
-python detection\train_detection_simple.py --random_seed 42
+**Q: 數據載入錯誤如何解決？**
+```powershell
+# 檢查數據目錄路徑是否正確
+dir datasets\splited_dataset\train\
+dir datasets\splited_dataset\test\
+
+# 確認患者列表文件存在
+type datasets\splited_dataset\train\train_patients.txt
+type datasets\splited_dataset\test\test_patients.txt
 ```
+
+**Q: 如何中斷和恢復訓練？**
+- **K-Fold訓練**: 每個fold結束後會保存模型，可以手動修改代碼從特定fold開始
+- **簡單訓練**: 支持檢查點保存，可從最近的檢查點恢復訓練
 
 ### 檢查系統狀態
 ```bash
@@ -352,32 +389,11 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 - **隨機種子**: 支援全局隨機種子設定確保結果可重現
 - **PyTorch 兼容**: 支援 PyTorch 2.6+ 版本
 
-### 🔄 最新更新功能
+### 🔄 主要功能
 - **🎯 隨機種子支援**: 兩種訓練方法都支援 `--random_seed` 參數
-- **🔧 PyTorch 2.6+ 兼容**: 修正 `torch.load` 和模型載入相關警告
 - **🎨 自動可視化**: 訓練完成後自動生成預測結果和統計圖表
-- **📊 增強記錄**: 更詳細的訓練日誌和進度顯示
-
-### K-Fold 流程
-1. 載入完整數據集
-2. 隨機分割為 K 個 fold
-3. 依序訓練 K 個模型（每次用 K-1 個 fold 訓練，1 個 fold 驗證）
-4. 計算平均指標和標準差
-5. 保存所有模型和結果
-
-### 簡單訓練流程
-1. 載入完整數據集
-2. 隨機分割為訓練集和驗證集
-3. 訓練單一模型
-4. 每個 epoch 進行驗證
-5. 保存最佳模型和訓練歷史
-
-### 🚀 訓練進度顯示
-兩種訓練方法都配備了詳細的進度條：
-- **整體進度**: 顯示 epoch/fold 進度
-- **批次進度**: 顯示當前 loss 和平均 loss
-- **驗證進度**: 顯示驗證過程
-- **實時指標**: 動態更新 F1 分數等指標
+- **📊 詳細記錄**: 完整的訓練日誌和進度顯示
+- **📈 實時監控**: 詳細進度條顯示 epoch/fold 進度、loss 和 F1 分數
 
 ## 🎯 最佳實踐
 
@@ -385,30 +401,23 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 1. **資料檢查**: 確保 DICOM 檔案與 XML 標註的 SOPInstanceUID 匹配
 2. **參數調整**: 根據 GPU 記憶體調整 batch_size
 3. **日誌監控**: 使用 TensorBoard 監控訓練過程
+4. **隨機種子**: 固定隨機種子確保結果可重現
 
-### K-Fold 特定建議
-4. **結果分析**: 檢查各 fold 間的性能一致性
-5. **模型選擇**: 選擇表現最佳的 fold 模型用於推理
-6. **時間規劃**: K-fold 訓練時間是簡單訓練的 K 倍
-
-### 簡單訓練特定建議
-4. **驗證集大小**: 通常設置為 15-25% (0.15-0.25)
-5. **隨機種子**: 固定隨機種子確保結果可重現
-6. **檢查點**: 利用定期保存的檢查點進行訓練恢復
+### 訓練方法選擇
+- **研究和論文發表**: 使用 K-Fold 交叉驗證（更可靠的評估）
+- **快速原型和測試**: 使用簡單訓練（快速迭代）
+- **生產環境部署**: 建議先用簡單訓練快速驗證，再用 K-Fold 完整評估
 
 ## 🚨 注意事項
 
 ### K-Fold 交叉驗證
-- **記憶體需求**: 需要更多時間和儲存空間
-- **數據平衡**: 確保各 fold 中病灶樣本分佈均勻
 - **訓練時間**: 訓練時間是簡單訓練的 K 倍
+- **數據平衡**: 確保各 fold 中病灶樣本分佈均勻
 - **結果解讀**: 關注指標的標準差，過大表示模型不穩定
 
 ### 簡單訓練/驗證分割
-- **隨機性**: 單次分割可能存在偏差
-- **驗證集選擇**: 驗證集大小影響訓練穩定性
+- **驗證集大小**: 通常設置為 15-25% (0.15-0.25)
 - **過擬合風險**: 需要密切監控驗證指標
-- **可重現性**: 依賴隨機種子設置
 
 ### 通用注意事項
 - **數據質量**: 確保 DICOM 和 XML 標註的一致性
@@ -434,9 +443,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ## 📋 更新歷史
 
 ### 最新更新 (2025-08)
-- ✅ **PyTorch 2.6+ 兼容性**: 修正 `torch.load` 和模型載入警告
-- ✅ **隨機種子支援**: 兩種訓練方法都支援 `--random_seed` 參數
-- ✅ **自動可視化**: 添加預測結果和統計圖表自動生成
-- ✅ **增強記錄**: 更詳細的訓練過程記錄和進度顯示
-- ✅ **代碼同步**: 確保兩個訓練腳本功能一致性
-- ✅ **文檔整合**: 將所有更新信息整合到主 README 文檔中
+- ✅ **PyTorch 2.6+ 兼容性**: 修正模型載入警告
+- ✅ **隨機種子支援**: 確保結果可重現
+- ✅ **自動可視化**: 預測結果和統計圖表自動生成
+- ✅ **文檔整合**: 整合所有訓練配置到單一文檔
