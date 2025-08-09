@@ -7,7 +7,6 @@ import os
 import json
 import time
 import logging
-import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -64,6 +63,59 @@ def setup_logging(log_dir):
         ]
     )
     return log_file
+
+
+def evaluate_model(model, val_loader, device, return_samples=False, max_samples=10):
+    """評估模型"""
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    sample_images = []
+    sample_predictions = []
+    sample_targets = []
+    
+    val_pbar = tqdm(val_loader, desc="評估模型", unit="batch", ncols=100, leave=False)
+    
+    with torch.no_grad():
+        for images, targets in val_pbar:
+            images = [img.to(device) for img in images]
+            predictions = model(images)
+            
+            for i, (pred, target) in enumerate(zip(predictions, targets)):
+                all_predictions.append({
+                    'boxes': pred['boxes'].cpu(),
+                    'scores': pred['scores'].cpu(),
+                    'labels': pred['labels'].cpu()
+                })
+                all_targets.append({
+                    'boxes': target['boxes'],
+                    'labels': target['labels']
+                })
+                
+                # 收集樣本用於可視化
+                if return_samples and len(sample_images) < max_samples:
+                    sample_images.append(images[i].cpu())
+                    sample_predictions.append({
+                        'boxes': pred['boxes'].cpu(),
+                        'scores': pred['scores'].cpu(),
+                        'labels': pred['labels'].cpu()
+                    })
+                    sample_targets.append({
+                        'boxes': target['boxes'],
+                        'labels': target['labels']
+                    })
+            
+            val_pbar.set_postfix({'Samples': f'{len(all_predictions)}'})
+    
+    val_pbar.close()
+    
+    # 計算指標
+    metrics = calculate_detection_metrics(all_predictions, all_targets, iou_threshold=0.5)
+    
+    if return_samples:
+        return metrics, sample_images, sample_predictions, sample_targets
+    else:
+        return metrics
 
 
 def evaluate_detection_model(model, data_loader, device, iou_threshold=0.5, return_samples=False, max_samples=10):
@@ -512,8 +564,9 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
 
 
 def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=0.001, 
-                save_dir='./models', log_dir='./logs', random_seed=42):
-    """K-fold交叉驗證訓練"""
+                save_dir='./models', log_dir='./logs', random_seed=42, 
+                accumulate_grad_batches=1, val_check_interval=5):
+    """K-fold交叉驗證訓練 - 優化版本"""
     
     # 設置設備
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -533,7 +586,7 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
         fold_datasets, 
         desc="K-Fold 交叉驗證進度",
         unit="fold",
-        ncols=100
+        ncols=120
     )
     
     for fold, (train_dataset, val_dataset) in enumerate(fold_pbar):
@@ -578,110 +631,119 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
         # 訓練循環
         fold_start_time = time.time()
         best_f1 = 0
+        train_history = []
+        val_history = []
         
-        for epoch in range(num_epochs):
-            # 訓練
-            logging.info(f"開始 Epoch {epoch + 1}/{num_epochs} 訓練...")
+        # 創建epoch進度條
+        epoch_pbar = tqdm(range(num_epochs), desc=f"Fold {fold + 1}/{k_folds} - 訓練進度", 
+                         unit="epoch", ncols=120, leave=False)
+        
+        for epoch in epoch_pbar:
+            # 訓練階段
             model.train()
             train_losses = []
             
             # 創建訓練進度條
             train_pbar = tqdm(
                 train_loader, 
-                desc=f"Fold {fold + 1}/{k_folds}, Epoch {epoch + 1}/{num_epochs} [訓練]",
+                desc=f"Epoch {epoch + 1}/{num_epochs} [訓練]",
                 unit="batch",
-                ncols=100
+                ncols=100,
+                leave=False
             )
+            
+            optimizer.zero_grad()  # 在epoch開始時清零梯度
             
             for batch_idx, (images, targets) in enumerate(train_pbar):
                 images = [img.to(device) for img in images]
                 targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
                 
-                optimizer.zero_grad()
+                # 前向傳播
                 loss_dict = model(images, targets)
                 losses = sum(loss for loss in loss_dict.values())
                 
+                # 梯度累積
+                losses = losses / accumulate_grad_batches
                 losses.backward()
-                optimizer.step()
                 
-                train_losses.append(losses.item())
+                # 每accumulate_grad_batches個批次更新一次參數
+                if ((batch_idx + 1) % accumulate_grad_batches == 0) or (batch_idx + 1 == len(train_loader)):
+                    optimizer.step()
+                    optimizer.zero_grad()
                 
-                # 更新進度條顯示當前loss
-                current_loss = losses.item()
+                train_losses.append(losses.item() * accumulate_grad_batches)  # 記錄原始loss
+                
+                # 更新進度條
+                current_loss = losses.item() * accumulate_grad_batches
+                avg_loss = np.mean(train_losses)
                 train_pbar.set_postfix({
                     'Loss': f'{current_loss:.4f}',
-                    'Avg_Loss': f'{np.mean(train_losses):.4f}'
+                    'Avg': f'{avg_loss:.4f}'
                 })
             
             train_pbar.close()
             scheduler.step()
             
-            # 驗證
-            logging.info(f"開始 Epoch {epoch + 1} 驗證...")
-            
-            # 創建驗證進度條
-            val_pbar = tqdm(
-                val_loader,
-                desc=f"Fold {fold + 1}/{k_folds}, Epoch {epoch + 1}/{num_epochs} [驗證]",
-                unit="batch",
-                ncols=100
-            )
-            
-            model.eval()
-            all_predictions = []
-            all_targets = []
-            
-            with torch.no_grad():
-                for images, targets in val_pbar:
-                    images = [img.to(device) for img in images]
-                    predictions = model(images)
-                    
-                    for pred, target in zip(predictions, targets):
-                        all_predictions.append({
-                            'boxes': pred['boxes'].cpu(),
-                            'scores': pred['scores'].cpu(),
-                            'labels': pred['labels'].cpu()
-                        })
-                        all_targets.append({
-                            'boxes': target['boxes'],
-                            'labels': target['labels']
-                        })
-                    
-                    # 更新驗證進度條
-                    val_pbar.set_postfix({
-                        'Samples': f'{len(all_predictions)}'
-                    })
-            
-            val_pbar.close()
-            
-            # 計算驗證指標
-            val_metrics = calculate_detection_metrics(all_predictions, all_targets, iou_threshold=0.5)
             avg_train_loss = np.mean(train_losses)
+            train_history.append(avg_train_loss)
             
-            # 記錄到TensorBoard
-            writer.add_scalar('Loss/Train', avg_train_loss, epoch)
-            writer.add_scalar('Metrics/Precision', val_metrics['precision'], epoch)
-            writer.add_scalar('Metrics/Recall', val_metrics['recall'], epoch)
-            writer.add_scalar('Metrics/F1', val_metrics['f1_score'], epoch)
-            
-            # 保存最佳模型
-            if val_metrics['f1_score'] > best_f1:
-                best_f1 = val_metrics['f1_score']
-                torch.save(model.state_dict(), 
-                          os.path.join(save_dir, f'best_model_fold_{fold + 1}.pth'))
-            
-            if epoch % 10 == 0:
-                logging.info(f"Fold {fold + 1}, Epoch {epoch}/{num_epochs}: "
-                           f"Loss: {avg_train_loss:.4f}, "
-                           f"Precision: {val_metrics['precision']:.4f}, "
-                           f"Recall: {val_metrics['recall']:.4f}, "
-                           f"F1: {val_metrics['f1_score']:.4f}")
+            # 驗證階段 - 只在指定間隔進行驗證
+            if (epoch + 1) % val_check_interval == 0 or epoch == num_epochs - 1:
+                val_metrics = evaluate_model(model, val_loader, device)
+                val_history.append(val_metrics)
+                
+                # 記錄到TensorBoard
+                writer.add_scalar('Loss/Train', avg_train_loss, epoch)
+                writer.add_scalar('Metrics/Precision', val_metrics['precision'], epoch)
+                writer.add_scalar('Metrics/Recall', val_metrics['recall'], epoch)
+                writer.add_scalar('Metrics/F1', val_metrics['f1_score'], epoch)
+                
+                # 保存最佳模型
+                if val_metrics['f1_score'] > best_f1:
+                    best_f1 = val_metrics['f1_score']
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'best_f1': best_f1,
+                        'train_loss': avg_train_loss,
+                        'val_metrics': val_metrics
+                    }, os.path.join(save_dir, f'best_model_fold_{fold + 1}.pth'))
+                    
+                    # 也保存純模型權重
+                    torch.save(model.state_dict(), 
+                              os.path.join(save_dir, f'best_model_fold_{fold + 1}_weights.pth'))
+                
+                # 更新epoch進度條
+                epoch_pbar.set_postfix({
+                    'Loss': f'{avg_train_loss:.4f}',
+                    'F1': f'{val_metrics["f1_score"]:.4f}',
+                    'Best_F1': f'{best_f1:.4f}'
+                })
+                
+                # 定期輸出日誌
+                if (epoch + 1) % (val_check_interval * 2) == 0 or epoch == num_epochs - 1:
+                    logging.info(f"Fold {fold + 1}, Epoch {epoch + 1}/{num_epochs}: "
+                               f"Loss: {avg_train_loss:.4f}, "
+                               f"Precision: {val_metrics['precision']:.4f}, "
+                               f"Recall: {val_metrics['recall']:.4f}, "
+                               f"F1: {val_metrics['f1_score']:.4f}")
+            else:
+                # 不進行驗證時，只更新進度條
+                epoch_pbar.set_postfix({
+                    'Loss': f'{avg_train_loss:.4f}',
+                    'Best_F1': f'{best_f1:.4f}'
+                })
         
+        epoch_pbar.close()
         fold_time = time.time() - fold_start_time
         
         # 最終評估和可視化
-        model.load_state_dict(torch.load(os.path.join(save_dir, f'best_model_fold_{fold + 1}.pth'), weights_only=False))
-        final_metrics, sample_images, sample_predictions, sample_targets = evaluate_detection_model(
+        logging.info(f"載入 Fold {fold + 1} 最佳模型進行最終評估...")
+        checkpoint = torch.load(os.path.join(save_dir, f'best_model_fold_{fold + 1}.pth'), weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        final_metrics, sample_images, sample_predictions, sample_targets = evaluate_model(
             model, val_loader, device, return_samples=True, max_samples=10
         )
         
@@ -727,7 +789,9 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
             'fold': fold + 1,
             'metrics': final_metrics,
             'training_time': fold_time,
-            'best_f1': best_f1
+            'best_f1': best_f1,
+            'train_history': train_history,
+            'val_history': val_history
         }
         all_fold_results.append(fold_result)
         
@@ -762,7 +826,9 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
             'k_folds': k_folds,
             'num_epochs': num_epochs,
             'batch_size': batch_size,
-            'learning_rate': learning_rate
+            'learning_rate': learning_rate,
+            'accumulate_grad_batches': accumulate_grad_batches,
+            'val_check_interval': val_check_interval
         }
     }
     
@@ -792,29 +858,24 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
 
 
 def main():
-    parser = argparse.ArgumentParser(description='K-Fold Cross-Validation Training for Faster R-CNN')
-    
     # 獲取腳本所在目錄
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    parser.add_argument('--data_dir', type=str, default=os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset'), 
-                       help='數據集目錄路徑')
-    parser.add_argument('--k_folds', type=int, default=5, 
-                       help='K-fold交叉驗證的fold數量')
-    parser.add_argument('--num_epochs', type=int, default=50, 
-                       help='每個fold的訓練輪數')
-    parser.add_argument('--batch_size', type=int, default=16, 
-                       help='批次大小')
-    parser.add_argument('--learning_rate', type=float, default=0.0001, 
-                       help='學習率')
-    parser.add_argument('--save_dir', type=str, default=os.path.join(script_dir, 'Faster_RCNN_Detection', 'models'), 
-                       help='模型保存目錄')
-    parser.add_argument('--log_dir', type=str, default=os.path.join(script_dir, 'Faster_RCNN_Detection', 'logs'), 
-                       help='日誌保存目錄')
-    parser.add_argument('--random_seed', type=int, default=42, 
-                       help='隨機種子')
+    # 直接使用預設參數，不需要命令行解析
+    class Args:
+        def __init__(self):
+            self.data_dir = os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset')
+            self.k_folds = 5  # 減少fold數量以加快測試
+            self.num_epochs = 10  # 減少epoch數量以加快測試
+            self.batch_size = 8  # 減少批次大小以降低內存使用
+            self.learning_rate = 0.0001
+            self.accumulate_grad_batches = 2  # 增加梯度累積以補償較小的批次大小
+            self.val_check_interval = 1  # 每個epoch都驗證以便觀察進度
+            self.save_dir = os.path.join(script_dir, 'Faster_RCNN_Detection', 'models')
+            self.log_dir = os.path.join(script_dir, 'Faster_RCNN_Detection', 'logs')
+            self.random_seed = 42
     
-    args = parser.parse_args()
+    args = Args()
     
     # 設置隨機種子
     torch.manual_seed(args.random_seed)
@@ -836,6 +897,8 @@ def main():
     logging.info(f"訓練輪數: {args.num_epochs}")
     logging.info(f"批次大小: {args.batch_size}")
     logging.info(f"學習率: {args.learning_rate}")
+    logging.info(f"梯度累積批次數: {args.accumulate_grad_batches}")
+    logging.info(f"驗證檢查間隔: {args.val_check_interval}")
     logging.info(f"模型保存目錄: {args.save_dir}")
     logging.info(f"日誌目錄: {args.log_dir}")
     logging.info(f"隨機種子: {args.random_seed}")
@@ -850,7 +913,9 @@ def main():
         learning_rate=args.learning_rate,
         save_dir=args.save_dir,
         log_dir=args.log_dir,
-        random_seed=args.random_seed
+        random_seed=args.random_seed,
+        accumulate_grad_batches=args.accumulate_grad_batches,
+        val_check_interval=args.val_check_interval
     )
     
     total_time = time.time() - start_time
