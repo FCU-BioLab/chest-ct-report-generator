@@ -1,9 +1,12 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Simple Train/Validation Split Training for Faster R-CNN Detection
 不使用 K-Fold，直接進行訓練/驗證分割的版本
 """
 
 import os
+import sys
 import json
 import time
 import logging
@@ -27,6 +30,16 @@ from matplotlib.colors import LinearSegmentedColormap
 import cv2
 
 from faster_rcnn_dataset import CTDetectionDataset
+
+# 設置控制台編碼 (Windows)
+if sys.platform.startswith('win'):
+    try:
+        # 嘗試設置UTF-8編碼
+        os.system('chcp 65001 >nul')
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        pass
 
 
 def collate_fn(batch):
@@ -54,14 +67,30 @@ def setup_logging(log_dir):
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f'simple_training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
+    # 清除已有的處理器
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # 創建格式器
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', 
+                                 datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # 文件處理器 - 使用UTF-8編碼
+    file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    
+    # 控制台處理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    
+    # 配置根日誌記錄器
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
     return log_file
 
 

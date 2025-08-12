@@ -16,3 +16,4 @@ datasets
 detection/__pycache__
 detection/Faster_RCNN_Detection
 detection/Simple_Training
+temp
