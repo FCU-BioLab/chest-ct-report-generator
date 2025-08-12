@@ -29,6 +29,13 @@ import matplotlib.patches as patches
 from matplotlib.colors import LinearSegmentedColormap
 import cv2
 
+try:
+    from sklearn.metrics import roc_curve, auc
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
+
 from faster_rcnn_dataset import CTDetectionDataset
 
 # 設置控制台編碼 (Windows)
@@ -94,8 +101,632 @@ def setup_logging(log_dir):
     return log_file
 
 
-def evaluate_model(model, val_loader, device, return_samples=False, max_samples=10):
+def calculate_giou(box1, box2):
+    """計算 Generalized IoU (GIoU)"""
+    # 計算交集
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    
+    # 計算各自面積
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - intersection
+    
+    # 計算最小外包矩形
+    c_x1 = min(box1[0], box2[0])
+    c_y1 = min(box1[1], box2[1])
+    c_x2 = max(box1[2], box2[2])
+    c_y2 = max(box1[3], box2[3])
+    c_area = (c_x2 - c_x1) * (c_y2 - c_y1)
+    
+    iou = intersection / union if union > 0 else 0
+    giou = iou - (c_area - union) / c_area if c_area > 0 else iou
+    
+    return giou
+
+
+def calculate_diou(box1, box2):
+    """計算 Distance IoU (DIoU)"""
+    # 計算IoU
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - intersection
+    iou = intersection / union if union > 0 else 0
+    
+    # 計算中心點距離
+    center1_x = (box1[0] + box1[2]) / 2
+    center1_y = (box1[1] + box1[3]) / 2
+    center2_x = (box2[0] + box2[2]) / 2
+    center2_y = (box2[1] + box2[3]) / 2
+    
+    center_distance_sq = (center1_x - center2_x) ** 2 + (center1_y - center2_y) ** 2
+    
+    # 計算對角線距離
+    c_x1 = min(box1[0], box2[0])
+    c_y1 = min(box1[1], box2[1])
+    c_x2 = max(box1[2], box2[2])
+    c_y2 = max(box1[3], box2[3])
+    diagonal_distance_sq = (c_x2 - c_x1) ** 2 + (c_y2 - c_y1) ** 2
+    
+    diou = iou - center_distance_sq / diagonal_distance_sq if diagonal_distance_sq > 0 else iou
+    
+    return diou
+
+
+def calculate_ciou(box1, box2):
+    """計算 Complete IoU (CIoU)"""
+    import math
+    
+    # 計算DIoU
+    diou = calculate_diou(box1, box2)
+    
+    # 計算寬高比一致性
+    w1, h1 = box1[2] - box1[0], box1[3] - box1[1]
+    w2, h2 = box2[2] - box2[0], box2[3] - box2[1]
+    
+    if h1 > 0 and h2 > 0 and w1 > 0 and w2 > 0:
+        v = (4 / (math.pi ** 2)) * ((math.atan(w2/h2) - math.atan(w1/h1)) ** 2)
+        
+        # 計算IoU
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        area1 = w1 * h1
+        area2 = w2 * h2
+        union = area1 + area2 - intersection
+        iou = intersection / union if union > 0 else 0
+        
+        alpha = v / (1 - iou + v) if (1 - iou + v) > 0 else 0
+        ciou = diou - alpha * v
+    else:
+        ciou = diou
+    
+    return ciou
+
+
+def calculate_bbox_error(pred_box, target_box):
+    """計算邊界框位置與大小誤差"""
+    # 中心點誤差
+    pred_center_x = (pred_box[0] + pred_box[2]) / 2
+    pred_center_y = (pred_box[1] + pred_box[3]) / 2
+    target_center_x = (target_box[0] + target_box[2]) / 2
+    target_center_y = (target_box[1] + target_box[3]) / 2
+    
+    center_error = ((pred_center_x - target_center_x) ** 2 + (pred_center_y - target_center_y) ** 2) ** 0.5
+    
+    # 尺寸誤差
+    pred_w = pred_box[2] - pred_box[0]
+    pred_h = pred_box[3] - pred_box[1]
+    target_w = target_box[2] - target_box[0]
+    target_h = target_box[3] - target_box[1]
+    
+    size_error = abs(pred_w - target_w) + abs(pred_h - target_h)
+    
+    return {
+        'center_error': center_error,
+        'size_error': size_error,
+        'total_error': center_error + size_error
+    }
+
+
+def calculate_map_metrics(predictions, targets, iou_thresholds=[0.5], confidence_threshold=0.5):
+    """計算 mAP 指標"""
+    all_scores = []
+    all_labels = []
+    
+    for pred, target in zip(predictions, targets):
+        pred_boxes = pred['boxes']
+        pred_scores = pred['scores']
+        target_boxes = target['boxes']
+        
+        # 過濾低置信度預測
+        valid_pred = pred_scores > confidence_threshold
+        pred_boxes = pred_boxes[valid_pred]
+        pred_scores = pred_scores[valid_pred]
+        
+        if len(pred_boxes) == 0:
+            # 如果沒有預測但有目標，記錄為假陰性
+            all_scores.extend([0] * len(target_boxes))
+            all_labels.extend([1] * len(target_boxes))
+            continue
+        
+        if len(target_boxes) == 0:
+            # 如果沒有目標但有預測，記錄為假陽性
+            all_scores.extend(pred_scores.tolist())
+            all_labels.extend([0] * len(pred_scores))
+            continue
+        
+        # 計算IoU矩陣
+        iou_matrix = calculate_iou_matrix(pred_boxes, target_boxes)
+        
+        # 為每個IoU閾值計算匹配
+        for iou_threshold in iou_thresholds:
+            matched_targets = set()
+            for i in range(len(pred_boxes)):
+                best_iou = 0
+                best_target = -1
+                for j in range(len(target_boxes)):
+                    if j not in matched_targets and iou_matrix[i][j] > best_iou:
+                        best_iou = iou_matrix[i][j]
+                        best_target = j
+                
+                if best_iou >= iou_threshold:
+                    all_scores.append(pred_scores[i].item())
+                    all_labels.append(1)  # True positive
+                    matched_targets.add(best_target)
+                else:
+                    all_scores.append(pred_scores[i].item())
+                    all_labels.append(0)  # False positive
+            
+            # 未匹配的目標為假陰性
+            unmatched_targets = len(target_boxes) - len(matched_targets)
+            all_scores.extend([0] * unmatched_targets)
+            all_labels.extend([1] * unmatched_targets)
+    
+    # 計算AP
+    if len(all_scores) == 0:
+        return {'mAP': 0.0, 'AP_scores': []}
+    
+    # 按分數排序
+    sorted_indices = np.argsort(all_scores)[::-1]
+    sorted_labels = np.array(all_labels)[sorted_indices]
+    
+    # 計算precision和recall
+    tp_cumsum = np.cumsum(sorted_labels)
+    fp_cumsum = np.cumsum(1 - sorted_labels)
+    
+    precision = tp_cumsum / (tp_cumsum + fp_cumsum + 1e-10)
+    recall = tp_cumsum / (np.sum(sorted_labels) + 1e-10)
+    
+    # 計算AP（使用插值方法）
+    ap = 0
+    for t in np.arange(0, 1.1, 0.1):
+        if np.sum(recall >= t) == 0:
+            p = 0
+        else:
+            p = np.max(precision[recall >= t])
+        ap += p / 11
+    
+    return {
+        'mAP': ap,
+        'precision_curve': precision,
+        'recall_curve': recall,
+        'scores': np.array(all_scores)[sorted_indices]
+    }
+
+
+def calculate_comprehensive_metrics(predictions, targets, iou_threshold=0.5, confidence_threshold=0.5):
+    """計算全面的檢測指標"""
+    # 基礎統計
+    tp, fp, fn = 0, 0, 0
+    total_images = len(predictions)
+    images_with_detections = 0
+    images_with_targets = 0
+    lesion_level_tp = 0
+    case_level_tp = 0
+    
+    # 位置與品質指標
+    ious = []
+    gious = []
+    dious = []
+    cious = []
+    bbox_errors = []
+    localization_errors = []
+    fp_per_image = []
+    
+    # 置信度相關
+    all_confidence_scores = []
+    true_positive_scores = []
+    false_positive_scores = []
+    
+    for pred, target in zip(predictions, targets):
+        pred_boxes = pred['boxes']
+        pred_scores = pred['scores']
+        target_boxes = target['boxes']
+        
+        # 記錄有目標的圖像數
+        if len(target_boxes) > 0:
+            images_with_targets += 1
+        
+        # 過濾低置信度預測
+        valid_pred = pred_scores > confidence_threshold
+        filtered_pred_boxes = pred_boxes[valid_pred]
+        filtered_pred_scores = pred_scores[valid_pred]
+        
+        # 記錄有檢測的圖像數
+        if len(filtered_pred_boxes) > 0:
+            images_with_detections += 1
+        
+        # 記錄每張圖的假陽性數
+        image_fp = 0
+        all_confidence_scores.extend(filtered_pred_scores.tolist())
+        
+        if len(filtered_pred_boxes) == 0 and len(target_boxes) == 0:
+            fp_per_image.append(0)
+            continue
+        elif len(filtered_pred_boxes) == 0:
+            fn += len(target_boxes)
+            fp_per_image.append(0)
+            continue
+        elif len(target_boxes) == 0:
+            fp += len(filtered_pred_boxes)
+            image_fp = len(filtered_pred_boxes)
+            fp_per_image.append(image_fp)
+            false_positive_scores.extend(filtered_pred_scores.tolist())
+            continue
+        
+        # 計算IoU矩陣和各種改進IoU
+        iou_matrix = calculate_iou_matrix(filtered_pred_boxes, target_boxes)
+        
+        # 匹配預測和目標
+        matched_targets = set()
+        image_has_correct_detection = False
+        
+        for i in range(len(filtered_pred_boxes)):
+            best_iou = 0
+            best_target = -1
+            for j in range(len(target_boxes)):
+                if j not in matched_targets and iou_matrix[i][j] > best_iou:
+                    best_iou = iou_matrix[i][j]
+                    best_target = j
+            
+            if best_iou >= iou_threshold:
+                tp += 1
+                lesion_level_tp += 1
+                image_has_correct_detection = True
+                matched_targets.add(best_target)
+                
+                # 記錄品質指標
+                pred_box = filtered_pred_boxes[i]
+                target_box = target_boxes[best_target]
+                
+                ious.append(best_iou)
+                gious.append(calculate_giou(pred_box, target_box))
+                dious.append(calculate_diou(pred_box, target_box))
+                cious.append(calculate_ciou(pred_box, target_box))
+                
+                # 計算定位誤差
+                bbox_error = calculate_bbox_error(pred_box, target_box)
+                bbox_errors.append(bbox_error)
+                localization_errors.append(bbox_error['total_error'])
+                
+                true_positive_scores.append(filtered_pred_scores[i].item())
+            else:
+                fp += 1
+                image_fp += 1
+                false_positive_scores.append(filtered_pred_scores[i].item())
+        
+        # 病例級敏感度
+        if image_has_correct_detection and len(target_boxes) > 0:
+            case_level_tp += 1
+        
+        fn += len(target_boxes) - len(matched_targets)
+        fp_per_image.append(image_fp)
+    
+    # 計算基礎指標
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    sensitivity = recall  # 敏感度就是召回率
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    
+    # 病灶級和病例級敏感度
+    lesion_level_sensitivity = lesion_level_tp / (tp + fn) if (tp + fn) > 0 else 0
+    case_level_sensitivity = case_level_tp / images_with_targets if images_with_targets > 0 else 0
+    
+    # 每張圖像的平均假陽性數
+    avg_fp_per_image = np.mean(fp_per_image) if fp_per_image else 0
+    
+    # 計算mAP指標
+    map_50 = calculate_map_metrics(predictions, targets, [0.5], confidence_threshold)
+    map_50_95 = calculate_map_metrics(predictions, targets, 
+                                     [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95], 
+                                     confidence_threshold)
+    
+    # 品質指標統計
+    quality_metrics = {}
+    if ious:
+        quality_metrics = {
+            'mean_iou': np.mean(ious),
+            'mean_giou': np.mean(gious),
+            'mean_diou': np.mean(dious),
+            'mean_ciou': np.mean(cious),
+            'mean_localization_error': np.mean(localization_errors),
+            'std_localization_error': np.std(localization_errors)
+        }
+    
+    return {
+        # 一、核心檢測指標
+        'iou': np.mean(ious) if ious else 0,
+        'mAP@0.5': map_50['mAP'],
+        'mAP@[0.5:0.95]': map_50_95['mAP'],
+        'sensitivity_recall': sensitivity,
+        'precision': precision,
+        'f1_score': f1,
+        'fp_per_image': avg_fp_per_image,
+        
+        # 二、定位與錯誤分析指標
+        'lesion_level_sensitivity': lesion_level_sensitivity,
+        'case_level_sensitivity': case_level_sensitivity,
+        'mean_bbox_error': np.mean([err['total_error'] for err in bbox_errors]) if bbox_errors else 0,
+        'mean_giou': quality_metrics.get('mean_giou', 0),
+        'mean_diou': quality_metrics.get('mean_diou', 0),
+        'mean_ciou': quality_metrics.get('mean_ciou', 0),
+        
+        # 三、臨床相關指標
+        'mean_localization_error': quality_metrics.get('mean_localization_error', 0),
+        'avg_false_positives_per_case': avg_fp_per_image,
+        
+        # 基礎統計
+        'tp': tp,
+        'fp': fp,
+        'fn': fn,
+        'total_images': total_images,
+        'images_with_detections': images_with_detections,
+        'images_with_targets': images_with_targets,
+        
+        # 詳細數據（用於進一步分析）
+        'confidence_scores': all_confidence_scores,
+        'true_positive_scores': true_positive_scores,
+        'false_positive_scores': false_positive_scores,
+        'map_details': {
+            'map_50': map_50,
+            'map_50_95': map_50_95
+        }
+    }
+
+
+def calculate_roc_froc_curves(predictions, targets, save_dir=None):
+    """計算並可視化 ROC 和 FROC 曲線"""
+    if not SKLEARN_AVAILABLE:
+        logging.warning("scikit-learn not available. Skipping ROC curve calculation.")
+        return {
+            'roc_auc': 0,
+            'roc_fpr': [],
+            'roc_tpr': [],
+            'roc_thresholds': [],
+            'froc_sensitivity': [],
+            'froc_fps_per_image': [],
+            'froc_thresholds': []
+        }
+    
+    from sklearn.metrics import roc_curve, auc
+    
+    # 準備ROC數據
+    y_true = []
+    y_scores = []
+    
+    # 準備FROC數據  
+    sensitivity_values = []
+    fps_per_image_values = []
+    thresholds = np.arange(0.1, 1.0, 0.05)
+    
+    # 收集所有預測分數和標籤
+    for pred, target in zip(predictions, targets):
+        pred_boxes = pred['boxes']
+        pred_scores = pred['scores']
+        target_boxes = target['boxes']
+        
+        # 為ROC準備數據
+        if len(target_boxes) > 0:
+            y_true.append(1)  # 有病灶的圖像
+        else:
+            y_true.append(0)  # 無病灶的圖像
+        
+        # 使用最高置信度分數作為圖像級別的分數
+        if len(pred_scores) > 0:
+            y_scores.append(torch.max(pred_scores).item())
+        else:
+            y_scores.append(0)
+    
+    # 計算ROC曲線
+    fpr, tpr, roc_thresholds = roc_curve(y_true, y_scores)
+    roc_auc = auc(fpr, tpr)
+    
+    # 計算FROC曲線
+    for threshold in thresholds:
+        tp, fp, fn = 0, 0, 0
+        total_images = len(predictions)
+        
+        for pred, target in zip(predictions, targets):
+            pred_boxes = pred['boxes']
+            pred_scores = pred['scores']
+            target_boxes = target['boxes']
+            
+            # 過濾低置信度預測
+            valid_pred = pred_scores > threshold
+            filtered_pred_boxes = pred_boxes[valid_pred]
+            
+            if len(filtered_pred_boxes) == 0 and len(target_boxes) == 0:
+                continue
+            elif len(filtered_pred_boxes) == 0:
+                fn += len(target_boxes)
+                continue
+            elif len(target_boxes) == 0:
+                fp += len(filtered_pred_boxes)
+                continue
+            
+            # 計算IoU匹配
+            iou_matrix = calculate_iou_matrix(filtered_pred_boxes, target_boxes)
+            matched_targets = set()
+            
+            for i in range(len(filtered_pred_boxes)):
+                best_iou = 0
+                best_target = -1
+                for j in range(len(target_boxes)):
+                    if j not in matched_targets and iou_matrix[i][j] > best_iou:
+                        best_iou = iou_matrix[i][j]
+                        best_target = j
+                
+                if best_iou >= 0.5:  # IoU閾值
+                    tp += 1
+                    matched_targets.add(best_target)
+                else:
+                    fp += 1
+            
+            fn += len(target_boxes) - len(matched_targets)
+        
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        fps_per_image = fp / total_images if total_images > 0 else 0
+        
+        sensitivity_values.append(sensitivity)
+        fps_per_image_values.append(fps_per_image)
+    
+    # 繪製曲線
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # ROC曲線
+        ax1.plot(fpr, tpr, color='darkorange', lw=2, 
+                label=f'ROC curve (AUC = {roc_auc:.3f})')
+        ax1.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        ax1.set_xlim([0.0, 1.0])
+        ax1.set_ylim([0.0, 1.05])
+        ax1.set_xlabel('False Positive Rate')
+        ax1.set_ylabel('True Positive Rate (Sensitivity)')
+        ax1.set_title('Receiver Operating Characteristic (ROC) Curve')
+        ax1.legend(loc="lower right")
+        ax1.grid(True, alpha=0.3)
+        
+        # FROC曲線
+        ax2.plot(fps_per_image_values, sensitivity_values, color='darkgreen', lw=2, marker='o')
+        ax2.set_xlabel('False Positives per Image')
+        ax2.set_ylabel('Sensitivity')
+        ax2.set_title('Free-response ROC (FROC) Curve')
+        ax2.grid(True, alpha=0.3)
+        ax2.set_xlim([0, max(fps_per_image_values) * 1.1 if fps_per_image_values else 1])
+        ax2.set_ylim([0, 1.05])
+        
+        plt.tight_layout()
+        
+        # 保存圖片
+        save_path = os.path.join(save_dir, 'roc_froc_curves.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        logging.info(f"ROC和FROC曲線已保存到: {save_path}")
+    
+    return {
+        'roc_auc': roc_auc,
+        'roc_fpr': fpr,
+        'roc_tpr': tpr,
+        'roc_thresholds': roc_thresholds,
+        'froc_sensitivity': sensitivity_values,
+        'froc_fps_per_image': fps_per_image_values,
+        'froc_thresholds': thresholds
+    }
+
+
+def create_comprehensive_summary(metrics, save_dir, prefix="comprehensive_metrics"):
+    """創建全面的指標摘要報告"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 創建詳細的指標圖表
+    fig = plt.figure(figsize=(20, 15))
+    
+    # 1. 核心檢測指標雷達圖
+    ax1 = plt.subplot(3, 3, 1, projection='polar')
+    core_metrics = ['precision', 'sensitivity_recall', 'f1_score', 'mAP@0.5', 'case_level_sensitivity']
+    core_values = [metrics.get(m, 0) for m in core_metrics]
+    core_labels = ['Precision', 'Sensitivity', 'F1-Score', 'mAP@0.5', 'Case Sensitivity']
+    
+    angles = np.linspace(0, 2 * np.pi, len(core_metrics), endpoint=False).tolist()
+    core_values += core_values[:1]  # 閉合圖形
+    angles += angles[:1]
+    
+    ax1.plot(angles, core_values, 'o-', linewidth=2, label='Core Metrics')
+    ax1.fill(angles, core_values, alpha=0.25)
+    ax1.set_xticks(angles[:-1])
+    ax1.set_xticklabels(core_labels)
+    ax1.set_ylim(0, 1)
+    ax1.set_title('Core Detection Metrics', y=1.08)
+    ax1.grid(True)
+    
+    # 2. IoU品質指標
+    ax2 = plt.subplot(3, 3, 2)
+    iou_metrics = ['iou', 'mean_giou', 'mean_diou', 'mean_ciou']
+    iou_values = [metrics.get(m, 0) for m in iou_metrics]
+    iou_labels = ['IoU', 'GIoU', 'DIoU', 'CIoU']
+    
+    bars = ax2.bar(iou_labels, iou_values, color=['skyblue', 'lightgreen', 'lightcoral', 'lightsalmon'])
+    ax2.set_ylabel('Score')
+    ax2.set_title('IoU Quality Metrics')
+    ax2.set_ylim(0, 1)
+    ax2.grid(True, alpha=0.3)
+    
+    # 添加數值標籤
+    for bar, value in zip(bars, iou_values):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                f'{value:.3f}', ha='center', va='bottom')
+    
+    # 3. 錯誤分析
+    ax3 = plt.subplot(3, 3, 3)
+    error_data = [metrics.get('tp', 0), metrics.get('fp', 0), metrics.get('fn', 0)]
+    error_labels = ['True Positives', 'False Positives', 'False Negatives']
+    colors = ['green', 'red', 'orange']
+    
+    wedges, texts, autotexts = ax3.pie(error_data, labels=error_labels, colors=colors, 
+                                      autopct='%1.0f', startangle=90)
+    ax3.set_title('Detection Results Distribution')
+    
+    # 4-9: 其他圖表省略以節省空間...
+    
+    plt.tight_layout()
+    
+    # 保存圖片
+    save_path = os.path.join(save_dir, f'{prefix}.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 保存詳細的文字報告
+    report_path = os.path.join(save_dir, f'{prefix}_report.txt')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write("=== 全面檢測指標評估報告 ===\n\n")
+        
+        f.write("一、核心檢測指標（必備）\n")
+        f.write(f"  • IoU: {metrics.get('iou', 0):.4f}\n")
+        f.write(f"  • mAP@0.5: {metrics.get('mAP@0.5', 0):.4f}\n")
+        f.write(f"  • mAP@[0.5:0.95]: {metrics.get('mAP@[0.5:0.95]', 0):.4f}\n")
+        f.write(f"  • Sensitivity/Recall: {metrics.get('sensitivity_recall', 0):.4f}\n")
+        f.write(f"  • Precision: {metrics.get('precision', 0):.4f}\n")
+        f.write(f"  • F1-score: {metrics.get('f1_score', 0):.4f}\n")
+        f.write(f"  • FP per Image: {metrics.get('fp_per_image', 0):.4f}\n\n")
+        
+        f.write("二、定位與錯誤分析指標（必備）\n")
+        f.write(f"  • Lesion-level Sensitivity: {metrics.get('lesion_level_sensitivity', 0):.4f}\n")
+        f.write(f"  • Case-level Sensitivity: {metrics.get('case_level_sensitivity', 0):.4f}\n")
+        f.write(f"  • Bounding Box Error: {metrics.get('mean_bbox_error', 0):.4f}\n")
+        f.write(f"  • GIoU: {metrics.get('mean_giou', 0):.4f}\n")
+        f.write(f"  • DIoU: {metrics.get('mean_diou', 0):.4f}\n")
+        f.write(f"  • CIoU: {metrics.get('mean_ciou', 0):.4f}\n\n")
+        
+        f.write("三、臨床相關指標\n")
+        f.write(f"  • Mean Localization Error: {metrics.get('mean_localization_error', 0):.4f}\n")
+        f.write(f"  • Average False Positives per Case: {metrics.get('avg_false_positives_per_case', 0):.4f}\n\n")
+    
+    logging.info(f"全面指標摘要已保存到: {save_path}")
+    logging.info(f"詳細報告已保存到: {report_path}")
+    
+    return save_path, report_path
+
+
+def evaluate_model(model, val_loader, device, return_samples=False, max_samples=10, comprehensive=True):
     """評估模型"""
+    import time
+    
     model.eval()
     all_predictions = []
     all_targets = []
@@ -103,12 +734,25 @@ def evaluate_model(model, val_loader, device, return_samples=False, max_samples=
     sample_predictions = []
     sample_targets = []
     
+    # 效率指標
+    inference_times = []
+    memory_usage = []
+    
     val_pbar = tqdm(val_loader, desc="評估模型", unit="batch", ncols=100, leave=False)
     
     with torch.no_grad():
         for images, targets in val_pbar:
             images = [img.to(device) for img in images]
+            
+            # 測量推理時間
+            start_time = time.time()
             predictions = model(images)
+            inference_time = time.time() - start_time
+            inference_times.append(inference_time / len(images))  # 每張圖的平均時間
+            
+            # 測量顯存使用（如果使用GPU）
+            if device.type == 'cuda':
+                memory_usage.append(torch.cuda.memory_allocated() / 1024**2)  # MB
             
             for i, (pred, target) in enumerate(zip(predictions, targets)):
                 all_predictions.append({
@@ -139,7 +783,21 @@ def evaluate_model(model, val_loader, device, return_samples=False, max_samples=
     val_pbar.close()
     
     # 計算指標
-    metrics = calculate_detection_metrics(all_predictions, all_targets, iou_threshold=0.5)
+    if comprehensive:
+        metrics = calculate_comprehensive_metrics(all_predictions, all_targets, iou_threshold=0.5)
+        
+        # 添加效率指標
+        if inference_times:
+            metrics['inference_time_per_image'] = np.mean(inference_times)
+            metrics['fps'] = 1.0 / np.mean(inference_times) if np.mean(inference_times) > 0 else 0
+            metrics['inference_time_std'] = np.std(inference_times)
+        
+        if memory_usage and device.type == 'cuda':
+            metrics['avg_memory_usage_mb'] = np.mean(memory_usage)
+            metrics['max_memory_usage_mb'] = np.max(memory_usage)
+    else:
+        # 保持向後兼容性
+        metrics = calculate_detection_metrics(all_predictions, all_targets, iou_threshold=0.5)
     
     if return_samples:
         return metrics, sample_images, sample_predictions, sample_targets
@@ -718,14 +1376,16 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
             
             # 驗證階段 - 只在指定間隔進行驗證
             if (epoch + 1) % val_check_interval == 0 or epoch == num_epochs - 1:
-                val_metrics = evaluate_model(model, val_loader, device)
+                val_metrics = evaluate_model(model, val_loader, device, comprehensive=True)
                 val_history.append(val_metrics)
                 
                 # 記錄到TensorBoard
                 writer.add_scalar('Loss/Train', avg_train_loss, epoch)
                 writer.add_scalar('Metrics/Precision', val_metrics['precision'], epoch)
-                writer.add_scalar('Metrics/Recall', val_metrics['recall'], epoch)
+                writer.add_scalar('Metrics/Recall', val_metrics.get('sensitivity_recall', val_metrics.get('recall', 0)), epoch)
                 writer.add_scalar('Metrics/F1', val_metrics['f1_score'], epoch)
+                writer.add_scalar('Metrics/mAP@0.5', val_metrics.get('mAP@0.5', 0), epoch)
+                writer.add_scalar('Metrics/Case_Level_Sensitivity', val_metrics.get('case_level_sensitivity', 0), epoch)
                 
                 # 保存最佳模型
                 if val_metrics['f1_score'] > best_f1:
@@ -755,8 +1415,9 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
                     logging.info(f"Fold {fold + 1}, Epoch {epoch + 1}/{num_epochs}: "
                                f"Loss: {avg_train_loss:.4f}, "
                                f"Precision: {val_metrics['precision']:.4f}, "
-                               f"Recall: {val_metrics['recall']:.4f}, "
-                               f"F1: {val_metrics['f1_score']:.4f}")
+                               f"Recall: {val_metrics.get('sensitivity_recall', val_metrics.get('recall', 0)):.4f}, "
+                               f"F1: {val_metrics['f1_score']:.4f}, "
+                               f"mAP@0.5: {val_metrics.get('mAP@0.5', 0):.4f}")
             else:
                 # 不進行驗證時，只更新進度條
                 epoch_pbar.set_postfix({
@@ -773,7 +1434,7 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
         model.load_state_dict(checkpoint['model_state_dict'])
         
         final_metrics, sample_images, sample_predictions, sample_targets = evaluate_model(
-            model, val_loader, device, return_samples=True, max_samples=10
+            model, val_loader, device, return_samples=True, max_samples=10, comprehensive=True
         )
         
         # 生成當前fold的可視化結果
