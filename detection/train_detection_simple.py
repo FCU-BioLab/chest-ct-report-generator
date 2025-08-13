@@ -1069,6 +1069,59 @@ def create_prediction_summary(predictions, targets, save_dir, prefix="prediction
     return save_path
 
 
+def calculate_dataset_statistics(dataset, dataset_name="Dataset"):
+    """計算數據集的詳細統計信息"""
+    total_images = len(dataset)
+    total_annotations = 0
+    images_with_annotations = 0
+    images_without_annotations = 0
+    
+    logging.info(f"正在計算 {dataset_name} 統計信息...")
+    
+    for i in range(total_images):
+        try:
+            sample = dataset[i]
+            if isinstance(sample, dict) and 'target' in sample:
+                target = sample['target']
+            else:
+                # 如果是tuple格式 (image, target)
+                _, target = sample
+            
+            # 計算標記數量
+            if 'boxes' in target and len(target['boxes']) > 0:
+                num_boxes = len(target['boxes'])
+                total_annotations += num_boxes
+                images_with_annotations += 1
+            else:
+                images_without_annotations += 1
+                
+        except Exception as e:
+            logging.warning(f"計算 {dataset_name} 第 {i} 個樣本時出錯: {e}")
+            images_without_annotations += 1
+    
+    stats = {
+        'dataset_name': dataset_name,
+        'total_images': total_images,
+        'total_annotations': total_annotations,
+        'images_with_annotations': images_with_annotations,
+        'images_without_annotations': images_without_annotations,
+        'avg_annotations_per_image': total_annotations / total_images if total_images > 0 else 0,
+        'avg_annotations_per_annotated_image': total_annotations / images_with_annotations if images_with_annotations > 0 else 0
+    }
+    
+    # 記錄統計信息
+    logging.info(f"=== {dataset_name} 統計信息 ===")
+    logging.info(f"總影像數: {total_images}")
+    logging.info(f"總標記數: {total_annotations}")
+    logging.info(f"有標記的影像數: {images_with_annotations}")
+    logging.info(f"無標記的影像數: {images_without_annotations}")
+    logging.info(f"平均每張影像標記數: {stats['avg_annotations_per_image']:.2f}")
+    if images_with_annotations > 0:
+        logging.info(f"平均每張有標記影像的標記數: {stats['avg_annotations_per_annotated_image']:.2f}")
+    
+    return stats
+
+
 def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
     """創建訓練/驗證數據集分割"""
     # 載入完整數據集
@@ -1097,7 +1150,19 @@ def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
     logging.info(f"訓練集大小: {train_size} ({(1-val_split)*100:.1f}%)")
     logging.info(f"驗證集大小: {val_size} ({val_split*100:.1f}%)")
     
-    return train_dataset, val_dataset
+    # 計算詳細統計信息
+    train_stats = calculate_dataset_statistics(train_dataset, "訓練集")
+    val_stats = calculate_dataset_statistics(val_dataset, "驗證集")
+    
+    # 合併統計信息
+    dataset_stats = {
+        'total_dataset_size': dataset_size,
+        'train_stats': train_stats,
+        'val_stats': val_stats,
+        'split_ratio': {'train': 1-val_split, 'val': val_split}
+    }
+    
+    return train_dataset, val_dataset, dataset_stats
 
 
 def evaluate_model(model, val_loader, device, return_samples=False, max_samples=10, comprehensive=True):
@@ -1193,8 +1258,14 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
     # 創建保存目錄
     os.makedirs(save_dir, exist_ok=True)
     
-    # 創建訓練/驗證數據集
-    train_dataset, val_dataset = create_train_val_datasets(data_dir, val_split)
+    # 創建訓練/驗證數據集並獲取統計信息
+    train_dataset, val_dataset, dataset_stats = create_train_val_datasets(data_dir, val_split)
+    
+    # 保存數據集統計信息到文件
+    stats_file = os.path.join(save_dir, 'dataset_statistics.json')
+    with open(stats_file, 'w', encoding='utf-8') as f:
+        json.dump(dataset_stats, f, indent=2, ensure_ascii=False)
+    logging.info(f"數據集統計信息已保存到: {stats_file}")
     
     # 創建數據加載器
     logging.info("創建數據加載器...")
@@ -1408,11 +1479,20 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
             'val_split': val_split,
             'train_samples': len(train_dataset),
             'val_samples': len(val_dataset)
-        }
+        },
+        'dataset_statistics': dataset_stats
     }
     
     with open(os.path.join(save_dir, 'training_results.json'), 'w') as f:
         json.dump(results, f, indent=2, default=str)
+    
+    # 輸出數據集統計摘要
+    logging.info(f"\n=== 數據集統計摘要 ===")
+    train_stats = dataset_stats['train_stats']
+    val_stats = dataset_stats['val_stats']
+    logging.info(f"訓練集: {train_stats['total_images']} 張圖像, {train_stats['total_annotations']} 個標記")
+    logging.info(f"驗證集: {val_stats['total_images']} 張圖像, {val_stats['total_annotations']} 個標記")
+    logging.info(f"總計: {train_stats['total_images'] + val_stats['total_images']} 張圖像, {train_stats['total_annotations'] + val_stats['total_annotations']} 個標記")
     
     # 輸出最終結果
     logging.info(f"\n=== 訓練完成 ===")
@@ -1450,22 +1530,26 @@ def main():
     # 獲取腳本所在目錄
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
+    # 生成帶時間戳的資料夾名稱
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    training_folder = f'Simple_Training_{timestamp}'
+    
     parser.add_argument('--data_dir', type=str, 
                        default=os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset'), 
                        help='數據集目錄路徑')
-    parser.add_argument('--num_epochs', type=int, default=50, 
+    parser.add_argument('--num_epochs', type=int, default=10, 
                        help='訓練輪數')
-    parser.add_argument('--batch_size', type=int, default=16, 
+    parser.add_argument('--batch_size', type=int, default=8, 
                        help='批次大小')
     parser.add_argument('--learning_rate', type=float, default=0.0001, 
                        help='學習率')
     parser.add_argument('--val_split', type=float, default=0.2, 
                        help='驗證集比例 (0.0-1.0)')
     parser.add_argument('--save_dir', type=str, 
-                       default=os.path.join(script_dir, 'Simple_Training', 'models'), 
+                       default=os.path.join(script_dir, training_folder, 'models'), 
                        help='模型保存目錄')
     parser.add_argument('--log_dir', type=str, 
-                       default=os.path.join(script_dir, 'Simple_Training', 'logs'), 
+                       default=os.path.join(script_dir, training_folder, 'logs'), 
                        help='日誌保存目錄')
     parser.add_argument('--random_seed', type=int, default=42, 
                        help='隨機種子')

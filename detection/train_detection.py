@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import time
+import math
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -1224,6 +1225,59 @@ def create_kfold_summary_plots(all_fold_results, save_dir):
     return save_path
 
 
+def calculate_dataset_statistics(dataset, dataset_name="Dataset"):
+    """計算數據集的詳細統計信息"""
+    total_images = len(dataset)
+    total_annotations = 0
+    images_with_annotations = 0
+    images_without_annotations = 0
+    
+    logging.info(f"正在計算 {dataset_name} 統計信息...")
+    
+    for i in range(total_images):
+        try:
+            sample = dataset[i]
+            if isinstance(sample, dict) and 'target' in sample:
+                target = sample['target']
+            else:
+                # 如果是tuple格式 (image, target)
+                _, target = sample
+            
+            # 計算標記數量
+            if 'boxes' in target and len(target['boxes']) > 0:
+                num_boxes = len(target['boxes'])
+                total_annotations += num_boxes
+                images_with_annotations += 1
+            else:
+                images_without_annotations += 1
+                
+        except Exception as e:
+            logging.warning(f"計算 {dataset_name} 第 {i} 個樣本時出錯: {e}")
+            images_without_annotations += 1
+    
+    stats = {
+        'dataset_name': dataset_name,
+        'total_images': total_images,
+        'total_annotations': total_annotations,
+        'images_with_annotations': images_with_annotations,
+        'images_without_annotations': images_without_annotations,
+        'avg_annotations_per_image': total_annotations / total_images if total_images > 0 else 0,
+        'avg_annotations_per_annotated_image': total_annotations / images_with_annotations if images_with_annotations > 0 else 0
+    }
+    
+    # 記錄統計信息
+    logging.info(f"=== {dataset_name} 統計信息 ===")
+    logging.info(f"總影像數: {total_images}")
+    logging.info(f"總標記數: {total_annotations}")
+    logging.info(f"有標記的影像數: {images_with_annotations}")
+    logging.info(f"無標記的影像數: {images_without_annotations}")
+    logging.info(f"平均每張影像標記數: {stats['avg_annotations_per_image']:.2f}")
+    if images_with_annotations > 0:
+        logging.info(f"平均每張有標記影像的標記數: {stats['avg_annotations_per_annotated_image']:.2f}")
+    
+    return stats
+
+
 def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
     """創建K-fold數據集分割"""
     dataset = CTDetectionDataset(
@@ -1240,14 +1294,39 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=random_seed)
     
     fold_datasets = []
+    all_fold_stats = []
+    
+    # 首先計算完整數據集的統計信息
+    logging.info("計算完整數據集統計信息...")
+    full_dataset_stats = calculate_dataset_statistics(dataset, "完整數據集")
+    
     for fold, (train_idx, val_idx) in enumerate(kfold.split(indices)):
         train_dataset = torch.utils.data.Subset(dataset, train_idx)
         val_dataset = torch.utils.data.Subset(dataset, val_idx)
         fold_datasets.append((train_dataset, val_dataset))
         
+        # 計算每個fold的統計信息
+        train_stats = calculate_dataset_statistics(train_dataset, f"Fold {fold + 1} 訓練集")
+        val_stats = calculate_dataset_statistics(val_dataset, f"Fold {fold + 1} 驗證集")
+        
+        fold_stats = {
+            'fold': fold + 1,
+            'train_stats': train_stats,
+            'val_stats': val_stats
+        }
+        all_fold_stats.append(fold_stats)
+        
         logging.info(f"Fold {fold + 1}: Training samples: {len(train_idx)}, Validation samples: {len(val_idx)}")
     
-    return fold_datasets
+    # 組合所有統計信息
+    dataset_statistics = {
+        'full_dataset_stats': full_dataset_stats,
+        'k_folds': k_folds,
+        'fold_statistics': all_fold_stats,
+        'total_dataset_size': len(dataset)
+    }
+    
+    return fold_datasets, dataset_statistics
 
 
 def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=0.001, 
@@ -1262,8 +1341,14 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
     # 創建保存目錄
     os.makedirs(save_dir, exist_ok=True)
     
-    # 創建K-fold數據集
-    fold_datasets = create_kfold_datasets(data_dir, k_folds, random_seed)
+    # 創建K-fold數據集並獲取統計信息
+    fold_datasets, dataset_statistics = create_kfold_datasets(data_dir, k_folds, random_seed)
+    
+    # 保存數據集統計信息到文件
+    stats_file = os.path.join(save_dir, 'dataset_statistics.json')
+    with open(stats_file, 'w', encoding='utf-8') as f:
+        json.dump(dataset_statistics, f, indent=2, ensure_ascii=False)
+    logging.info(f"數據集統計信息已保存到: {stats_file}")
     
     # 存儲所有fold的結果
     all_fold_results = []
@@ -1519,7 +1604,8 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
             'learning_rate': learning_rate,
             'accumulate_grad_batches': accumulate_grad_batches,
             'val_check_interval': val_check_interval
-        }
+        },
+        'dataset_statistics': dataset_statistics
     }
     
     with open(os.path.join(save_dir, 'kfold_results.json'), 'w') as f:
@@ -1537,6 +1623,26 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
     except Exception as e:
         logging.warning(f"K-fold總體摘要可視化生成失敗: {str(e)}")
     
+    # 輸出數據集統計摘要
+    logging.info(f"\n=== 數據集統計摘要 ===")
+    full_stats = dataset_statistics['full_dataset_stats']
+    logging.info(f"完整數據集: {full_stats['total_images']} 張圖像, {full_stats['total_annotations']} 個標記")
+    logging.info(f"K-Fold 數量: {dataset_statistics['k_folds']}")
+    
+    # 計算所有fold的平均統計
+    total_train_images = sum(fold['train_stats']['total_images'] for fold in dataset_statistics['fold_statistics'])
+    total_train_annotations = sum(fold['train_stats']['total_annotations'] for fold in dataset_statistics['fold_statistics'])
+    total_val_images = sum(fold['val_stats']['total_images'] for fold in dataset_statistics['fold_statistics'])
+    total_val_annotations = sum(fold['val_stats']['total_annotations'] for fold in dataset_statistics['fold_statistics'])
+    
+    avg_train_images = total_train_images / dataset_statistics['k_folds']
+    avg_train_annotations = total_train_annotations / dataset_statistics['k_folds']
+    avg_val_images = total_val_images / dataset_statistics['k_folds']
+    avg_val_annotations = total_val_annotations / dataset_statistics['k_folds']
+    
+    logging.info(f"平均每fold訓練集: {avg_train_images:.1f} 張圖像, {avg_train_annotations:.1f} 個標記")
+    logging.info(f"平均每fold驗證集: {avg_val_images:.1f} 張圖像, {avg_val_annotations:.1f} 個標記")
+    
     # 輸出最終結果
     logging.info(f"\n=== K-Fold 交叉驗證結果 ===")
     logging.info(f"平均精確度: {avg_metrics['precision']:.4f} ± {avg_metrics['precision_std']:.4f}")
@@ -1551,6 +1657,10 @@ def main():
     # 獲取腳本所在目錄
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
+    # 生成帶時間戳的資料夾名稱
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    training_folder = f'Faster_RCNN_Detection_{timestamp}'
+    
     # 直接使用預設參數，不需要命令行解析
     class Args:
         def __init__(self):
@@ -1561,8 +1671,8 @@ def main():
             self.learning_rate = 0.0001
             self.accumulate_grad_batches = 2  # 增加梯度累積以補償較小的批次大小
             self.val_check_interval = 1  # 每個epoch都驗證以便觀察進度
-            self.save_dir = os.path.join(script_dir, 'Faster_RCNN_Detection', 'models')
-            self.log_dir = os.path.join(script_dir, 'Faster_RCNN_Detection', 'logs')
+            self.save_dir = os.path.join(script_dir, training_folder, 'models')
+            self.log_dir = os.path.join(script_dir, training_folder, 'logs')
             self.random_seed = 42
     
     args = Args()

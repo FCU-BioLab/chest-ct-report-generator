@@ -16,7 +16,6 @@ from pathlib import Path
 
 # 設置控制台編碼 (Windows)
 if sys.platform.startswith('win'):
-    import locale
     try:
         # 嘗試設置UTF-8編碼
         os.system('chcp 65001 >nul')
@@ -27,6 +26,7 @@ if sys.platform.startswith('win'):
 
 import torch
 import torch.nn as nn
+import math
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
@@ -44,6 +44,7 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
+    logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
 
 from faster_rcnn_dataset import CTDetectionDataset
 
@@ -54,7 +55,7 @@ from faster_rcnn_dataset import CTDetectionDataset
 
 # 預定義的模型路徑搜索順序 (相對於detection目錄)
 DEFAULT_MODEL_SEARCH_PATHS = [
-    'Simple_Training/models/best_model.pth',
+    'Simple_Training0812/models/best_model.pth',
     'Faster_RCNN_Detection/models/best_model_fold_1.pth',
     'Faster_RCNN_Detection/models/best_model_fold_2.pth',
     'Faster_RCNN_Detection/models/best_model_fold_3.pth',
@@ -983,6 +984,59 @@ def create_confidence_analysis(predictions, save_dir, prefix="confidence_analysi
     return save_path
 
 
+def calculate_dataset_statistics(dataset, dataset_name="Dataset"):
+    """計算數據集的詳細統計信息"""
+    total_images = len(dataset)
+    total_annotations = 0
+    images_with_annotations = 0
+    images_without_annotations = 0
+    
+    logging.info(f"正在計算 {dataset_name} 統計信息...")
+    
+    for i in range(total_images):
+        try:
+            sample = dataset[i]
+            if isinstance(sample, dict) and 'target' in sample:
+                target = sample['target']
+            else:
+                # 如果是tuple格式 (image, target)
+                _, target = sample
+            
+            # 計算標記數量
+            if 'boxes' in target and len(target['boxes']) > 0:
+                num_boxes = len(target['boxes'])
+                total_annotations += num_boxes
+                images_with_annotations += 1
+            else:
+                images_without_annotations += 1
+                
+        except Exception as e:
+            logging.warning(f"計算 {dataset_name} 第 {i} 個樣本時出錯: {e}")
+            images_without_annotations += 1
+    
+    stats = {
+        'dataset_name': dataset_name,
+        'total_images': total_images,
+        'total_annotations': total_annotations,
+        'images_with_annotations': images_with_annotations,
+        'images_without_annotations': images_without_annotations,
+        'avg_annotations_per_image': total_annotations / total_images if total_images > 0 else 0,
+        'avg_annotations_per_annotated_image': total_annotations / images_with_annotations if images_with_annotations > 0 else 0
+    }
+    
+    # 記錄統計信息
+    logging.info(f"=== {dataset_name} 統計信息 ===")
+    logging.info(f"總影像數: {total_images}")
+    logging.info(f"總標記數: {total_annotations}")
+    logging.info(f"有標記的影像數: {images_with_annotations}")
+    logging.info(f"無標記的影像數: {images_without_annotations}")
+    logging.info(f"平均每張影像標記數: {stats['avg_annotations_per_image']:.2f}")
+    if images_with_annotations > 0:
+        logging.info(f"平均每張有標記影像的標記數: {stats['avg_annotations_per_annotated_image']:.2f}")
+    
+    return stats
+
+
 def load_model(model_path, device):
     """載入訓練好的模型"""
     logging.info(f"載入模型: {model_path}")
@@ -1038,7 +1092,7 @@ def validate_dataset_split(data_dir, split):
 
 
 def create_test_dataset(data_dir, split='test', target_size=512):
-    """創建測試數據集"""
+    """創建測試數據集並計算統計信息"""
     logging.info(f"正在創建 {split} 數據集...")
     logging.info(f"數據目錄: {data_dir}")
     logging.info(f"目標圖像大小: {target_size}")
@@ -1079,8 +1133,13 @@ def create_test_dataset(data_dir, split='test', target_size=512):
                     logging.info(f"  ... (還有 {len(items) - 10} 個項目)")
             except Exception as e:
                 logging.error(f"無法讀取目錄內容: {e}")
+        
+        return test_dataset, None
     
-    return test_dataset
+    # 計算數據集統計信息
+    dataset_stats = calculate_dataset_statistics(test_dataset, f"{split.upper()} 數據集")
+    
+    return test_dataset, dataset_stats
 
 
 def evaluate_model_comprehensive(model, test_loader, device, confidence_thresholds=[0.3, 0.5, 0.7], 
@@ -1201,8 +1260,15 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
     # 載入模型
     model = load_model(model_path, device)
     
-    # 創建測試數據集
-    test_dataset = create_test_dataset(data_dir, split=split)
+    # 創建測試數據集並獲取統計信息
+    test_dataset, dataset_stats = create_test_dataset(data_dir, split=split)
+    
+    # 保存數據集統計信息到文件
+    if dataset_stats:
+        stats_file = os.path.join(save_dir, f'{split}_dataset_statistics.json')
+        with open(stats_file, 'w', encoding='utf-8') as f:
+            json.dump(dataset_stats, f, indent=2, ensure_ascii=False)
+        logging.info(f"數據集統計信息已保存到: {stats_file}")
     
     # 創建數據加載器
     test_loader = DataLoader(
@@ -1274,7 +1340,8 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
             'confidence_thresholds': confidence_thresholds,
             'iou_thresholds': iou_thresholds,
             'split': split
-        }
+        },
+        'dataset_statistics': dataset_stats
     }
     
     # 保存結果到JSON文件
@@ -1286,6 +1353,15 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
     logging.info("\n=== 測試結果摘要 ===")
     logging.info(f"測試樣本數: {len(test_dataset)}")
     logging.info(f"評估時間: {evaluation_time:.2f}秒")
+    
+    # 輸出數據集統計
+    if 'dataset_statistics' in test_summary:
+        stats = test_summary['dataset_statistics']
+        logging.info("\n=== 數據集統計 ===")
+        logging.info(f"測試影像數: {stats.get('total_images', 0)}")
+        logging.info(f"測試標記數: {stats.get('total_annotations', 0)}")
+        if stats.get('total_images', 0) > 0:
+            logging.info(f"平均每圖標記數: {stats.get('total_annotations', 0) / stats.get('total_images', 1):.2f}")
     
     # 輸出全面評估結果
     if 'comprehensive' in results:
@@ -1346,6 +1422,11 @@ def main():
     # 獲取腳本所在目錄
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
+    # 生成帶時間戳的資料夾名稱
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    test_folder = f'test_results_{timestamp}'
+    log_folder = f'test_logs_{timestamp}'
+    
     # 構建預定義的模型路徑 (按優先級排序)
     default_model_paths = [
         os.path.join(script_dir, path) for path in DEFAULT_MODEL_SEARCH_PATHS
@@ -1383,10 +1464,10 @@ def main():
     
     # 輸出參數
     parser.add_argument('--save_dir', type=str, 
-                       default=os.path.join(script_dir, 'test_results'), 
+                       default=os.path.join(script_dir, test_folder), 
                        help='測試結果保存目錄')
     parser.add_argument('--log_dir', type=str, 
-                       default=os.path.join(script_dir, 'test_logs'), 
+                       default=os.path.join(script_dir, log_folder), 
                        help='日誌保存目錄')
     
     args = parser.parse_args()
