@@ -1063,6 +1063,62 @@ def load_model(model_path, device):
     return model
 
 
+def save_test_patient_lists(save_dir, dataset, split):
+    """保存測試集的病例列表"""
+    
+    # 提取測試集病例列表
+    patient_ids = []
+    for i in range(len(dataset)):
+        try:
+            if hasattr(dataset, 'samples'):
+                sample = dataset.samples[i]
+                patient_id = sample['patient_id']
+                if patient_id not in patient_ids:
+                    patient_ids.append(patient_id)
+        except:
+            continue
+    
+    # 排序病例列表
+    patient_ids.sort()
+    
+    if len(patient_ids) == 0:
+        logging.warning("無法提取病例列表，可能是數據集結構問題")
+        return {}
+    
+    # 保存病例列表
+    patients_file = os.path.join(save_dir, f'{split}_patient_list.txt')
+    with open(patients_file, 'w', encoding='utf-8') as f:
+        f.write(f"# {split.upper()} 數據集病例列表\n")
+        f.write(f"# 總計 {len(patient_ids)} 位病例\n")
+        f.write(f"# 生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        for patient_id in patient_ids:
+            f.write(f"{patient_id}\n")
+    
+    # 保存詳細的病例分佈摘要
+    summary_file = os.path.join(save_dir, f'{split}_patient_summary.txt')
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        f.write(f"=== {split.upper()} 數據集病例摘要 ===\n")
+        f.write(f"生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write(f"總病例數: {len(patient_ids)}\n")
+        f.write(f"總樣本數: {len(dataset)}\n")
+        f.write(f"平均每位病例樣本數: {len(dataset)/len(patient_ids):.1f}\n\n")
+        
+        f.write("病例列表:\n")
+        f.write(", ".join(patient_ids))
+        f.write("\n")
+    
+    logging.info(f"{split.upper()} 數據集病例列表已保存到:")
+    logging.info(f"  - 病例列表: {patients_file}")
+    logging.info(f"  - 摘要: {summary_file}")
+    
+    return {
+        'patient_ids': patient_ids,
+        'patient_count': len(patient_ids),
+        'samples_per_patient': len(dataset) / len(patient_ids) if len(patient_ids) > 0 else 0
+    }
+
+
 def validate_dataset_split(data_dir, split):
     """验证数据集分割是否存在"""
     split_dir = os.path.join(data_dir, split)
@@ -1136,8 +1192,32 @@ def create_test_dataset(data_dir, split='test', target_size=512):
         
         return test_dataset, None
     
+    # 提取病例列表
+    patient_ids = []
+    for i in range(len(test_dataset)):
+        try:
+            if hasattr(test_dataset, 'samples'):
+                sample = test_dataset.samples[i]
+                patient_id = sample['patient_id']
+                if patient_id not in patient_ids:
+                    patient_ids.append(patient_id)
+        except:
+            continue
+    
+    # 排序病例列表
+    patient_ids.sort()
+    
+    logging.info(f"{split.upper()} 數據集包含 {len(patient_ids)} 位病例")
+    logging.info(f"{split.upper()} 數據集病例: {', '.join(patient_ids[:10])}{'...' if len(patient_ids) > 10 else ''}")
+    
     # 計算數據集統計信息
     dataset_stats = calculate_dataset_statistics(test_dataset, f"{split.upper()} 數據集")
+    
+    # 添加病例信息到統計中
+    if dataset_stats:
+        dataset_stats['patient_ids'] = patient_ids
+        dataset_stats['patient_count'] = len(patient_ids)
+        dataset_stats['samples_per_patient'] = len(test_dataset) / len(patient_ids) if len(patient_ids) > 0 else 0
     
     return test_dataset, dataset_stats
 
@@ -1269,6 +1349,10 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
         with open(stats_file, 'w', encoding='utf-8') as f:
             json.dump(dataset_stats, f, indent=2, ensure_ascii=False)
         logging.info(f"數據集統計信息已保存到: {stats_file}")
+        
+        # 保存病例列表到單獨文件
+        save_test_patient_lists(save_dir, test_dataset, split)
+        logging.info(f"數據集統計信息已保存到: {stats_file}")
     
     # 創建數據加載器
     test_loader = DataLoader(
@@ -1362,6 +1446,13 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
         logging.info(f"測試標記數: {stats.get('total_annotations', 0)}")
         if stats.get('total_images', 0) > 0:
             logging.info(f"平均每圖標記數: {stats.get('total_annotations', 0) / stats.get('total_images', 1):.2f}")
+        
+        # 輸出病例統計
+        if 'patient_ids' in stats:
+            patient_ids = stats['patient_ids']
+            logging.info(f"測試病例數: {len(patient_ids)}")
+            logging.info(f"平均每位病例樣本數: {stats.get('samples_per_patient', 0):.1f}")
+            logging.info(f"測試病例: {', '.join(patient_ids[:10])}{'...' if len(patient_ids) > 10 else ''}")
     
     # 輸出全面評估結果
     if 'comprehensive' in results:

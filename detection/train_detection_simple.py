@@ -1122,10 +1122,71 @@ def calculate_dataset_statistics(dataset, dataset_name="Dataset"):
     return stats
 
 
+def save_patient_lists(save_dir, dataset_stats):
+    """保存訓練集和驗證集的病例列表到單獨文件"""
+    
+    # 保存訓練集病例列表
+    train_patients_file = os.path.join(save_dir, 'train_patient_list.txt')
+    with open(train_patients_file, 'w', encoding='utf-8') as f:
+        f.write("# 訓練集病例列表\n")
+        f.write(f"# 總計 {len(dataset_stats['train_patient_ids'])} 位病例\n")
+        f.write(f"# 生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        for patient_id in dataset_stats['train_patient_ids']:
+            f.write(f"{patient_id}\n")
+    
+    # 保存驗證集病例列表
+    val_patients_file = os.path.join(save_dir, 'val_patient_list.txt')
+    with open(val_patients_file, 'w', encoding='utf-8') as f:
+        f.write("# 驗證集病例列表\n")
+        f.write(f"# 總計 {len(dataset_stats['val_patient_ids'])} 位病例\n")
+        f.write(f"# 生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        for patient_id in dataset_stats['val_patient_ids']:
+            f.write(f"{patient_id}\n")
+    
+    # 保存詳細的病例分佈摘要
+    summary_file = os.path.join(save_dir, 'patient_split_summary.txt')
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        f.write("=== 病例分佈摘要 ===\n")
+        f.write(f"生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        total_patients = dataset_stats.get('total_patient_count', len(dataset_stats['train_patient_ids']) + len(dataset_stats['val_patient_ids']))
+        f.write(f"總病例數: {total_patients}\n")
+        f.write(f"訓練集病例數: {len(dataset_stats['train_patient_ids'])} ({len(dataset_stats['train_patient_ids'])/total_patients*100:.1f}%)\n")
+        f.write(f"驗證集病例數: {len(dataset_stats['val_patient_ids'])} ({len(dataset_stats['val_patient_ids'])/total_patients*100:.1f}%)\n\n")
+        
+        # 檢查病例重疊
+        overlap = set(dataset_stats['train_patient_ids']) & set(dataset_stats['val_patient_ids'])
+        if overlap:
+            f.write(f"⚠️  警告：訓練集和驗證集病例重疊: {overlap}\n\n")
+        else:
+            f.write("✓ 訓練集和驗證集病例無重疊\n\n")
+        
+        f.write("訓練集病例列表:\n")
+        f.write(", ".join(dataset_stats['train_patient_ids']))
+        f.write("\n\n")
+        
+        f.write("驗證集病例列表:\n")
+        f.write(", ".join(dataset_stats['val_patient_ids']))
+        f.write("\n\n")
+        
+        # 添加數據統計信息
+        train_stats = dataset_stats['train_stats']
+        val_stats = dataset_stats['val_stats']
+        f.write("=== 數據統計 ===\n")
+        f.write(f"訓練集: {train_stats['total_images']} 張圖像, {train_stats['total_annotations']} 個標記\n")
+        f.write(f"驗證集: {val_stats['total_images']} 張圖像, {val_stats['total_annotations']} 個標記\n")
+        f.write(f"總計: {train_stats['total_images'] + val_stats['total_images']} 張圖像, {train_stats['total_annotations'] + val_stats['total_annotations']} 個標記\n")
+    
+    logging.info(f"病例列表已保存到:")
+    logging.info(f"  - 訓練集: {train_patients_file}")
+    logging.info(f"  - 驗證集: {val_patients_file}")
+    logging.info(f"  - 摘要: {summary_file}")
+
+
 def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
-    """創建訓練/驗證數據集分割"""
+    """創建按病例分割的訓練/驗證數據集"""
     # 載入完整數據集
-    dataset = CTDetectionDataset(
+    full_dataset = CTDetectionDataset(
         data_root=data_dir,
         split='train',
         target_size=512,
@@ -1135,31 +1196,85 @@ def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
         ])
     )
     
-    # 計算分割大小
-    dataset_size = len(dataset)
-    val_size = int(val_split * dataset_size)
-    train_size = dataset_size - val_size
+    # 收集所有病例ID
+    all_patient_ids = set()
+    for sample in full_dataset.samples:
+        all_patient_ids.add(sample['patient_id'])
     
-    # 設置隨機種子以確保可重現性
-    torch.manual_seed(random_seed)
+    all_patient_ids = sorted(list(all_patient_ids))
+    total_patients = len(all_patient_ids)
     
-    # 隨機分割數據集
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    logging.info(f"數據集總大小: {len(full_dataset)} 張圖像")
+    logging.info(f"總病例數: {total_patients} 位")
     
-    logging.info(f"數據集總大小: {dataset_size}")
-    logging.info(f"訓練集大小: {train_size} ({(1-val_split)*100:.1f}%)")
-    logging.info(f"驗證集大小: {val_size} ({val_split*100:.1f}%)")
+    # 設置隨機種子並按病例分割
+    np.random.seed(random_seed)
+    np.random.shuffle(all_patient_ids)
+    
+    # 計算分割點
+    val_patient_count = int(val_split * total_patients)
+    train_patient_count = total_patients - val_patient_count
+    
+    # 分割病例
+    train_patient_ids = all_patient_ids[:train_patient_count]
+    val_patient_ids = all_patient_ids[train_patient_count:]
+    
+    # 排序病例列表以便於閱讀和記錄
+    train_patient_ids.sort()
+    val_patient_ids.sort()
+    
+    logging.info(f"訓練集病例數: {len(train_patient_ids)} 位 ({len(train_patient_ids)/total_patients*100:.1f}%)")
+    logging.info(f"驗證集病例數: {len(val_patient_ids)} 位 ({len(val_patient_ids)/total_patients*100:.1f}%)")
+    logging.info(f"訓練集病例列表: {', '.join(train_patient_ids[:10])}{'...' if len(train_patient_ids) > 10 else ''}")
+    logging.info(f"驗證集病例列表: {', '.join(val_patient_ids[:10])}{'...' if len(val_patient_ids) > 10 else ''}")
+    
+    # 檢查病例重疊（應該為空）
+    overlap = set(train_patient_ids) & set(val_patient_ids)
+    if overlap:
+        logging.error(f"錯誤：訓練集和驗證集病例重疊: {overlap}")
+        raise ValueError("訓練集和驗證集不應有病例重疊")
+    else:
+        logging.info("✓ 訓練集和驗證集病例無重疊")
+    
+    # 創建按病例分割的數據集
+    train_dataset = CTDetectionDataset(
+        data_root=data_dir,
+        split='train',
+        target_size=512,
+        specific_patients=train_patient_ids,
+        transforms=transforms.Compose([
+            transforms.ToTensor()
+        ])
+    )
+    
+    val_dataset = CTDetectionDataset(
+        data_root=data_dir,
+        split='train',  # 使用相同的split，但指定不同的病例
+        target_size=512,
+        specific_patients=val_patient_ids,
+        transforms=transforms.Compose([
+            transforms.ToTensor()
+        ])
+    )
+    
+    logging.info(f"訓練集圖像數: {len(train_dataset)} 張")
+    logging.info(f"驗證集圖像數: {len(val_dataset)} 張")
     
     # 計算詳細統計信息
     train_stats = calculate_dataset_statistics(train_dataset, "訓練集")
     val_stats = calculate_dataset_statistics(val_dataset, "驗證集")
     
-    # 合併統計信息
+    # 合併統計信息，包含病例列表
     dataset_stats = {
-        'total_dataset_size': dataset_size,
+        'total_dataset_size': len(full_dataset),
         'train_stats': train_stats,
         'val_stats': val_stats,
-        'split_ratio': {'train': 1-val_split, 'val': val_split}
+        'split_ratio': {'train': len(train_patient_ids)/total_patients, 'val': len(val_patient_ids)/total_patients},
+        'train_patient_ids': train_patient_ids,
+        'val_patient_ids': val_patient_ids,
+        'train_patient_count': len(train_patient_ids),
+        'val_patient_count': len(val_patient_ids),
+        'total_patient_count': total_patients
     }
     
     return train_dataset, val_dataset, dataset_stats
@@ -1266,6 +1381,9 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
     with open(stats_file, 'w', encoding='utf-8') as f:
         json.dump(dataset_stats, f, indent=2, ensure_ascii=False)
     logging.info(f"數據集統計信息已保存到: {stats_file}")
+    
+    # 保存病例列表到單獨文件
+    save_patient_lists(save_dir, dataset_stats)
     
     # 創建數據加載器
     logging.info("創建數據加載器...")
@@ -1494,6 +1612,23 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
     logging.info(f"驗證集: {val_stats['total_images']} 張圖像, {val_stats['total_annotations']} 個標記")
     logging.info(f"總計: {train_stats['total_images'] + val_stats['total_images']} 張圖像, {train_stats['total_annotations'] + val_stats['total_annotations']} 個標記")
     
+    # 輸出病例分佈摘要
+    logging.info(f"\n=== 病例分佈摘要 ===")
+    total_patients = dataset_stats.get('total_patient_count', len(dataset_stats['train_patient_ids']) + len(dataset_stats['val_patient_ids']))
+    logging.info(f"總病例數: {total_patients} 位")
+    logging.info(f"訓練集病例數: {len(dataset_stats['train_patient_ids'])} 位 ({len(dataset_stats['train_patient_ids'])/total_patients*100:.1f}%)")
+    logging.info(f"驗證集病例數: {len(dataset_stats['val_patient_ids'])} 位 ({len(dataset_stats['val_patient_ids'])/total_patients*100:.1f}%)")
+    
+    # 檢查病例重疊
+    overlap = set(dataset_stats['train_patient_ids']) & set(dataset_stats['val_patient_ids'])
+    if overlap:
+        logging.error(f"⚠️  訓練集和驗證集病例重疊: {overlap}")
+    else:
+        logging.info("✓ 訓練集和驗證集病例無重疊")
+    
+    logging.info(f"訓練集病例: {', '.join(dataset_stats['train_patient_ids'][:5])}{'...' if len(dataset_stats['train_patient_ids']) > 5 else ''}")
+    logging.info(f"驗證集病例: {', '.join(dataset_stats['val_patient_ids'][:5])}{'...' if len(dataset_stats['val_patient_ids']) > 5 else ''}")
+    
     # 輸出最終結果
     logging.info(f"\n=== 訓練完成 ===")
     logging.info(f"最佳 F1 分數: {best_f1:.4f}")
@@ -1537,7 +1672,7 @@ def main():
     parser.add_argument('--data_dir', type=str, 
                        default=os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset'), 
                        help='數據集目錄路徑')
-    parser.add_argument('--num_epochs', type=int, default=10, 
+    parser.add_argument('--num_epochs', type=int, default=20, 
                        help='訓練輪數')
     parser.add_argument('--batch_size', type=int, default=8, 
                        help='批次大小')

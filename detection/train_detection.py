@@ -1279,8 +1279,9 @@ def calculate_dataset_statistics(dataset, dataset_name="Dataset"):
 
 
 def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
-    """創建K-fold數據集分割"""
-    dataset = CTDetectionDataset(
+    """創建按病例分割的K-fold數據集"""
+    # 載入完整數據集
+    full_dataset = CTDetectionDataset(
         data_root=data_dir,
         split='train',
         target_size=512,
@@ -1290,20 +1291,76 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
         ])
     )
     
-    indices = list(range(len(dataset)))
-    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=random_seed)
+    # 收集所有病例ID
+    all_patient_ids = set()
+    for sample in full_dataset.samples:
+        all_patient_ids.add(sample['patient_id'])
+    
+    all_patient_ids = sorted(list(all_patient_ids))
+    total_patients = len(all_patient_ids)
+    
+    logging.info(f"數據集總大小: {len(full_dataset)} 張圖像")
+    logging.info(f"總病例數: {total_patients} 位")
+    
+    # 設置隨機種子並創建K-fold分割
+    np.random.seed(random_seed)
+    np.random.shuffle(all_patient_ids)
+    
+    # 使用KFold按病例分割
+    kfold = KFold(n_splits=k_folds, shuffle=False, random_state=None)  # 已經shuffle過，這裡不再shuffle
+    patient_indices = list(range(total_patients))
     
     fold_datasets = []
     all_fold_stats = []
     
     # 首先計算完整數據集的統計信息
     logging.info("計算完整數據集統計信息...")
-    full_dataset_stats = calculate_dataset_statistics(dataset, "完整數據集")
+    full_dataset_stats = calculate_dataset_statistics(full_dataset, "完整數據集")
     
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(indices)):
-        train_dataset = torch.utils.data.Subset(dataset, train_idx)
-        val_dataset = torch.utils.data.Subset(dataset, val_idx)
+    for fold, (train_patient_idx, val_patient_idx) in enumerate(kfold.split(patient_indices)):
+        # 獲取訓練和驗證的病例ID
+        train_patient_ids = [all_patient_ids[i] for i in train_patient_idx]
+        val_patient_ids = [all_patient_ids[i] for i in val_patient_idx]
+        
+        # 排序病例列表
+        train_patient_ids.sort()
+        val_patient_ids.sort()
+        
+        # 檢查病例重疊（應該為空）
+        overlap = set(train_patient_ids) & set(val_patient_ids)
+        if overlap:
+            logging.error(f"Fold {fold + 1} 錯誤：訓練集和驗證集病例重疊: {overlap}")
+            raise ValueError(f"Fold {fold + 1} 訓練集和驗證集不應有病例重疊")
+        else:
+            logging.info(f"Fold {fold + 1}: ✓ 訓練集和驗證集病例無重疊")
+        
+        # 創建按病例分割的數據集
+        train_dataset = CTDetectionDataset(
+            data_root=data_dir,
+            split='train',
+            target_size=512,
+            specific_patients=train_patient_ids,
+            transforms=transforms.Compose([
+                transforms.ToTensor()
+            ])
+        )
+        
+        val_dataset = CTDetectionDataset(
+            data_root=data_dir,
+            split='train',  # 使用相同的split，但指定不同的病例
+            target_size=512,
+            specific_patients=val_patient_ids,
+            transforms=transforms.Compose([
+                transforms.ToTensor()
+            ])
+        )
+        
         fold_datasets.append((train_dataset, val_dataset))
+        
+        logging.info(f"Fold {fold + 1}: 訓練集 {len(train_patient_ids)} 位病例 ({len(train_dataset)} 張圖像)")
+        logging.info(f"Fold {fold + 1}: 驗證集 {len(val_patient_ids)} 位病例 ({len(val_dataset)} 張圖像)")
+        logging.info(f"Fold {fold + 1}: 訓練集病例: {', '.join(train_patient_ids[:5])}{'...' if len(train_patient_ids) > 5 else ''}")
+        logging.info(f"Fold {fold + 1}: 驗證集病例: {', '.join(val_patient_ids[:5])}{'...' if len(val_patient_ids) > 5 else ''}")
         
         # 計算每個fold的統計信息
         train_stats = calculate_dataset_statistics(train_dataset, f"Fold {fold + 1} 訓練集")
@@ -1312,19 +1369,25 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
         fold_stats = {
             'fold': fold + 1,
             'train_stats': train_stats,
-            'val_stats': val_stats
+            'val_stats': val_stats,
+            'train_patient_ids': train_patient_ids,
+            'val_patient_ids': val_patient_ids,
+            'train_patient_count': len(train_patient_ids),
+            'val_patient_count': len(val_patient_ids)
         }
         all_fold_stats.append(fold_stats)
-        
-        logging.info(f"Fold {fold + 1}: Training samples: {len(train_idx)}, Validation samples: {len(val_idx)}")
     
     # 組合所有統計信息
     dataset_statistics = {
         'full_dataset_stats': full_dataset_stats,
         'k_folds': k_folds,
         'fold_statistics': all_fold_stats,
-        'total_dataset_size': len(dataset)
+        'total_dataset_size': len(full_dataset),
+        'total_patient_count': total_patients,
+        'all_patient_ids': all_patient_ids
     }
+    
+    return fold_datasets, dataset_statistics
     
     return fold_datasets, dataset_statistics
 
@@ -1349,6 +1412,61 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
     with open(stats_file, 'w', encoding='utf-8') as f:
         json.dump(dataset_statistics, f, indent=2, ensure_ascii=False)
     logging.info(f"數據集統計信息已保存到: {stats_file}")
+    
+    # 保存每個fold的病例列表到單獨文件
+    for fold_idx, fold_stats in enumerate(dataset_statistics['fold_statistics']):
+        fold_patient_summary_file = os.path.join(save_dir, f'fold_{fold_idx + 1}_patient_split_summary.txt')
+        with open(fold_patient_summary_file, 'w', encoding='utf-8') as f:
+            f.write(f"=== Fold {fold_idx + 1} 病例分佈摘要 ===\n")
+            f.write(f"生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            
+            train_patient_ids = fold_stats['train_patient_ids']
+            val_patient_ids = fold_stats['val_patient_ids']
+            
+            f.write(f"總病例數: {len(train_patient_ids) + len(val_patient_ids)}\n")
+            f.write(f"訓練集病例數: {len(train_patient_ids)} ({len(train_patient_ids)/(len(train_patient_ids) + len(val_patient_ids))*100:.1f}%)\n")
+            f.write(f"驗證集病例數: {len(val_patient_ids)} ({len(val_patient_ids)/(len(train_patient_ids) + len(val_patient_ids))*100:.1f}%)\n\n")
+            
+            # 檢查病例重疊
+            overlap = set(train_patient_ids) & set(val_patient_ids)
+            if overlap:
+                f.write(f"⚠️  警告：訓練集和驗證集病例重疊: {overlap}\n\n")
+            else:
+                f.write("✓ 訓練集和驗證集病例無重疊\n\n")
+            
+            f.write("訓練集病例列表:\n")
+            f.write(", ".join(train_patient_ids))
+            f.write("\n\n")
+            
+            f.write("驗證集病例列表:\n")
+            f.write(", ".join(val_patient_ids))
+            f.write("\n\n")
+            
+            # 添加數據統計信息
+            train_stats = fold_stats['train_stats']
+            val_stats = fold_stats['val_stats']
+            f.write("=== 數據統計 ===\n")
+            f.write(f"訓練集: {train_stats['total_images']} 張圖像, {train_stats['total_annotations']} 個標記\n")
+            f.write(f"驗證集: {val_stats['total_images']} 張圖像, {val_stats['total_annotations']} 個標記\n")
+        
+        # 保存單獨的病例列表文件
+        train_list_file = os.path.join(save_dir, f'fold_{fold_idx + 1}_train_patient_list.txt')
+        with open(train_list_file, 'w', encoding='utf-8') as f:
+            f.write(f"# Fold {fold_idx + 1} 訓練集病例列表\n")
+            f.write(f"# 總計 {len(train_patient_ids)} 位病例\n")
+            f.write(f"# 生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            for patient_id in train_patient_ids:
+                f.write(f"{patient_id}\n")
+        
+        val_list_file = os.path.join(save_dir, f'fold_{fold_idx + 1}_val_patient_list.txt')
+        with open(val_list_file, 'w', encoding='utf-8') as f:
+            f.write(f"# Fold {fold_idx + 1} 驗證集病例列表\n")
+            f.write(f"# 總計 {len(val_patient_ids)} 位病例\n")
+            f.write(f"# 生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            for patient_id in val_patient_ids:
+                f.write(f"{patient_id}\n")
+    
+    logging.info("所有fold的病例列表已保存完成")
     
     # 存儲所有fold的結果
     all_fold_results = []
