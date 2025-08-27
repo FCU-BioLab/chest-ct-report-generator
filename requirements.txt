@@ -29,6 +29,9 @@ seaborn>=0.12.0
 tensorboard>=2.13.0
 plotly>=5.15.0
 
+# Additional visualization dependencies for detection module
+matplotlib-inline>=0.1.6
+
 # ML Training and Fine-tuning
 datasets>=2.13.0
 peft
