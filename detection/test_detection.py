@@ -55,7 +55,7 @@ from faster_rcnn_dataset import CTDetectionDataset
 
 # 預定義的模型路徑搜索順序 (相對於detection目錄)
 DEFAULT_MODEL_SEARCH_PATHS = [
-    'Simple_Training0812/models/best_model.pth',
+    'Simple_Training_20250813_125859/models/best_model.pth',
     'Faster_RCNN_Detection/models/best_model_fold_1.pth',
     'Faster_RCNN_Detection/models/best_model_fold_2.pth',
     'Faster_RCNN_Detection/models/best_model_fold_3.pth',
