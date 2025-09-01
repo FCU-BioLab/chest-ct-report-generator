@@ -14,16 +14,6 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-# 設置控制台編碼 (Windows)
-if sys.platform.startswith('win'):
-    try:
-        # 嘗試設置UTF-8編碼
-        os.system('chcp 65001 >nul')
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except:
-        pass
-
 import torch
 import torch.nn as nn
 import math
@@ -44,9 +34,18 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
-    logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
 
 from faster_rcnn_dataset import CTDetectionDataset
+
+# 設置控制台編碼 (Windows)
+if sys.platform.startswith('win'):
+    try:
+        # 嘗試設置UTF-8編碼
+        os.system('chcp 65001 >nul')
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        pass
 
 
 # =============================================================================
@@ -1147,11 +1146,18 @@ def validate_dataset_split(data_dir, split):
     return True
 
 
-def create_test_dataset(data_dir, split='test', target_size=512):
+def create_test_dataset(data_dir, split='test', target_size=512, include_negative_samples=True, max_negative_per_patient=0):
     """創建測試數據集並計算統計信息"""
     logging.info(f"正在創建 {split} 數據集...")
     logging.info(f"數據目錄: {data_dir}")
     logging.info(f"目標圖像大小: {target_size}")
+    if include_negative_samples:
+        if max_negative_per_patient == 0:
+            logging.info(f"負樣本設定: 啟用（無限制，載入所有負樣本）")
+        else:
+            logging.info(f"負樣本設定: 啟用（每患者最多{max_negative_per_patient}個負樣本）")
+    else:
+        logging.info(f"負樣本設定: 禁用（僅載入有標註影像）")
     
     test_dataset = CTDetectionDataset(
         data_root=data_dir,
@@ -1160,7 +1166,9 @@ def create_test_dataset(data_dir, split='test', target_size=512):
         specific_patients=None,
         transforms=transforms.Compose([
             transforms.ToTensor()
-        ])
+        ]),
+        include_negative_samples=include_negative_samples,
+        max_negative_per_patient=max_negative_per_patient
     )
     
     dataset_size = len(test_dataset)
@@ -1327,7 +1335,7 @@ def evaluate_model_comprehensive(model, test_loader, device, confidence_threshol
 
 def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_results', 
                         confidence_thresholds=[0.3, 0.5, 0.7], iou_thresholds=[0.3, 0.5, 0.7],
-                        visualize_samples=15, split='val'):
+                        visualize_samples=15, split='val', include_negative_samples=True, max_negative_per_patient=0):
     """測試檢測模型的主要函數"""
     
     # 設置設備
@@ -1341,7 +1349,9 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
     model = load_model(model_path, device)
     
     # 創建測試數據集並獲取統計信息
-    test_dataset, dataset_stats = create_test_dataset(data_dir, split=split)
+    test_dataset, dataset_stats = create_test_dataset(
+        data_dir, split=split, include_negative_samples=include_negative_samples, max_negative_per_patient=max_negative_per_patient
+    )
     
     # 保存數據集統計信息到文件
     if dataset_stats:
@@ -1552,6 +1562,12 @@ def main():
                        help='IoU閾值列表')
     parser.add_argument('--visualize_samples', type=int, default=DEFAULT_VISUALIZE_SAMPLES,
                        help='可視化樣本數量 (0表示不生成可視化)')
+    parser.add_argument('--include_negative_samples', action='store_true', default=True,
+                       help='包含負樣本（無標註的影像）以改善ROC/AUC計算（預設啟用）')
+    parser.add_argument('--no_negative_samples', action='store_false', dest='include_negative_samples',
+                       help='禁用負樣本載入，僅載入有標註的影像')
+    parser.add_argument('--max_negative_per_patient', type=int, default=0,
+                       help='每位患者最大負樣本數量，0表示無限制（載入所有負樣本）')
     
     # 輸出參數
     parser.add_argument('--save_dir', type=str, 
@@ -1676,6 +1692,13 @@ def main():
     logging.info(f"IoU閾值: {args.iou_thresholds}")
     logging.info(f"可視化樣本數: {args.visualize_samples}")
     logging.info(f"結果保存目錄: {args.save_dir}")
+    if args.include_negative_samples:
+        if args.max_negative_per_patient == 0:
+            logging.info(f"負樣本設定: 啟用（無限制，載入所有負樣本）")
+        else:
+            logging.info(f"負樣本設定: 啟用（每患者最多{args.max_negative_per_patient}個負樣本）")
+    else:
+        logging.info(f"負樣本設定: 禁用（僅載入有標註影像）")
     
     # 開始測試
     start_time = time.time()
@@ -1688,7 +1711,9 @@ def main():
             confidence_thresholds=args.confidence_thresholds,
             iou_thresholds=args.iou_thresholds,
             visualize_samples=args.visualize_samples,
-            split=args.split
+            split=args.split,
+            include_negative_samples=args.include_negative_samples,
+            max_negative_per_patient=args.max_negative_per_patient
         )
         
         total_time = time.time() - start_time

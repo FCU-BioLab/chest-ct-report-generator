@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import time
+import math
 import logging
 import argparse
 from datetime import datetime
@@ -17,7 +18,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
@@ -101,8 +102,8 @@ def setup_logging(log_dir):
     return log_file
 
 
-def calculate_giou(box1, box2):
-    """計算 Generalized IoU (GIoU)"""
+def calculate_basic_iou(box1, box2):
+    """計算基本IoU - 被其他IoU變體函數重用的基礎函數"""
     # 計算交集
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
@@ -116,6 +117,13 @@ def calculate_giou(box1, box2):
     area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
     union = area1 + area2 - intersection
     
+    iou = intersection / union if union > 0 else 0
+    return iou, intersection, area1, area2, union
+
+def calculate_giou(box1, box2):
+    """計算 Generalized IoU (GIoU)"""
+    iou, intersection, area1, area2, union = calculate_basic_iou(box1, box2)
+    
     # 計算最小外包矩形
     c_x1 = min(box1[0], box2[0])
     c_y1 = min(box1[1], box2[1])
@@ -123,25 +131,13 @@ def calculate_giou(box1, box2):
     c_y2 = max(box1[3], box2[3])
     c_area = (c_x2 - c_x1) * (c_y2 - c_y1)
     
-    iou = intersection / union if union > 0 else 0
     giou = iou - (c_area - union) / c_area if c_area > 0 else iou
-    
     return giou
 
 
 def calculate_diou(box1, box2):
     """計算 Distance IoU (DIoU)"""
-    # 計算IoU
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-    
-    intersection = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    union = area1 + area2 - intersection
-    iou = intersection / union if union > 0 else 0
+    iou, intersection, area1, area2, union = calculate_basic_iou(box1, box2)
     
     # 計算中心點距離
     center1_x = (box1[0] + box1[2]) / 2
@@ -159,16 +155,31 @@ def calculate_diou(box1, box2):
     diagonal_distance_sq = (c_x2 - c_x1) ** 2 + (c_y2 - c_y1) ** 2
     
     diou = iou - center_distance_sq / diagonal_distance_sq if diagonal_distance_sq > 0 else iou
-    
     return diou
 
 
 def calculate_ciou(box1, box2):
     """計算 Complete IoU (CIoU)"""
-    import math
+    # 獲取基本IoU數據
+    iou, intersection, area1, area2, union = calculate_basic_iou(box1, box2)
+    
+    # 計算中心點距離（復用DIoU邏輯）
+    center1_x = (box1[0] + box1[2]) / 2
+    center1_y = (box1[1] + box1[3]) / 2
+    center2_x = (box2[0] + box2[2]) / 2
+    center2_y = (box2[1] + box2[3]) / 2
+    
+    center_distance_sq = (center1_x - center2_x) ** 2 + (center1_y - center2_y) ** 2
+    
+    # 計算對角線距離
+    c_x1 = min(box1[0], box2[0])
+    c_y1 = min(box1[1], box2[1])
+    c_x2 = max(box1[2], box2[2])
+    c_y2 = max(box1[3], box2[3])
+    diagonal_distance_sq = (c_x2 - c_x1) ** 2 + (c_y2 - c_y1) ** 2
     
     # 計算DIoU
-    diou = calculate_diou(box1, box2)
+    diou = iou - center_distance_sq / diagonal_distance_sq if diagonal_distance_sq > 0 else iou
     
     # 計算寬高比一致性
     w1, h1 = box1[2] - box1[0], box1[3] - box1[1]
@@ -176,18 +187,6 @@ def calculate_ciou(box1, box2):
     
     if h1 > 0 and h2 > 0 and w1 > 0 and w2 > 0:
         v = (4 / (math.pi ** 2)) * ((math.atan(w2/h2) - math.atan(w1/h1)) ** 2)
-        
-        # 計算IoU
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
-        intersection = max(0, x2 - x1) * max(0, y2 - y1)
-        area1 = w1 * h1
-        area2 = w2 * h2
-        union = area1 + area2 - intersection
-        iou = intersection / union if union > 0 else 0
-        
         alpha = v / (1 - iou + v) if (1 - iou + v) > 0 else 0
         ciou = diou - alpha * v
     else:
@@ -508,21 +507,8 @@ def calculate_iou_matrix(boxes1, boxes2):
     
     for i, box1 in enumerate(boxes1):
         for j, box2 in enumerate(boxes2):
-            # 計算交集
-            x1 = max(box1[0], box2[0])
-            y1 = max(box1[1], box2[1])
-            x2 = min(box1[2], box2[2])
-            y2 = min(box1[3], box2[3])
-            
-            if x2 > x1 and y2 > y1:
-                intersection = (x2 - x1) * (y2 - y1)
-                
-                # 計算聯合
-                area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-                area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-                union = area1 + area2 - intersection
-                
-                iou_matrix[i][j] = intersection / union if union > 0 else 0
+            iou, _, _, _, _ = calculate_basic_iou(box1, box2)
+            iou_matrix[i][j] = iou
     
     return iou_matrix
 
@@ -685,9 +671,18 @@ def calculate_roc_froc_curves(predictions, targets, save_dir=None):
         else:
             y_scores.append(0)
     
-    # 計算ROC曲線
-    fpr, tpr, roc_thresholds = roc_curve(y_true, y_scores)
-    roc_auc = auc(fpr, tpr)
+    # 檢查是否有足夠的類別來計算ROC曲線
+    unique_labels = set(y_true)
+    if len(unique_labels) < 2:
+        logging.warning(f"ROC曲線計算跳過：數據集中只包含 {'正類別(有病灶)' if 1 in unique_labels else '負類別(無病灶)'} 樣本")
+        logging.warning("建議：加入無病灶的影像樣本以獲得有意義的ROC/AUC指標")
+        # 返回預設值
+        fpr, tpr, roc_thresholds = [0, 1], [0, 1], [1, 0]
+        roc_auc = float('nan')  # 明確標示為無效值
+    else:
+        # 計算ROC曲線
+        fpr, tpr, roc_thresholds = roc_curve(y_true, y_scores)
+        roc_auc = auc(fpr, tpr)
     
     # 計算FROC曲線
     for threshold in thresholds:
@@ -745,14 +740,23 @@ def calculate_roc_froc_curves(predictions, targets, save_dir=None):
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
         # ROC曲線
-        ax1.plot(fpr, tpr, color='darkorange', lw=2, 
-                label=f'ROC curve (AUC = {roc_auc:.3f})')
-        ax1.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        if np.isnan(roc_auc):
+            # 當ROC AUC為NaN時的處理
+            ax1.text(0.5, 0.5, 'ROC曲線無法計算\n（數據集缺少負類別）\n請加入無病灶影像', 
+                    ha='center', va='center', transform=ax1.transAxes, 
+                    fontsize=12, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
+            ax1.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='隨機分類器')
+            ax1.set_title('ROC曲線 (無法計算 - 缺少負類別)')
+        else:
+            ax1.plot(fpr, tpr, color='darkorange', lw=2, 
+                    label=f'ROC curve (AUC = {roc_auc:.3f})')
+            ax1.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='隨機分類器')
+            ax1.set_title('Receiver Operating Characteristic (ROC) Curve')
+        
         ax1.set_xlim([0.0, 1.0])
         ax1.set_ylim([0.0, 1.05])
         ax1.set_xlabel('False Positive Rate')
         ax1.set_ylabel('True Positive Rate (Sensitivity)')
-        ax1.set_title('Receiver Operating Characteristic (ROC) Curve')
         ax1.legend(loc="lower right")
         ax1.grid(True, alpha=0.3)
         
@@ -1119,6 +1123,14 @@ def calculate_dataset_statistics(dataset, dataset_name="Dataset"):
     if images_with_annotations > 0:
         logging.info(f"平均每張有標記影像的標記數: {stats['avg_annotations_per_annotated_image']:.2f}")
     
+    # 檢查負類別（無病灶影像）的存在
+    if images_without_annotations == 0:
+        logging.warning(f"⚠️  {dataset_name} 中沒有無標記的影像（負類別）")
+        logging.warning("   這會影響ROC/AUC等指標的計算")
+        logging.warning("   建議：加入無病灶的影像以獲得更全面的評估指標")
+    else:
+        logging.info(f"✓ {dataset_name} 包含 {images_without_annotations} 張無標記影像（負類別）")
+    
     return stats
 
 
@@ -1183,7 +1195,8 @@ def save_patient_lists(save_dir, dataset_stats):
     logging.info(f"  - 摘要: {summary_file}")
 
 
-def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
+def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42, 
+                              include_negative_samples=True, max_negative_per_patient=0):
     """創建按病例分割的訓練/驗證數據集"""
     # 載入完整數據集
     full_dataset = CTDetectionDataset(
@@ -1193,7 +1206,9 @@ def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
         specific_patients=None,
         transforms=transforms.Compose([
             transforms.ToTensor()
-        ])
+        ]),
+        include_negative_samples=include_negative_samples,
+        max_negative_per_patient=max_negative_per_patient
     )
     
     # 收集所有病例ID
@@ -1244,7 +1259,9 @@ def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
         specific_patients=train_patient_ids,
         transforms=transforms.Compose([
             transforms.ToTensor()
-        ])
+        ]),
+        include_negative_samples=include_negative_samples,
+        max_negative_per_patient=max_negative_per_patient
     )
     
     val_dataset = CTDetectionDataset(
@@ -1254,7 +1271,9 @@ def create_train_val_datasets(data_dir, val_split=0.2, random_seed=42):
         specific_patients=val_patient_ids,
         transforms=transforms.Compose([
             transforms.ToTensor()
-        ])
+        ]),
+        include_negative_samples=include_negative_samples,
+        max_negative_per_patient=max_negative_per_patient
     )
     
     logging.info(f"訓練集圖像數: {len(train_dataset)} 張")
@@ -1363,7 +1382,8 @@ def evaluate_model(model, val_loader, device, return_samples=False, max_samples=
 
 
 def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001, 
-                 val_split=0.2, save_dir='./models', log_dir='./logs'):
+                 val_split=0.2, save_dir='./models', log_dir='./logs',
+                 include_negative_samples=True, max_negative_per_patient=0):
     """簡單的訓練/驗證分割訓練"""
     
     # 設置設備
@@ -1374,7 +1394,11 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
     os.makedirs(save_dir, exist_ok=True)
     
     # 創建訓練/驗證數據集並獲取統計信息
-    train_dataset, val_dataset, dataset_stats = create_train_val_datasets(data_dir, val_split)
+    train_dataset, val_dataset, dataset_stats = create_train_val_datasets(
+        data_dir, val_split, random_seed=42, 
+        include_negative_samples=include_negative_samples,
+        max_negative_per_patient=max_negative_per_patient
+    )
     
     # 保存數據集統計信息到文件
     stats_file = os.path.join(save_dir, 'dataset_statistics.json')
@@ -1402,6 +1426,19 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
         collate_fn=collate_fn,
         num_workers=0  # 設為0避免Windows多進程問題
     )
+    
+    # 檢查驗證集的類別分佈，預先警告ROC/AUC計算問題
+    val_stats = dataset_stats['val_stats']
+    if val_stats['images_without_annotations'] == 0:
+        logging.warning("\n" + "="*60)
+        logging.warning("⚠️  重要提醒：ROC/AUC 指標計算限制")
+        logging.warning("驗證集中沒有無標記的影像（負類別），這將導致：")
+        logging.warning("  • ROC曲線無法正確計算")
+        logging.warning("  • AUC值顯示為 NaN 或無效")
+        logging.warning("建議解決方案：")
+        logging.warning("  • 在數據集中加入無病灶的正常影像")
+        logging.warning("  • 或使用其他評估指標（mAP、F1等）作為主要評估標準")
+        logging.warning("="*60 + "\n")
     
     # 創建模型
     logging.info("載入預訓練模型...")
@@ -1651,9 +1688,38 @@ def train_simple(data_dir, num_epochs=50, batch_size=8, learning_rate=0.001,
         logging.info(f"FPS: {final_metrics.get('fps', 0):.2f}")
     
     if 'roc_froc' in final_metrics:
-        logging.info(f"ROC AUC: {final_metrics['roc_froc'].get('roc_auc', 0):.4f}")
+        roc_auc_value = final_metrics['roc_froc'].get('roc_auc', 0)
+        if np.isnan(roc_auc_value):
+            logging.info("ROC AUC: 無法計算 (數據集缺少負類別 - 無病灶影像)")
+            logging.info("💡 建議：加入無病灶的影像樣本以獲得有意義的ROC/AUC指標")
+        else:
+            logging.info(f"ROC AUC: {roc_auc_value:.4f}")
     
     logging.info(f"總訓練時間: {total_time:.2f}秒 ({total_time/3600:.2f}小時)")
+    
+    # 提供數據集改進建議
+    train_stats = dataset_stats['train_stats']
+    val_stats = dataset_stats['val_stats']
+    total_negative_samples = train_stats['images_without_annotations'] + val_stats['images_without_annotations']
+    
+    if total_negative_samples == 0:
+        logging.info(f"\n=== 數據集改進建議 ===")
+        logging.info("🔍 當前數據集分析：")
+        logging.info(f"  • 所有影像都包含病灶標記（無負類別樣本）")
+        logging.info(f"  • 這限制了某些評估指標的有效性")
+        logging.info("")
+        logging.info("💡 建議加入以下類型的影像以改善評估：")
+        logging.info("  • 正常胸部CT影像（無任何病灶）")
+        logging.info("  • 良性結節影像（標記為非目標病灶）")
+        logging.info("  • 其他部位的病變影像（非目標區域）")
+        logging.info("")
+        logging.info("📈 這將改善以下指標的可靠性：")
+        logging.info("  • ROC曲線和AUC值")
+        logging.info("  • 特異性 (Specificity)")
+        logging.info("  • 假陽性率的更準確評估")
+        logging.info("  • 模型的泛化能力評估")
+    else:
+        logging.info(f"\n✓ 數據集包含 {total_negative_samples} 張負類別樣本，指標計算完整")
     
     writer.close()
     return results
@@ -1672,9 +1738,9 @@ def main():
     parser.add_argument('--data_dir', type=str, 
                        default=os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset'), 
                        help='數據集目錄路徑')
-    parser.add_argument('--num_epochs', type=int, default=20, 
+    parser.add_argument('--num_epochs', type=int, default=12, 
                        help='訓練輪數')
-    parser.add_argument('--batch_size', type=int, default=8, 
+    parser.add_argument('--batch_size', type=int, default=12, 
                        help='批次大小')
     parser.add_argument('--learning_rate', type=float, default=0.0001, 
                        help='學習率')
@@ -1688,8 +1754,14 @@ def main():
                        help='日誌保存目錄')
     parser.add_argument('--random_seed', type=int, default=42, 
                        help='隨機種子')
-    parser.add_argument('--comprehensive_eval', action='store_true', 
+    parser.add_argument('--comprehensive_eval', action='store_true', default=True,
                        help='是否使用全面評估指標（包含mAP、IoU變體等）')
+    parser.add_argument('--include_negative_samples', action='store_true', default=True,
+                       help='包含負樣本（無標註的影像）以改善ROC/AUC計算（預設啟用）')
+    parser.add_argument('--no_negative_samples', action='store_false', dest='include_negative_samples',
+                       help='禁用負樣本載入，僅載入有標註的影像')
+    parser.add_argument('--max_negative_per_patient', type=int, default=10,
+                       help='每位患者最大負樣本數量，0表示無限制（載入所有負樣本）')
     parser.add_argument('--confidence_threshold', type=float, default=0.5, 
                        help='置信度閾值')
     
@@ -1708,18 +1780,20 @@ def main():
         logging.error(f"數據目錄不存在: {args.data_dir}")
         return
     
-    # 輸出配置信息
+    # 配置信息整合輸出
+    config_info = [
+        f"數據目錄: {args.data_dir}",
+        f"訓練輪數: {args.num_epochs}, 批次大小: {args.batch_size}, 學習率: {args.learning_rate}",
+        f"驗證集比例: {args.val_split:.1%}, 隨機種子: {args.random_seed}",
+        f"模型目錄: {args.save_dir}",
+        f"日誌目錄: {args.log_dir}",
+        f"全面評估: {args.comprehensive_eval}, 置信度閾值: {args.confidence_threshold}",
+        f"負樣本設定: {'啟用' if args.include_negative_samples else '禁用（僅載入有標註影像）'}",
+        f"負樣本限制: {'無限制（載入所有負樣本）' if args.max_negative_per_patient == 0 else f'每患者最多{args.max_negative_per_patient}個'}" if args.include_negative_samples else "不適用"
+    ]
     logging.info("=== 訓練配置 ===")
-    logging.info(f"數據目錄: {args.data_dir}")
-    logging.info(f"訓練輪數: {args.num_epochs}")
-    logging.info(f"批次大小: {args.batch_size}")
-    logging.info(f"學習率: {args.learning_rate}")
-    logging.info(f"驗證集比例: {args.val_split}")
-    logging.info(f"模型保存目錄: {args.save_dir}")
-    logging.info(f"日誌目錄: {args.log_dir}")
-    logging.info(f"隨機種子: {args.random_seed}")
-    logging.info(f"全面評估: {args.comprehensive_eval}")
-    logging.info(f"置信度閾值: {args.confidence_threshold}")
+    for info in config_info:
+        logging.info(info)
     
     # 檢查依賴
     if args.comprehensive_eval and not SKLEARN_AVAILABLE:
@@ -1735,7 +1809,9 @@ def main():
         learning_rate=args.learning_rate,
         val_split=args.val_split,
         save_dir=args.save_dir,
-        log_dir=args.log_dir
+        log_dir=args.log_dir,
+        include_negative_samples=args.include_negative_samples,
+        max_negative_per_patient=args.max_negative_per_patient
     )
     
     total_time = time.time() - start_time

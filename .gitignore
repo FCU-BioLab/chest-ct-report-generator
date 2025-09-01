@@ -18,4 +18,5 @@ detection/Faster_RCNN_Detection*
 detection/Simple_Training*
 detection/test_logs*
 detection/test_results*
+comparison_results
 temp
