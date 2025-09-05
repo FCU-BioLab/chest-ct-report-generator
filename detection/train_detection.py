@@ -11,6 +11,7 @@ import json
 import time
 import math
 import logging
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -1278,7 +1279,7 @@ def calculate_dataset_statistics(dataset, dataset_name="Dataset"):
     return stats
 
 
-def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
+def create_kfold_datasets(data_dir, k_folds=5, random_seed=42, include_negative_samples=True, max_negative_per_patient=0):
     """創建按病例分割的K-fold數據集"""
     # 載入完整數據集
     full_dataset = CTDetectionDataset(
@@ -1288,7 +1289,9 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
         specific_patients=None,
         transforms=transforms.Compose([
             transforms.ToTensor()
-        ])
+        ]),
+        include_negative_samples=include_negative_samples,
+        max_negative_per_patient=max_negative_per_patient
     )
     
     # 收集所有病例ID
@@ -1342,7 +1345,9 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
             specific_patients=train_patient_ids,
             transforms=transforms.Compose([
                 transforms.ToTensor()
-            ])
+            ]),
+            include_negative_samples=include_negative_samples,
+            max_negative_per_patient=max_negative_per_patient
         )
         
         val_dataset = CTDetectionDataset(
@@ -1352,7 +1357,9 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
             specific_patients=val_patient_ids,
             transforms=transforms.Compose([
                 transforms.ToTensor()
-            ])
+            ]),
+            include_negative_samples=include_negative_samples,
+            max_negative_per_patient=max_negative_per_patient
         )
         
         fold_datasets.append((train_dataset, val_dataset))
@@ -1394,7 +1401,7 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42):
 
 def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=0.001, 
                 save_dir='./models', log_dir='./logs', random_seed=42, 
-                accumulate_grad_batches=1, val_check_interval=5):
+                accumulate_grad_batches=1, val_check_interval=5, include_negative_samples=True, max_negative_per_patient=0):
     """K-fold交叉驗證訓練 - 優化版本"""
     
     # 設置設備
@@ -1405,7 +1412,9 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
     os.makedirs(save_dir, exist_ok=True)
     
     # 創建K-fold數據集並獲取統計信息
-    fold_datasets, dataset_statistics = create_kfold_datasets(data_dir, k_folds, random_seed)
+    fold_datasets, dataset_statistics = create_kfold_datasets(
+        data_dir, k_folds, random_seed, include_negative_samples, max_negative_per_patient
+    )
     
     # 保存數據集統計信息到文件
     stats_file = os.path.join(save_dir, 'dataset_statistics.json')
@@ -1772,6 +1781,8 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
 
 
 def main():
+    parser = argparse.ArgumentParser(description='K-Fold Cross-Validation Training for Faster R-CNN')
+    
     # 獲取腳本所在目錄
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -1779,21 +1790,37 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     training_folder = f'Faster_RCNN_Detection_{timestamp}'
     
-    # 直接使用預設參數，不需要命令行解析
-    class Args:
-        def __init__(self):
-            self.data_dir = os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset')
-            self.k_folds = 5  # 減少fold數量以加快測試
-            self.num_epochs = 10  # 減少epoch數量以加快測試
-            self.batch_size = 8  # 減少批次大小以降低內存使用
-            self.learning_rate = 0.0001
-            self.accumulate_grad_batches = 2  # 增加梯度累積以補償較小的批次大小
-            self.val_check_interval = 1  # 每個epoch都驗證以便觀察進度
-            self.save_dir = os.path.join(script_dir, training_folder, 'models')
-            self.log_dir = os.path.join(script_dir, training_folder, 'logs')
-            self.random_seed = 42
+    parser.add_argument('--data_dir', type=str, 
+                       default=os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset'), 
+                       help='數據集目錄路徑')
+    parser.add_argument('--k_folds', type=int, default=5, 
+                       help='K-fold交叉驗證的fold數量')
+    parser.add_argument('--num_epochs', type=int, default=10, 
+                       help='訓練輪數')
+    parser.add_argument('--batch_size', type=int, default=8, 
+                       help='批次大小')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, 
+                       help='學習率')
+    parser.add_argument('--accumulate_grad_batches', type=int, default=2, 
+                       help='梯度累積批次數')
+    parser.add_argument('--val_check_interval', type=int, default=1, 
+                       help='驗證檢查間隔（每N個epoch驗證一次）')
+    parser.add_argument('--save_dir', type=str, 
+                       default=os.path.join(script_dir, training_folder, 'models'), 
+                       help='模型保存目錄')
+    parser.add_argument('--log_dir', type=str, 
+                       default=os.path.join(script_dir, training_folder, 'logs'), 
+                       help='日誌保存目錄')
+    parser.add_argument('--random_seed', type=int, default=42, 
+                       help='隨機種子')
+    parser.add_argument('--include_negative_samples', action='store_true', default=True,
+                       help='包含負樣本（無標註的影像）以改善ROC/AUC計算（預設啟用）')
+    parser.add_argument('--no_negative_samples', action='store_false', dest='include_negative_samples',
+                       help='禁用負樣本載入，僅載入有標註的影像')
+    parser.add_argument('--max_negative_per_patient', type=int, default=0,
+                       help='每位患者最大負樣本數量，0表示無限制（載入所有負樣本）')
     
-    args = Args()
+    args = parser.parse_args()
     
     # 設置隨機種子
     torch.manual_seed(args.random_seed)
@@ -1808,18 +1835,26 @@ def main():
         logging.error(f"數據目錄不存在: {args.data_dir}")
         return
     
-    # 輸出配置信息
+    # 配置信息整合輸出
+    config_info = [
+        f"數據目錄: {args.data_dir}",
+        f"K-Fold數量: {args.k_folds}",
+        f"訓練輪數: {args.num_epochs}, 批次大小: {args.batch_size}, 學習率: {args.learning_rate}",
+        f"梯度累積批次數: {args.accumulate_grad_batches}, 驗證檢查間隔: {args.val_check_interval}",
+        f"模型目錄: {args.save_dir}",
+        f"日誌目錄: {args.log_dir}",
+        f"隨機種子: {args.random_seed}",
+        f"負樣本設定: {'啟用' if args.include_negative_samples else '禁用（僅載入有標註影像）'}",
+        f"負樣本限制: {'無限制（載入所有負樣本）' if args.max_negative_per_patient == 0 else f'每患者最多{args.max_negative_per_patient}個'}" if args.include_negative_samples else "不適用"
+    ]
     logging.info("=== 訓練配置 ===")
-    logging.info(f"數據目錄: {args.data_dir}")
-    logging.info(f"K-Fold數量: {args.k_folds}")
-    logging.info(f"訓練輪數: {args.num_epochs}")
-    logging.info(f"批次大小: {args.batch_size}")
-    logging.info(f"學習率: {args.learning_rate}")
-    logging.info(f"梯度累積批次數: {args.accumulate_grad_batches}")
-    logging.info(f"驗證檢查間隔: {args.val_check_interval}")
-    logging.info(f"模型保存目錄: {args.save_dir}")
-    logging.info(f"日誌目錄: {args.log_dir}")
-    logging.info(f"隨機種子: {args.random_seed}")
+    for info in config_info:
+        logging.info(info)
+    
+    # 檢查依賴
+    if not SKLEARN_AVAILABLE:
+        logging.warning("scikit-learn未安裝，某些評估指標（如ROC曲線）將被跳過")
+        logging.warning("建議安裝: pip install scikit-learn")
     
     # 開始訓練
     start_time = time.time()
@@ -1833,11 +1868,13 @@ def main():
         log_dir=args.log_dir,
         random_seed=args.random_seed,
         accumulate_grad_batches=args.accumulate_grad_batches,
-        val_check_interval=args.val_check_interval
+        val_check_interval=args.val_check_interval,
+        include_negative_samples=args.include_negative_samples,
+        max_negative_per_patient=args.max_negative_per_patient
     )
     
     total_time = time.time() - start_time
-    logging.info(f"總執行時間: {total_time:.2f}秒 ({total_time/3600:.2f}小時)")
+    logging.info(f"程式總執行時間: {total_time:.2f}秒 ({total_time/3600:.2f}小時)")
 
 
 if __name__ == "__main__":

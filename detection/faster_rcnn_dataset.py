@@ -108,7 +108,7 @@ class XMLAnnotationParser:
 class CTDetectionDataset(Dataset):
     """
     CT目標檢測資料集 - Faster R-CNN版本
-    只載入有XML標註的病灶資料
+    支援載入有標註和無標註的資料（正負樣本）
     """
     
     def __init__(self, 
@@ -116,7 +116,9 @@ class CTDetectionDataset(Dataset):
                  split: str = 'train',
                  target_size: int = 512,
                  specific_patients: Optional[List[str]] = None,
-                 transforms=None):
+                 transforms=None,
+                 include_negative_samples: bool = True,
+                 max_negative_per_patient: int = 0):
         """
         初始化資料集
         
@@ -126,11 +128,15 @@ class CTDetectionDataset(Dataset):
             target_size: 目標影像尺寸
             specific_patients: 指定的患者列表（用於K-Fold）
             transforms: 資料擴增轉換
+            include_negative_samples: 是否包含負樣本（無標註的影像）
+            max_negative_per_patient: 每位患者最大負樣本數量，0表示無限制（載入所有負樣本）
         """
         self.data_root = data_root
         self.split = split
         self.target_size = target_size
         self.transforms = transforms
+        self.include_negative_samples = include_negative_samples
+        self.max_negative_per_patient = max_negative_per_patient
         
         # 設置日誌
         self.logger = logging.getLogger(__name__)
@@ -151,7 +157,16 @@ class CTDetectionDataset(Dataset):
                 T.Normalize(mean=[0.485], std=[0.229])  # 灰階影像正規化
             ])
         
-        self.logger.info(f"載入 {split} 資料集: {len(self.samples)} 個有標註的樣本")
+        positive_count = len([s for s in self.samples if s['has_annotation']])
+        negative_count = len([s for s in self.samples if not s['has_annotation']])
+        
+        if self.include_negative_samples:
+            if self.max_negative_per_patient == 0:
+                self.logger.info(f"載入 {split} 資料集: {len(self.samples)} 個樣本 (正樣本:{positive_count}, 負樣本:{negative_count}, 無限制)")
+            else:
+                self.logger.info(f"載入 {split} 資料集: {len(self.samples)} 個樣本 (正樣本:{positive_count}, 負樣本:{negative_count}, 每患者最多{self.max_negative_per_patient}個)")
+        else:
+            self.logger.info(f"載入 {split} 資料集: {len(self.samples)} 個有標註的樣本")
     
     def _load_samples(self, specific_patients: Optional[List[str]] = None) -> List[Dict]:
         """載入樣本資料"""
@@ -267,8 +282,11 @@ class CTDetectionDataset(Dataset):
                             pydicom_errors.append(patient_id)
                         continue
                     
-                    # 處理所有 DICOM 檔案，但只保留有XML標註的
-                    file_count = 0
+                    # 處理所有 DICOM 檔案，載入有標註的正樣本和無標註的負樣本
+                    file_count_positive = 0
+                    file_count_negative = 0
+                    negative_candidates = []  # 候選負樣本列表
+                    
                     for dcm_file in dicom_files:
                         dcm_path = os.path.join(dicom_dir, dcm_file)
                         
@@ -280,8 +298,8 @@ class CTDetectionDataset(Dataset):
                             # 根據UID查找對應的XML標註
                             xml_path = xml_uid_to_path.get(sop_instance_uid)
                             
-                            # 只保留有XML標註的DICOM檔案
                             if xml_path is not None:
+                                # 有標註的正樣本
                                 samples.append({
                                     'patient_id': patient_id,
                                     'dcm_path': dcm_path,
@@ -290,8 +308,18 @@ class CTDetectionDataset(Dataset):
                                     'sop_instance_uid': sop_instance_uid,
                                     'has_annotation': True
                                 })
-                                file_count += 1
+                                file_count_positive += 1
                                 total_annotated_files += 1
+                            elif self.include_negative_samples:
+                                # 無標註的負樣本候選
+                                negative_candidates.append({
+                                    'patient_id': patient_id,
+                                    'dcm_path': dcm_path,
+                                    'xml_path': None,
+                                    'file_name': dcm_file,
+                                    'sop_instance_uid': sop_instance_uid,
+                                    'has_annotation': False
+                                })
                             
                         except Exception as e:
                             # 靜默處理個別檔案錯誤，避免中斷整個載入過程
@@ -299,12 +327,33 @@ class CTDetectionDataset(Dataset):
                                 print(f"   ⚠️ 檔案 {dcm_file} 讀取失敗: {str(e)[:50]}...")
                             continue
                     
-                    # 顯示患者檔案統計（只統計有標註的檔案）
-                    if i < 10:  # 只顯示前10位患者的詳細信息
-                        if file_count > 0:
-                            print(f"  ✅ 患者 {patient_id}: {file_count} 個有標註的檔案")
+                    # 隨機選取負樣本（根據限制數量）
+                    if self.include_negative_samples and negative_candidates:
+                        if self.max_negative_per_patient == 0:
+                            # 無限制：載入所有負樣本
+                            samples.extend(negative_candidates)
+                            file_count_negative = len(negative_candidates)
                         else:
-                            print(f"  ⚠️  患者 {patient_id}: 沒有找到匹配的標註檔案")
+                            # 有限制：隨機選取指定數量的負樣本
+                            import random
+                            selected_negative = random.sample(
+                                negative_candidates, 
+                                min(self.max_negative_per_patient, len(negative_candidates))
+                            )
+                            samples.extend(selected_negative)
+                            file_count_negative = len(selected_negative)
+                    
+                    # 顯示患者檔案統計
+                    if i < 10:  # 只顯示前10位患者的詳細信息
+                        if file_count_positive > 0 or file_count_negative > 0:
+                            status_msg = f"患者 {patient_id}: "
+                            if file_count_positive > 0:
+                                status_msg += f"{file_count_positive} 個正樣本"
+                            if file_count_negative > 0:
+                                status_msg += f", {file_count_negative} 個負樣本" if file_count_positive > 0 else f"{file_count_negative} 個負樣本"
+                            print(f"  ✅ {status_msg}")
+                        else:
+                            print(f"  ⚠️  患者 {patient_id}: 沒有找到可用的檔案")
                             patients_without_annotations.append(patient_id)
                             
                 else:
@@ -342,10 +391,18 @@ class CTDetectionDataset(Dataset):
                 continue
         
         # 詳細的載入結果報告
+        positive_samples = [s for s in samples if s['has_annotation']]
+        negative_samples = [s for s in samples if not s['has_annotation']]
+        
         print(f"\n{'='*60}")
         print(f"📊 資料載入結果報告")
         print(f"{'='*60}")
-        print(f"✅ 成功載入: {len(samples)} 個有標註的DICOM檔案")
+        print(f"✅ 總樣本數: {len(samples)}")
+        print(f"   - 正樣本（有標註）: {len(positive_samples)}")
+        if self.include_negative_samples:
+            print(f"   - 負樣本（無標註）: {len(negative_samples)}")
+            if len(samples) > 0:
+                print(f"   - 負樣本比例: {len(negative_samples)/len(samples)*100:.1f}%")
         print(f"👥 有效患者: {len([p for p in patients_to_load if any(s['patient_id'] == p for s in samples)])} 位")
         print(f"📁 總患者數: {total_patients} 位")
         
@@ -368,7 +425,7 @@ class CTDetectionDataset(Dataset):
             print(f"   pip install pydicom")
         
         if len(samples) == 0:
-            print(f"\n❌ 嚴重錯誤：沒有載入任何有標註的資料！")
+            print(f"\n❌ 嚴重錯誤：沒有載入任何資料！")
             print(f"可能的原因：")
             print(f"1. pydicom未安裝 - 執行: pip install pydicom")
             print(f"2. 資料路徑錯誤 - 檢查: {self.data_root}")
@@ -413,9 +470,6 @@ class CTDetectionDataset(Dataset):
         # 載入影像
         image = self._load_dicom_image(sample['dcm_path'])
         
-        # 載入標註（所有載入的檔案都有XML標註）
-        annotations = self.xml_parser.parse_xml(sample['xml_path'])
-        
         # 準備Faster R-CNN格式的資料
         boxes = []
         labels = []
@@ -426,32 +480,45 @@ class CTDetectionDataset(Dataset):
         else:
             original_height, original_width = image.shape[:2]
         
-        for ann in annotations['annotations']:
-            # 獲取邊界框座標
-            x1, y1, x2, y2 = ann['bbox']
+        # 檢查是否有標註
+        if sample['has_annotation'] and sample['xml_path'] is not None:
+            # 載入標註（正樣本）
+            annotations = self.xml_parser.parse_xml(sample['xml_path'])
             
-            # 調整座標到目標尺寸
-            x1 = (x1 / original_width) * self.target_size
-            y1 = (y1 / original_height) * self.target_size
-            x2 = (x2 / original_width) * self.target_size
-            y2 = (y2 / original_height) * self.target_size
+            for ann in annotations['annotations']:
+                # 獲取邊界框座標
+                x1, y1, x2, y2 = ann['bbox']
+                
+                # 調整座標到目標尺寸
+                x1 = (x1 / original_width) * self.target_size
+                y1 = (y1 / original_height) * self.target_size
+                x2 = (x2 / original_width) * self.target_size
+                y2 = (y2 / original_height) * self.target_size
+                
+                # 確保邊界框有效
+                x1, y1, x2, y2 = max(0, x1), max(0, y1), min(self.target_size, x2), min(self.target_size, y2)
+                
+                if x2 > x1 and y2 > y1:
+                    boxes.append([x1, y1, x2, y2])
+                    labels.append(ann['class_id'])
             
-            # 確保邊界框有效
-            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(self.target_size, x2), min(self.target_size, y2)
-            
-            if x2 > x1 and y2 > y1:
-                boxes.append([x1, y1, x2, y2])
-                labels.append(ann['class_id'])
-        
-        # 如果解析後沒有有效的邊界框，跳過這個樣本（理論上不應該發生）
-        if len(boxes) == 0:
-            print(f"警告：患者 {sample['patient_id']} 的 {sample['file_name']} 沒有有效的標註")
-            boxes = [[0, 0, 10, 10]]  # 建立最小的假邊界框
-            labels = [1]  # 病灶類別
+            # 如果解析後沒有有效的邊界框，跳過這個樣本（理論上不應該發生）
+            if len(boxes) == 0:
+                print(f"警告：患者 {sample['patient_id']} 的 {sample['file_name']} 沒有有效的標註")
+                boxes = [[0, 0, 10, 10]]  # 建立最小的假邊界框
+                labels = [1]  # 病灶類別
+        else:
+            # 負樣本：沒有標註
+            pass  # boxes 和 labels 保持為空列表
         
         # 轉換為tensor
-        boxes = torch.tensor(boxes, dtype=torch.float32)
-        labels = torch.tensor(labels, dtype=torch.int64)
+        if len(boxes) > 0:
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            labels = torch.tensor(labels, dtype=torch.int64)
+        else:
+            # 負樣本：空的tensor
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.int64)
         
         # 影像預處理：調整尺寸到目標大小
         from PIL import Image as PILImage

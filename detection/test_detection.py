@@ -14,16 +14,6 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-# 設置控制台編碼 (Windows)
-if sys.platform.startswith('win'):
-    try:
-        # 嘗試設置UTF-8編碼
-        os.system('chcp 65001 >nul')
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except:
-        pass
-
 import torch
 import torch.nn as nn
 import math
@@ -44,9 +34,18 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
-    logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
 
 from faster_rcnn_dataset import CTDetectionDataset
+
+# 設置控制台編碼 (Windows)
+if sys.platform.startswith('win'):
+    try:
+        # 嘗試設置UTF-8編碼
+        os.system('chcp 65001 >nul')
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        pass
 
 
 # =============================================================================
@@ -55,7 +54,7 @@ from faster_rcnn_dataset import CTDetectionDataset
 
 # 預定義的模型路徑搜索順序 (相對於detection目錄)
 DEFAULT_MODEL_SEARCH_PATHS = [
-    'Simple_Training_20250813_125859/models/best_model.pth',
+    'Simple_Training_20250901_120146/models/best_model.pth',
     'Faster_RCNN_Detection/models/best_model_fold_1.pth',
     'Faster_RCNN_Detection/models/best_model_fold_2.pth',
     'Faster_RCNN_Detection/models/best_model_fold_3.pth',
@@ -1147,11 +1146,18 @@ def validate_dataset_split(data_dir, split):
     return True
 
 
-def create_test_dataset(data_dir, split='test', target_size=512):
+def create_test_dataset(data_dir, split='test', target_size=512, include_negative_samples=True, max_negative_per_patient=0):
     """創建測試數據集並計算統計信息"""
     logging.info(f"正在創建 {split} 數據集...")
     logging.info(f"數據目錄: {data_dir}")
     logging.info(f"目標圖像大小: {target_size}")
+    if include_negative_samples:
+        if max_negative_per_patient == 0:
+            logging.info(f"負樣本設定: 啟用（無限制，載入所有負樣本）")
+        else:
+            logging.info(f"負樣本設定: 啟用（每患者最多{max_negative_per_patient}個負樣本）")
+    else:
+        logging.info(f"負樣本設定: 禁用（僅載入有標註影像）")
     
     test_dataset = CTDetectionDataset(
         data_root=data_dir,
@@ -1160,7 +1166,9 @@ def create_test_dataset(data_dir, split='test', target_size=512):
         specific_patients=None,
         transforms=transforms.Compose([
             transforms.ToTensor()
-        ])
+        ]),
+        include_negative_samples=include_negative_samples,
+        max_negative_per_patient=max_negative_per_patient
     )
     
     dataset_size = len(test_dataset)
@@ -1327,7 +1335,8 @@ def evaluate_model_comprehensive(model, test_loader, device, confidence_threshol
 
 def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_results', 
                         confidence_thresholds=[0.3, 0.5, 0.7], iou_thresholds=[0.3, 0.5, 0.7],
-                        visualize_samples=15, split='val'):
+                        visualize_samples=15, split='val', include_negative_samples=True, max_negative_per_patient=0,
+                        extract_deep_features=True):
     """測試檢測模型的主要函數"""
     
     # 設置設備
@@ -1341,7 +1350,9 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
     model = load_model(model_path, device)
     
     # 創建測試數據集並獲取統計信息
-    test_dataset, dataset_stats = create_test_dataset(data_dir, split=split)
+    test_dataset, dataset_stats = create_test_dataset(
+        data_dir, split=split, include_negative_samples=include_negative_samples, max_negative_per_patient=max_negative_per_patient
+    )
     
     # 保存數據集統計信息到文件
     if dataset_stats:
@@ -1387,6 +1398,68 @@ def test_detection_model(model_path, data_dir, batch_size=8, save_dir='./test_re
             )
         except Exception as e:
             logging.error(f"可視化生成失敗: {str(e)}")
+    
+    # 提取深層特徵（預設啟用）
+    if extract_deep_features:
+        logging.info("開始提取深層特徵（預設啟用）...")
+        features_dir = os.path.join(save_dir, 'deep_features')
+        
+        try:
+            # 導入特徵提取模塊
+            from deep_feature_extractor import extract_features_from_dataset
+            
+            # 提取特徵，使用標準置信度閾值
+            extract_features_from_dataset(
+                model_path=model_path,
+                data_dir=data_dir,
+                save_dir=features_dir,
+                split=split,
+                confidence_threshold=0.5,  # 使用標準閾值
+                device=device.type
+            )
+            
+            logging.info(f"深層特徵已保存到: {features_dir}")
+            
+            # 生成特徵摘要報告
+            try:
+                from feature_loader import FeatureLoader, FeatureVisualizer
+                
+                feature_loader = FeatureLoader(features_dir)
+                visualizer = FeatureVisualizer(feature_loader)
+                
+                # 生成數據集摘要
+                summary_path = os.path.join(features_dir, 'feature_summary_report.md')
+                visualizer.create_dataset_summary(summary_path)
+                logging.info(f"特徵摘要報告已保存到: {summary_path}")
+                
+                # 為前幾個病例生成詳細報告
+                patient_ids = feature_loader.get_all_patient_ids()[:5]
+                for patient_id in patient_ids:
+                    try:
+                        # 將病例報告保存在對應的病例資料夾中
+                        patient_dir = os.path.join(features_dir, patient_id)
+                        os.makedirs(patient_dir, exist_ok=True)
+                        report_path = os.path.join(patient_dir, f"{patient_id}_feature_report.md")
+                        visualizer.create_patient_report(patient_id, report_path)
+                    except Exception as e:
+                        logging.warning(f"生成病例 {patient_id} 特徵報告失敗: {str(e)}")
+                
+                # 輸出統計信息到日誌
+                stats = feature_loader.get_statistical_summary()
+                logging.info("=== 深層特徵提取統計 ===")
+                logging.info(f"處理病例數: {stats.get('total_patients', 0)}")
+                logging.info(f"含病灶病例: {stats.get('patients_with_lesions', 0)}")
+                logging.info(f"病灶檢出率: {stats.get('lesion_detection_rate', 0):.1%}")
+                logging.info(f"平均病灶數/病例: {stats.get('avg_detections_per_patient', 0):.1f}")
+                
+            except Exception as e:
+                logging.warning(f"生成特徵摘要報告失敗: {str(e)}")
+                
+        except Exception as e:
+            logging.error(f"深層特徵提取失敗: {str(e)}")
+            # 繼續執行，不中斷主要測試流程
+    else:
+        logging.info("深層特徵提取已禁用（使用 --no_extract_features 禁用）")
     
     # 生成置信度分析
     try:
@@ -1552,6 +1625,18 @@ def main():
                        help='IoU閾值列表')
     parser.add_argument('--visualize_samples', type=int, default=DEFAULT_VISUALIZE_SAMPLES,
                        help='可視化樣本數量 (0表示不生成可視化)')
+    parser.add_argument('--include_negative_samples', action='store_true', default=True,
+                       help='包含負樣本（無標註的影像）以改善ROC/AUC計算（預設啟用）')
+    parser.add_argument('--no_negative_samples', action='store_false', dest='include_negative_samples',
+                       help='禁用負樣本載入，僅載入有標註的影像')
+    parser.add_argument('--max_negative_per_patient', type=int, default=20,
+                       help='每位患者最大負樣本數量，0表示無限制（載入所有負樣本）')
+    
+    # 特徵提取參數
+    parser.add_argument('--extract_features', action='store_true', default=True,
+                       help='提取深層特徵供LLM生成報告使用（預設啟用）')
+    parser.add_argument('--no_extract_features', action='store_false', dest='extract_features',
+                       help='禁用深層特徵提取')
     
     # 輸出參數
     parser.add_argument('--save_dir', type=str, 
@@ -1676,6 +1761,14 @@ def main():
     logging.info(f"IoU閾值: {args.iou_thresholds}")
     logging.info(f"可視化樣本數: {args.visualize_samples}")
     logging.info(f"結果保存目錄: {args.save_dir}")
+    if args.include_negative_samples:
+        if args.max_negative_per_patient == 0:
+            logging.info(f"負樣本設定: 啟用（無限制，載入所有負樣本）")
+        else:
+            logging.info(f"負樣本設定: 啟用（每患者最多{args.max_negative_per_patient}個負樣本）")
+    else:
+        logging.info(f"負樣本設定: 禁用（僅載入有標註影像）")
+    logging.info(f"深層特徵提取: {'啟用（預設）' if args.extract_features else '禁用'}")
     
     # 開始測試
     start_time = time.time()
@@ -1688,7 +1781,10 @@ def main():
             confidence_thresholds=args.confidence_thresholds,
             iou_thresholds=args.iou_thresholds,
             visualize_samples=args.visualize_samples,
-            split=args.split
+            split=args.split,
+            include_negative_samples=args.include_negative_samples,
+            max_negative_per_patient=args.max_negative_per_patient,
+            extract_deep_features=args.extract_features
         )
         
         total_time = time.time() - start_time

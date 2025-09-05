@@ -18,7 +18,24 @@
 
 ### 基本要求
 
-確保您的資料位於正確位置：
+## 🧪 模型測試與評估 (`test/test_detection.py`)
+
+### 🎯 快速開始
+
+#### 基本測試（預設已啟用全面評估）
+```bash
+python detection\test\test_detection.py --model_path "./path/to/best_model.pth"
+```
+
+#### 自定義測試配置
+```bash
+# 指定測試數據集和結果保存路徑
+python detection\test\test_detection.py \
+  --model_path "./Faster_RCNN_Detection/models/best_model_fold_1.pth" \
+  --data_dir "./datasets/splited_dataset" \
+  --output_dir "./test_results" \
+  --confidence_threshold 0.5 \
+  --device cuda
 ```
 E:\GitHub\chest-ct-report-generator\datasets\splited_dataset\
 ├── train/
@@ -721,20 +738,290 @@ Memory Usage: 1024 MB
 ### 主要訓練腳本
 - `train_detection.py`: K-Fold 交叉驗證訓練腳本
 - `train_detection_simple.py`: 簡單訓練/驗證分割腳本（支援全面評估指標）
-- `test_detection.py`: 模型測試與評估腳本（包含全面評估指標）
+
+### 深度特徵提取
+- `deep_feature_extractor.py`: 深度特徵提取器
+- `feature_loader.py`: 特徵載入與分析工具
+- `extract_features.py`: 互動式特徵提取工具
 
 ### 支援模組
 - `faster_rcnn_dataset.py`: 數據載入模組
-- `faster_rcnn_model.py`: 模型定義（如果需要）
+- `faster_rcnn_model.py`: 模型定義
+- `gpu_dataloader_optimizer.py`: GPU資料載入優化工具
 
-### 推理與測試腳本
-- `inference_detection.py`: 推理腳本（如果需要）
-- `test_comprehensive_metrics.py`: 全面評估指標測試腳本
+### 測試和檢查工具 (test/)
+- `test_detection.py`: 主要模型測試與評估腳本（包含全面評估指標）
+- `test_feature_extraction.py`: 深度特徵提取測試
+- `test_faster_rcnn.py`: Faster R-CNN基本功能測試
+- `check_gpu.py`: GPU環境檢查
+- `check_data_size.py`: 資料大小檢查
+- 更多測試工具請參考 [`test/README.md`](test/README.md)
 
 ### 配置和文檔
 - `README.md`: 本文檔（包含全面評估指標說明）
 - `requirements.txt`: Python 依賴套件
 - `config/`: 配置文件目錄（如果存在）
+
+## 🧠 深層特徵提取系統
+
+### 概述
+
+深層特徵提取系統為LLM生成報告提供結構化的特徵數據，包含以下組件：
+
+1. **deep_feature_extractor.py** - 核心特徵提取器
+2. **extract_features.py** - 便捷的交互式提取工具
+3. **feature_loader.py** - 特徵加載和分析工具
+4. **test/test_detection.py** - 已增強的檢測測試（包含特徵提取選項）
+
+### 🚀 快速開始特徵提取
+
+#### 方法1：使用便捷腳本（推薦）
+
+```bash
+cd detection
+python extract_features.py
+```
+
+這將啟動交互式界面，引導您完成特徵提取過程。
+
+#### 方法2：使用測試腳本附帶提取
+
+```bash
+cd detection
+python test\test_detection.py --extract_features --split val
+```
+
+這將在模型測試的同時提取深層特徵。
+
+#### 方法3：直接使用提取器
+
+```bash
+cd detection
+python deep_feature_extractor.py --model_path "path/to/model.pth" --data_dir "path/to/data" --save_dir "./features"
+```
+
+### 📊 提取的特徵類型
+
+#### 1. 全局特徵 (Global Features)
+- **Backbone特徵**: ResNet50各層的全局平均池化特徵
+  - layer1: 256維 - 低級特徵 (邊緣、紋理)
+  - layer2: 512維 - 中級特徵 (形狀、模式)
+  - layer3: 1024維 - 高級特徵 (對象組件)
+  - layer4: 2048維 - 最高級特徵 (語義信息)
+- **FPN特徵**: 特徵金字塔網絡的多尺度特徵
+- **RPN特徵**: 區域建議網絡特徵
+- **ROI特徵**: 感興趣區域特徵
+
+#### 2. 檢測特徵 (Detection Features)
+- 病灶檢測統計
+- 邊界框信息
+- 置信度分布
+- 病灶面積和體積估計
+
+#### 3. 病例級特徵 (Patient-level Features)
+- 跨切片的特徵聚合 (mean, std, max, min)
+- 病灶分布統計
+- 嚴重程度評估
+
+### 📁 輸出文件格式
+
+特徵提取會生成以下文件：
+
+```
+deep_features/
+├── [patient_id]/
+│   ├── [patient_id]_features.pkl          # 完整的numpy數組特徵
+│   ├── [patient_id]_features.json         # JSON格式的可讀特徵
+│   └── [patient_id]_feature_report.md     # 病例特徵報告
+├── logs/
+│   └── feature_extraction_20250903_143022.log
+├── all_features_summary.pkl               # 所有特徵的彙總
+├── feature_extraction_report.json         # 提取統計報告
+└── feature_summary_report.md              # 數據集特徵摘要
+```
+
+### 🤖 供LLM使用的特徵格式
+
+#### 結構化特徵描述
+
+每個病例會生成如下的結構化描述供LLM使用：
+
+```
+患者ID: A0001
+CT掃描切片數: 45
+檢測結果: 發現病灶
+病灶總數: 8
+含病灶切片數: 6
+病灶分布比例: 13.3%
+病灶總體積(近似): 2845
+平均檢測置信度: 0.732
+最高檢測置信度: 0.891
+嚴重程度評估: 中度
+病灶分布詳情:
+  上段(肺尖): 2 個切片有病灶
+  中段: 3 個切片有病灶
+  下段(肺底): 1 個切片有病灶
+  最大病灶位於第 23 切片，面積: 1205
+
+深層特徵分析:
+  可用特徵類型: 高級語義特徵, 多尺度特徵, 區域特徵
+```
+
+### 💻 程式化使用特徵
+
+#### 加載特徵
+
+```python
+from feature_loader import FeatureLoader
+
+# 加載特徵
+loader = FeatureLoader("./deep_features")
+
+# 獲取病例特徵
+patient_features = loader.get_patient_features("A0001")
+
+# 獲取檢測摘要
+detection_summary = loader.get_detection_summary("A0001")
+
+# 生成LLM提示特徵
+llm_prompt = loader.generate_llm_prompt_features("A0001")
+print(llm_prompt)
+```
+
+#### 生成報告
+
+```python
+from feature_loader import FeatureVisualizer
+
+visualizer = FeatureVisualizer(loader)
+
+# 生成單個病例報告
+report = visualizer.create_patient_report("A0001", "A0001_report.md")
+
+# 生成數據集摘要
+summary = visualizer.create_dataset_summary("dataset_summary.md")
+```
+
+### 🔗 與LLM集成
+
+#### 1. 特徵向量方式
+```python
+# 獲取數值特徵向量用於embedding
+patient_features = loader.get_patient_features("A0001")
+backbone_features = patient_features['global_features']['backbone_layer4']['mean']
+# backbone_features: numpy array of shape [2048]
+```
+
+#### 2. 文本描述方式
+```python
+# 獲取結構化文本描述
+text_features = loader.generate_llm_prompt_features("A0001")
+# 可直接作為LLM的輸入提示
+```
+
+#### 3. 混合方式
+```python
+# 結合數值特徵和文本描述
+detection_summary = loader.get_detection_summary("A0001")
+text_prompt = loader.generate_llm_prompt_features("A0001")
+
+# 構建完整的LLM輸入
+llm_input = f"""
+基於以下CT掃描分析結果生成醫學報告：
+
+{text_prompt}
+
+請生成專業的放射科報告，包括：
+1. 影像檢查所見
+2. 診斷印象
+3. 建議
+"""
+```
+
+### ⚙️ 命令行選項
+
+#### deep_feature_extractor.py
+```bash
+python deep_feature_extractor.py \
+    --model_path "models/best_model.pth" \
+    --data_dir "datasets/splited_dataset" \
+    --save_dir "./deep_features" \
+    --split "val" \
+    --confidence_threshold 0.5 \
+    --device "cuda"
+```
+
+#### test/test_detection.py（包含特徵提取）
+```bash
+python test\test_detection.py \
+    --extract_features \
+    --split val \
+    --model_path "models/best_model.pth" \
+    --data_dir "datasets/splited_dataset"
+```
+
+#### feature_loader.py（分析工具）
+```bash
+# 生成數據集摘要
+python feature_loader.py --features_dir "./deep_features"
+
+# 生成特定病例報告
+python feature_loader.py --features_dir "./deep_features" --patient_id "A0001"
+```
+
+### ⚠️ 注意事項
+
+1. **記憶體使用**: 特徵提取需要較多GPU記憶體，建議batch_size不要太大
+2. **儲存空間**: 每個病例的特徵文件約1-5MB，請確保有足夠的磁碟空間
+3. **處理時間**: 特徵提取速度取決於病例數量和切片數，通常每個病例需要10-30秒
+4. **模型依賴**: 確保使用的模型文件與訓練時的架構一致
+
+### 🔧 特徵提取故障排除
+
+#### 常見問題
+
+1. **模型加載失敗**
+   - 檢查模型路徑是否正確
+   - 確認模型文件完整性
+   - 檢查CUDA/CPU兼容性
+
+2. **記憶體不足**
+   - 減少batch_size
+   - 使用CPU模式
+   - 分批處理病例
+
+3. **特徵文件損壞**
+   - 重新提取特徵
+   - 檢查磁碟空間
+   - 確認權限設置
+
+4. **JSON序列化錯誤**
+   - 通常不影響pkl文件
+   - 可能是numpy類型問題
+   - 優先使用pkl格式
+
+### 🚀 擴展功能
+
+#### 自定義特徵提取
+可以修改`DeepFeatureExtractor`類來提取更多類型的特徵：
+
+```python
+class CustomFeatureExtractor(DeepFeatureExtractor):
+    def extract_custom_features(self, image):
+        # 添加自定義特徵提取邏輯
+        pass
+```
+
+#### 特徵後處理
+```python
+def normalize_features(features):
+    # 添加特徵歸一化
+    pass
+
+def reduce_dimensionality(features):
+    # 添加降維處理
+    pass
+```
 
 ## 📋 更新歷史
 
