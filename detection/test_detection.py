@@ -54,12 +54,7 @@ if sys.platform.startswith('win'):
 
 # 預定義的模型路徑搜索順序 (相對於detection目錄)
 DEFAULT_MODEL_SEARCH_PATHS = [
-    'Simple_Training_20250901_120146/models/best_model.pth',
-    'Faster_RCNN_Detection/models/best_model_fold_1.pth',
-    'Faster_RCNN_Detection/models/best_model_fold_2.pth',
-    'Faster_RCNN_Detection/models/best_model_fold_3.pth',
-    'Faster_RCNN_Detection/models/best_model_fold_4.pth',
-    'Faster_RCNN_Detection/models/best_model_fold_5.pth',
+    'Simple_Training_Refactored_20250905_142020/models/best_model.pth',
 ]
 
 # 默認測試配置

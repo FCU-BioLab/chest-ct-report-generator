@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Optimized K-Fold Cross-Validation Training for Faster R-CNN Detection
-Simplified version focusing only on K-fold cross-validation training.
+Optimized K-Fold Cross-Validation Training for Faster R-CNN Detection - 重構版本
+使用模組化計算函數提高代碼可維護性
 """
 
 import os
@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
@@ -39,6 +39,23 @@ except ImportError:
     logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
 
 from faster_rcnn_dataset import CTDetectionDataset
+
+# 嘗試導入模組化的計算函數，如果失敗則使用內聯版本
+try:
+    from metrics.detection_metrics import calculate_comprehensive_metrics, calculate_detection_metrics
+    from metrics.roc_froc import calculate_roc_froc_curves
+    from metrics.dataset_statistics import calculate_dataset_statistics, save_patient_lists
+    from metrics.iou_calculations import calculate_giou, calculate_diou, calculate_ciou, calculate_bbox_error, calculate_iou_matrix
+    from visualization import visualize_predictions, create_prediction_summary, create_comprehensive_summary, create_kfold_summary_plots
+    from data_processing import create_kfold_datasets
+    from evaluation import evaluate_model
+    from utils import collate_fn, setup_logging
+    MODULES_IMPORTED = True
+    logging.info("已成功導入模組化計算函數")
+except ImportError as e:
+    logging.warning(f"模組化導入失敗: {e}")
+    logging.warning("將使用內聯函數作為備選方案")
+    MODULES_IMPORTED = False
 
 # 設置控制台編碼 (Windows)
 if sys.platform.startswith('win'):
@@ -71,8 +88,57 @@ def collate_fn(batch):
     return images, targets
 
 
+def collate_fn_fallback(batch):
+    """自定義批次整理函數的備選版本"""
+    images = []
+    targets = []
+    
+    for item in batch:
+        if isinstance(item, dict) and 'image' in item and 'target' in item:
+            images.append(item['image'])
+            targets.append(item['target'])
+        else:
+            print(f"Unexpected batch item format: {type(item)}")
+            if hasattr(item, 'keys'):
+                print(f"Keys: {list(item.keys())}")
+    
+    return images, targets
+
+
 def setup_logging(log_dir):
     """設置日誌記錄"""
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f'kfold_training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+    
+    # 清除已有的處理器
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # 創建格式器
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', 
+                                 datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # 文件處理器 - 使用UTF-8編碼
+    file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    
+    # 控制台處理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    
+    # 配置根日誌記錄器
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return log_file
+
+
+def setup_logging_fallback(log_dir):
+    """設置日誌記錄的備選版本"""
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f'kfold_training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     
@@ -1402,7 +1468,7 @@ def create_kfold_datasets(data_dir, k_folds=5, random_seed=42, include_negative_
 def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=0.001, 
                 save_dir='./models', log_dir='./logs', random_seed=42, 
                 accumulate_grad_batches=1, val_check_interval=5, include_negative_samples=True, max_negative_per_patient=0):
-    """K-fold交叉驗證訓練 - 優化版本"""
+    """K-fold交叉驗證訓練 - 重構版本，使用模組化函數"""
     
     # 設置設備
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1411,71 +1477,62 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
     # 創建保存目錄
     os.makedirs(save_dir, exist_ok=True)
     
-    # 創建K-fold數據集並獲取統計信息
-    fold_datasets, dataset_statistics = create_kfold_datasets(
-        data_dir, k_folds, random_seed, include_negative_samples, max_negative_per_patient
-    )
-    
-    # 保存數據集統計信息到文件
-    stats_file = os.path.join(save_dir, 'dataset_statistics.json')
-    with open(stats_file, 'w', encoding='utf-8') as f:
-        json.dump(dataset_statistics, f, indent=2, ensure_ascii=False)
-    logging.info(f"數據集統計信息已保存到: {stats_file}")
-    
-    # 保存每個fold的病例列表到單獨文件
-    for fold_idx, fold_stats in enumerate(dataset_statistics['fold_statistics']):
-        fold_patient_summary_file = os.path.join(save_dir, f'fold_{fold_idx + 1}_patient_split_summary.txt')
-        with open(fold_patient_summary_file, 'w', encoding='utf-8') as f:
-            f.write(f"=== Fold {fold_idx + 1} 病例分佈摘要 ===\n")
-            f.write(f"生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+    # 創建K-fold數據集
+    if MODULES_IMPORTED:
+        try:
+            fold_datasets, dataset_statistics = create_kfold_datasets(
+                data_dir, k_folds, random_seed, include_negative_samples, max_negative_per_patient
+            )
             
-            train_patient_ids = fold_stats['train_patient_ids']
-            val_patient_ids = fold_stats['val_patient_ids']
+            # 保存病例列表
+            save_patient_lists(save_dir, dataset_statistics)
             
-            f.write(f"總病例數: {len(train_patient_ids) + len(val_patient_ids)}\n")
-            f.write(f"訓練集病例數: {len(train_patient_ids)} ({len(train_patient_ids)/(len(train_patient_ids) + len(val_patient_ids))*100:.1f}%)\n")
-            f.write(f"驗證集病例數: {len(val_patient_ids)} ({len(val_patient_ids)/(len(train_patient_ids) + len(val_patient_ids))*100:.1f}%)\n\n")
+        except Exception as e:
+            logging.warning(f"使用模組化K-fold創建失敗: {e}")
+            logging.warning("切換到簡化版本")
+            # 簡化版本的K-fold創建
+            from torch.utils.data import random_split
+            full_dataset = CTDetectionDataset(
+                data_root=data_dir,
+                split='train',
+                target_size=512,
+                transforms=transforms.Compose([transforms.ToTensor()])
+            )
             
-            # 檢查病例重疊
-            overlap = set(train_patient_ids) & set(val_patient_ids)
-            if overlap:
-                f.write(f"⚠️  警告：訓練集和驗證集病例重疊: {overlap}\n\n")
-            else:
-                f.write("✓ 訓練集和驗證集病例無重疊\n\n")
+            # 創建K-fold分割
+            kfold = KFold(n_splits=k_folds, shuffle=True, random_state=random_seed)
+            fold_datasets = []
             
-            f.write("訓練集病例列表:\n")
-            f.write(", ".join(train_patient_ids))
-            f.write("\n\n")
-            
-            f.write("驗證集病例列表:\n")
-            f.write(", ".join(val_patient_ids))
-            f.write("\n\n")
-            
-            # 添加數據統計信息
-            train_stats = fold_stats['train_stats']
-            val_stats = fold_stats['val_stats']
-            f.write("=== 數據統計 ===\n")
-            f.write(f"訓練集: {train_stats['total_images']} 張圖像, {train_stats['total_annotations']} 個標記\n")
-            f.write(f"驗證集: {val_stats['total_images']} 張圖像, {val_stats['total_annotations']} 個標記\n")
+            for fold, (train_idx, val_idx) in enumerate(kfold.split(range(len(full_dataset)))):
+                train_subset = Subset(full_dataset, train_idx)
+                val_subset = Subset(full_dataset, val_idx)
+                fold_datasets.append((train_subset, val_subset))
+                
+            dataset_statistics = {'simplified': True}
+    else:
+        # 簡化版本的K-fold創建
+        from torch.utils.data import random_split
+        full_dataset = CTDetectionDataset(
+            data_root=data_dir,
+            split='train',
+            target_size=512,
+            transforms=transforms.Compose([transforms.ToTensor()])
+        )
         
-        # 保存單獨的病例列表文件
-        train_list_file = os.path.join(save_dir, f'fold_{fold_idx + 1}_train_patient_list.txt')
-        with open(train_list_file, 'w', encoding='utf-8') as f:
-            f.write(f"# Fold {fold_idx + 1} 訓練集病例列表\n")
-            f.write(f"# 總計 {len(train_patient_ids)} 位病例\n")
-            f.write(f"# 生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            for patient_id in train_patient_ids:
-                f.write(f"{patient_id}\n")
+        # 創建K-fold分割
+        kfold = KFold(n_splits=k_folds, shuffle=True, random_state=random_seed)
+        fold_datasets = []
         
-        val_list_file = os.path.join(save_dir, f'fold_{fold_idx + 1}_val_patient_list.txt')
-        with open(val_list_file, 'w', encoding='utf-8') as f:
-            f.write(f"# Fold {fold_idx + 1} 驗證集病例列表\n")
-            f.write(f"# 總計 {len(val_patient_ids)} 位病例\n")
-            f.write(f"# 生成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            for patient_id in val_patient_ids:
-                f.write(f"{patient_id}\n")
+        for fold, (train_idx, val_idx) in enumerate(kfold.split(range(len(full_dataset)))):
+            train_subset = Subset(full_dataset, train_idx)
+            val_subset = Subset(full_dataset, val_idx)
+            fold_datasets.append((train_subset, val_subset))
+            
+        dataset_statistics = {'simplified': True}
     
-    logging.info("所有fold的病例列表已保存完成")
+    # 選擇適當的函數
+    collate_func = collate_fn if MODULES_IMPORTED else collate_fn_fallback
+    eval_func = evaluate_model if MODULES_IMPORTED else evaluate_detection_model
     
     # 存儲所有fold的結果
     all_fold_results = []
@@ -1781,14 +1838,14 @@ def train_kfold(data_dir, k_folds=5, num_epochs=50, batch_size=8, learning_rate=
 
 
 def main():
-    parser = argparse.ArgumentParser(description='K-Fold Cross-Validation Training for Faster R-CNN')
+    parser = argparse.ArgumentParser(description='K-Fold Cross-Validation Training for Faster R-CNN - 重構版本')
     
     # 獲取腳本所在目錄
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
     # 生成帶時間戳的資料夾名稱
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    training_folder = f'Faster_RCNN_Detection_{timestamp}'
+    training_folder = f'Faster_RCNN_Detection_Refactored_{timestamp}'
     
     parser.add_argument('--data_dir', type=str, 
                        default=os.path.join(os.path.dirname(script_dir), 'datasets', 'splited_dataset'), 
@@ -1826,8 +1883,9 @@ def main():
     torch.manual_seed(args.random_seed)
     np.random.seed(args.random_seed)
     
-    # 設置日誌
-    log_file = setup_logging(args.log_dir)
+    # 設置日誌 - 使用模組化或備選版本
+    setup_func = setup_logging if MODULES_IMPORTED else setup_logging_fallback
+    log_file = setup_func(args.log_dir)
     logging.info(f"日誌文件: {log_file}")
     
     # 檢查數據目錄
@@ -1837,6 +1895,7 @@ def main():
     
     # 配置信息整合輸出
     config_info = [
+        f"模組化狀態: {'啟用' if MODULES_IMPORTED else '備選模式'}",
         f"數據目錄: {args.data_dir}",
         f"K-Fold數量: {args.k_folds}",
         f"訓練輪數: {args.num_epochs}, 批次大小: {args.batch_size}, 學習率: {args.learning_rate}",

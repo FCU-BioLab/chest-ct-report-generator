@@ -183,11 +183,21 @@ class CTDetectionDataset(Dataset):
                     patients_to_load = [line.strip() for line in f.readlines() if line.strip()]
             else:
                 # 如果沒有患者列表檔案，掃描目錄
-                split_dir = os.path.join(self.data_root, self.split)
-                if os.path.exists(split_dir):
-                    patients_to_load = [d for d in os.listdir(split_dir) if os.path.isdir(os.path.join(split_dir, d))]
+                if self.split == 'all':
+                    # For 'all' split, scan directly in data_root for patient directories
+                    if os.path.exists(self.data_root):
+                        patients_to_load = [d for d in os.listdir(self.data_root) 
+                                          if os.path.isdir(os.path.join(self.data_root, d)) 
+                                          and d.startswith(('A', 'B', 'E', 'G'))]  # Patient ID patterns
+                    else:
+                        patients_to_load = []
                 else:
-                    patients_to_load = []
+                    # For train/val splits, scan in split subdirectory
+                    split_dir = os.path.join(self.data_root, self.split)
+                    if os.path.exists(split_dir):
+                        patients_to_load = [d for d in os.listdir(split_dir) if os.path.isdir(os.path.join(split_dir, d))]
+                    else:
+                        patients_to_load = []
         
         # 檢查是否找到患者
         if len(patients_to_load) == 0:
@@ -216,9 +226,13 @@ class CTDetectionDataset(Dataset):
             print(f"   患者列表檔案: {patients_file}")
             print(f"   檔案存在: {os.path.exists(patients_file)}")
             
-            split_dir = os.path.join(self.data_root, self.split)
-            print(f"   分割目錄: {split_dir}")
-            print(f"   目錄存在: {os.path.exists(split_dir)}")
+            if self.split == 'all':
+                print(f"   使用分割: all (平面目錄結構)")
+                print(f"   患者目錄位於: {self.data_root}")
+            else:
+                split_dir = os.path.join(self.data_root, self.split)
+                print(f"   分割目錄: {split_dir}")
+                print(f"   目錄存在: {os.path.exists(split_dir)}")
             
             return samples
         
@@ -237,7 +251,14 @@ class CTDetectionDataset(Dataset):
                 print(f"載入進度: {i+1}/{total_patients} 患者 ({(i+1)/total_patients*100:.1f}%)")
             
             try:
-                patient_dir = os.path.join(self.data_root, self.split, patient_id)
+                # Handle different directory structures
+                if self.split == 'all':
+                    # For 'all' split, patients are directly in data_root (flat structure)
+                    patient_dir = os.path.join(self.data_root, patient_id)
+                else:
+                    # For train/val splits, patients are in subdirectories
+                    patient_dir = os.path.join(self.data_root, self.split, patient_id)
+                    
                 if not os.path.exists(patient_dir):
                     print(f"⚠️  患者目錄不存在: {patient_dir}")
                     failed_patients.append(patient_id)

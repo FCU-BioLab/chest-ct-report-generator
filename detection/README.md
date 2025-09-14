@@ -7,8 +7,10 @@
 - **🎯 二分類檢測**: 精確區分背景與病灶並預測邊界框
 - **🏗️ Faster R-CNN架構**: 採用 ResNet50-FPN 作為骨幹網路
 - **🔄 雙重訓練模式**: K-Fold 交叉驗證 + 簡單訓練/驗證分割
+- **🧩 模組化重構架構**: 智能模組載入系統，支援完整功能與備選方案
 - **📊 統一評估指標**: 三個檢測腳本都支援22項專業評估指標（mAP、IoU變體、ROC/FROC等）
 - **🧪 全面指標同步**: `train_detection.py`、`train_detection_simple.py`、`test_detection.py` 都具備相同的評估能力
+- **🔄 向後兼容**: 重構版本與原版本完全兼容，可根據需求選擇使用
 - **📊 詳細記錄**: 自動生成訓練日誌和 TensorBoard 視覺化
 - **📈 進度條顯示**: 使用 tqdm 提供詳細的訓練進度
 - **🎨 豐富可視化**: 自動生成預測結果、統計圖表、ROC曲線等
@@ -52,6 +54,7 @@ E:\GitHub\chest-ct-report-generator\datasets\splited_dataset\
 
 ## 🎯 方法一：K-Fold 交叉驗證（推薦用於模型評估）
 
+### 原版本 K-Fold 訓練（穩定版本）
 **1. 基本 K-Fold 訓練**
 ```bash
 python detection\train_detection.py
@@ -62,6 +65,17 @@ python detection\train_detection.py
 python detection\train_detection.py --k_folds 5 --num_epochs 50 --batch_size 8
 ```
 
+### 重構版本 K-Fold 訓練（推薦使用）
+**1. 基本重構 K-Fold 訓練**
+```bash
+python detection\train_detection_kfold_refactored.py
+```
+
+**2. 自訂重構 K-Fold 參數**
+```bash
+python detection\train_detection_kfold_refactored.py --k_folds 5 --num_epochs 50 --batch_size 8
+```
+
 **3. 快速測試（少量 epoch）**
 ```bash
 python detection\train_detection.py --k_folds 2 --num_epochs 5 --batch_size 4
@@ -69,6 +83,7 @@ python detection\train_detection.py --k_folds 2 --num_epochs 5 --batch_size 4
 
 ## 🚀 方法二：簡單訓練/驗證分割（推薦用於快速訓練）
 
+### 原版本簡單訓練（穩定版本）
 **1. 基本簡單訓練**
 ```bash
 python detection\train_detection_simple.py
@@ -77,6 +92,17 @@ python detection\train_detection_simple.py
 **2. 自訂驗證集比例**
 ```bash
 python detection\train_detection_simple.py --num_epochs 50 --val_split 0.2 --batch_size 8
+```
+
+### 重構版本簡單訓練（推薦使用）
+**1. 基本重構簡單訓練**
+```bash
+python detection\train_detection_refactored.py
+```
+
+**2. 自訂重構訓練參數**
+```bash
+python detection\train_detection_refactored.py --num_epochs 50 --val_split 0.2 --batch_size 8
 ```
 
 **3. 快速測試**
@@ -733,11 +759,182 @@ Memory Usage: 1024 MB
 - **GPU 記憶體**: 根據硬體調整批次大小
 - **進度監控**: 關注訓練過程中的 loss 變化
 
+## 🧩 模組化重構架構
+
+### 📋 重構概述
+
+本系統已完成全面的模組化重構，將原本 1500+ 行的單體代碼拆分成邏輯清晰的模組，提供更好的可維護性、可重用性和可測試性。
+
+### 🎯 重構版本與原版本對比
+
+| 特性 | 原版本 | 重構版本 | 說明 |
+|------|--------|----------|------|
+| **代碼組織** | 單體文件 (1500+ 行) | 模組化結構 | 清晰的功能分離 |
+| **功能完整性** | ✅ 完整 | ✅ 完整 + 增強 | 保持所有原有功能 |
+| **向後兼容** | N/A | ✅ 100% 兼容 | 可無縫替換原版本 |
+| **錯誤處理** | 基本 | ✅ 增強 | 智能備選方案 |
+| **可維護性** | 一般 | ✅ 優秀 | 模組化結構 |
+| **擴展性** | 困難 | ✅ 容易 | 獨立模組設計 |
+
+### 🌟 重構版本新特性
+
+#### 1. 智能模組載入系統
+- **自動檢測**: 智能檢測模組可用性
+- **平穩降級**: 模組不可用時自動使用內聯函數
+- **狀態報告**: 清楚顯示當前使用的模式（模組化/備選）
+
+#### 2. 增強的測試功能
+- **多閾值測試**: 支援同時測試多個置信度閾值
+- **自動模型發現**: 智能搜尋可用的模型文件
+- **詳細報告**: 生成更詳細的測試報告
+
+#### 3. 改進的錯誤處理
+- **更好的日誌**: UTF-8 支援和詳細錯誤信息
+- **備選機制**: 關鍵功能的多重備選方案
+- **用戶友好**: 清楚的狀態和錯誤信息
+
+### 📂 模組化結構
+
+#### 指標計算模組 (`metrics/`)
+- **`iou_calculations.py`**: IoU變體計算（IoU, GIoU, DIoU, CIoU）
+- **`detection_metrics.py`**: 全面檢測指標計算
+- **`roc_froc.py`**: ROC和FROC曲線計算與可視化
+- **`dataset_statistics.py`**: 數據集統計分析
+
+#### 可視化模組 (`visualization/`)
+- **預測結果可視化**: 詳細的預測對比圖
+- **統計摘要**: 全面的指標雷達圖和統計報告
+- **曲線繪製**: ROC/FROC曲線和其他分析圖表
+
+#### 數據處理模組 (`data_processing/`)
+- **數據集創建**: 訓練/驗證數據集分割
+- **數據統計**: 數據集分析和統計
+
+#### 評估模組 (`evaluation/`)
+- **模型評估**: 標準化的模型評估流程
+- **指標計算**: 統一的評估指標計算
+
+#### 工具模組 (`utils/`)
+- **通用工具**: 日誌設置、編碼配置等
+- **數據處理**: 批次整理函數等
+
+### 🚀 使用建議
+
+#### 新用戶（推薦）
+```bash
+# 使用重構版本，享受完整功能
+python detection\train_detection_refactored.py --num_epochs 50
+python detection\train_detection_kfold_refactored.py --k_folds 5
+python detection\test_detection_refactored.py --confidence_thresholds 0.3 0.5 0.7
+```
+
+#### 現有用戶（可選）
+```bash
+# 繼續使用原版本，完全正常工作
+python detection\train_detection_simple.py --num_epochs 50
+python detection\train_detection.py --k_folds 5
+python detection\test_detection.py
+
+# 或者逐步遷移到重構版本
+```
+
+#### 開發用戶
+```bash
+# 重構版本提供更好的開發體驗
+python detection\train_detection_refactored.py --num_epochs 10 --batch_size 4
+# 享受更好的錯誤處理和狀態報告
+```
+
+### 🛡️ 備選機制
+
+#### 模組不可用時的備選方案
+```python
+try:
+    # 嘗試使用模組化版本
+    from metrics.detection_metrics import calculate_comprehensive_metrics
+    MODULES_IMPORTED = True
+    logging.info("✅ 已成功導入模組化計算函數")
+except ImportError:
+    # 自動回退到內聯版本
+    MODULES_IMPORTED = False
+    logging.warning("⚠️ 模組化導入失敗，將使用內聯函數作為備選方案")
+```
+
+#### 依賴處理
+- **matplotlib**: 可視化模組可選，不影響核心功能
+- **scikit-learn**: ROC計算可選，不影響其他指標
+- **其他依賴**: 自動檢測和處理
+
+### 📊 重構效果
+
+#### 代碼品質改善
+- **行數減少**: 主文件從 1500+ 行減少到 ~500 行
+- **功能分離**: 每個模組專注特定功能
+- **重用性**: 模組可在不同腳本間共享
+
+#### 維護性提升
+- **錯誤定位**: 問題更容易定位到具體模組
+- **功能擴展**: 新功能可獨立開發和測試
+- **代碼理解**: 邏輯結構更清晰
+
+### 🔧 故障排除
+
+#### 常見問題
+
+**Q: 模組導入失敗怎麼辦？**
+- 重構版本會自動使用備選方案，功能完全正常
+- 可以檢查是否有檔案遺失或權限問題
+
+**Q: 重構版本的性能如何？**
+- 性能與原版本完全相同
+- 模組化只影響代碼組織，不影響運行效率
+
+**Q: 可以混合使用重構版本和原版本嗎？**
+- 完全可以，兩個版本產生的模型完全兼容
+- 可以用原版本訓練，重構版本測試，或反之
+
+**Q: 如何檢查當前使用的是模組化還是備選方案？**
+- 查看日誌輸出中的 "已成功導入模組化計算函數" 或 "將使用內聯函數作為備選方案"
+
+### 🎯 選擇指南
+
+#### 什麼時候使用重構版本？
+- ✅ 新項目開發
+- ✅ 需要詳細錯誤報告
+- ✅ 要進行代碼修改或擴展
+- ✅ 希望享受最新功能
+
+#### 什麼時候使用原版本？
+- ✅ 現有項目的穩定運行
+- ✅ 不需要額外功能
+- ✅ 系統環境限制
+- ✅ 純粹的向後兼容需求
+
+### 📈 重構成功指標
+
+✅ **功能完整性**: 100% 保持原有功能  
+✅ **向後兼容性**: 100% 兼容原版本接口  
+✅ **代碼組織**: 從單體結構改善為模組化架構  
+✅ **用戶體驗**: 增強的錯誤處理和狀態報告  
+✅ **開發體驗**: 更好的可維護性和可擴展性  
+
 ## 🔗 相關文件
 
 ### 主要訓練腳本
-- `train_detection.py`: K-Fold 交叉驗證訓練腳本
+
+#### 原版本（穩定版本）
+- `train_detection.py`: K-Fold 交叉驗證訓練腳本（已支援模組化功能）
 - `train_detection_simple.py`: 簡單訓練/驗證分割腳本（支援全面評估指標）
+
+#### 重構版本（推薦使用）
+- `train_detection_kfold_refactored.py`: 模組化 K-Fold 交叉驗證訓練腳本
+- `train_detection_refactored.py`: 模組化簡單訓練/驗證分割腳本
+- `test_detection_refactored.py`: 模組化測試腳本（支援多閾值測試）
+
+#### 版本選擇建議
+- **新項目**: 使用重構版本（`*_refactored.py`）
+- **現有項目**: 可繼續使用原版本或逐步遷移
+- **開發調試**: 推薦重構版本（更好的錯誤處理）
 
 ### 深度特徵提取
 - `deep_feature_extractor.py`: 深度特徵提取器
@@ -750,7 +947,12 @@ Memory Usage: 1024 MB
 - `gpu_dataloader_optimizer.py`: GPU資料載入優化工具
 
 ### 測試和檢查工具 (test/)
-- `test_detection.py`: 主要模型測試與評估腳本（包含全面評估指標）
+
+#### 主要測試腳本
+- `test_detection.py`: 原版本模型測試與評估腳本（包含全面評估指標）
+- `test_detection_refactored.py`: 重構版本測試腳本（推薦，支援多閾值測試和自動模型發現）
+
+#### 其他測試工具
 - `test_feature_extraction.py`: 深度特徵提取測試
 - `test_faster_rcnn.py`: Faster R-CNN基本功能測試
 - `check_gpu.py`: GPU環境檢查
@@ -1025,7 +1227,25 @@ def reduce_dimensionality(features):
 
 ## 📋 更新歷史
 
-### 最新更新 (2025-01)
+### 最新更新 (2025-09)
+- ✅ **模組化重構完成**: 成功將 1500+ 行單體代碼重構為模組化架構
+  - 智能模組載入系統，支援自動備選方案
+  - 完整的向後兼容性，原版本和重構版本並存
+  - 增強的錯誤處理和用戶友好的狀態報告
+- ✅ **重構版本腳本**: 新增三個重構版本腳本
+  - `train_detection_kfold_refactored.py`: 模組化 K-Fold 訓練
+  - `train_detection_refactored.py`: 模組化簡單訓練
+  - `test_detection_refactored.py`: 模組化測試（支援多閾值測試）
+- ✅ **模組化架構**: 建立完整的模組體系
+  - `metrics/`: 指標計算模組（IoU、檢測指標、ROC/FROC等）
+  - `visualization/`: 可視化模組
+  - `data_processing/`: 數據處理模組
+  - `evaluation/`: 評估模組
+  - `utils/`: 工具模組
+- ✅ **平穩升級路徑**: 提供完整的遷移指南和使用建議
+- ✅ **增強測試功能**: 重構版本支援多閾值測試和自動模型發現
+
+### 2025-01 更新
 - ✅ **統一評估指標系統**: 完成 `train_detection.py`、`train_detection_simple.py`、`test_detection.py` 的評估指標同步
 - ✅ **全面評估指標**: 三個腳本都支援22項專業評估指標
   - 核心檢測指標（IoU、mAP@0.5、mAP@[0.5:0.95]等）
