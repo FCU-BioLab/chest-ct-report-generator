@@ -18,7 +18,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 detection_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(detection_dir)
 
-from faster_rcnn_dataset import CTDetectionDataset
+from faster_rcnn_detection.faster_rcnn_dataset import CTDetectionDataset
 
 def setup_logging():
     """設置日誌"""

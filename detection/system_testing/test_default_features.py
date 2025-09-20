@@ -23,11 +23,11 @@ def test_default_feature_extraction():
     # 模擬不同的命令行參數
     test_cases = [
         # 沒有特徵相關參數 - 應該預設啟用
-        ["test_detection.py"],
+        ["faster_rcnn_detection/test_detection.py"],
         # 明確啟用
-        ["test_detection.py", "--extract_features"],
+        ["faster_rcnn_detection/test_detection.py", "--extract_features"],
         # 明確禁用
-        ["test_detection.py", "--no_extract_features"],
+        ["faster_rcnn_detection/test_detection.py", "--no_extract_features"],
     ]
     
     for case in test_cases:
@@ -116,13 +116,13 @@ def main():
     print("\n" + "="*50)
     print("使用方式:")
     print("1. 預設提取特徵:")
-    print("   python detection\\test_detection.py")
+    print("   python detection\\faster_rcnn_detection\\test_detection.py")
     print()
     print("2. 明確禁用特徵提取:")
-    print("   python detection\\test_detection.py --no_extract_features")
+    print("   python detection\\faster_rcnn_detection\\test_detection.py --no_extract_features")
     print()
     print("3. 指定測試集並提取特徵:")
-    print("   python detection\\test_detection.py --split test")
+    print("   python detection\\faster_rcnn_detection\\test_detection.py --split test")
 
 if __name__ == "__main__":
     main()

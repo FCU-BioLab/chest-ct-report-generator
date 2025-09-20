@@ -84,10 +84,10 @@ def check_gpu_setup():
         print(f"✅ 建議image_size: 512")
         
         print(f"\n🎯 推薦訓練指令:")
-        print(f"python train_detection.py --mode traditional --batch_size {batch_size}")
+        print(f"python faster_rcnn_detection/train_detection.py --mode traditional --batch_size {batch_size}")
     else:
         print("❌ 無GPU可用，將使用CPU訓練（速度較慢）")
-        print("python train_detection.py --mode traditional --batch_size 4")
+        print("python faster_rcnn_detection/train_detection.py --mode traditional --batch_size 4")
     
     print("\n" + "="*60)
     

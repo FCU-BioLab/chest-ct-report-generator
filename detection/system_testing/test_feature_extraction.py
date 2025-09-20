@@ -102,7 +102,7 @@ def test_feature_extraction():
     # 測試數據集加載
     print("\n5. 測試數據集加載...")
     try:
-        from faster_rcnn_dataset import CTDetectionDataset
+        from faster_rcnn_detection.faster_rcnn_dataset import CTDetectionDataset
         
         # 檢查可用的數據集分割
         data_dir_abs = os.path.abspath(data_dir)
@@ -283,7 +283,7 @@ def main():
         print("\n✅ 測試結果: 通過")
         print("\n接下來你可以：")
         print("1. 運行 python extract_features.py 進行交互式特徵提取")
-        print("2. 運行 python test_detection.py --extract_features 進行完整測試+特徵提取")
+        print("2. 運行 python faster_rcnn_detection/test_detection.py --extract_features 進行完整測試+特徵提取")
         print("3. 查看 README_FEATURES.md 了解詳細用法")
         return 0
     else:

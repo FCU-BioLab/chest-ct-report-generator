@@ -29,14 +29,34 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
-from torch.utils.tensorboard import SummaryWriter
+
+# Optional tensorboard import
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    SummaryWriter = None
+
 import torchvision.transforms as transforms
 from sklearn.model_selection import KFold
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.colors import LinearSegmentedColormap
-import cv2
+
+# Optional matplotlib imports
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    from matplotlib.colors import LinearSegmentedColormap
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
+# Optional cv2 import
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
 
 try:
     from sklearn.metrics import roc_curve, auc
@@ -54,7 +74,19 @@ except ImportError:
     sys.exit(1)
 
 # 导入自定义模块
-from faster_rcnn_dataset import CTDetectionDataset
+try:
+    # 嘗試從新位置導入
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    from faster_rcnn_detection.faster_rcnn_dataset import CTDetectionDataset
+    DATASET_AVAILABLE = True
+except ImportError:
+    try:
+        # 舊位置的備用導入
+        from faster_rcnn_dataset import CTDetectionDataset
+        DATASET_AVAILABLE = True
+    except ImportError:
+        DATASET_AVAILABLE = False
+        print("Warning: Could not import CTDetectionDataset")
 
 # 設置控制台編碼 (Windows)
 if sys.platform.startswith('win'):
