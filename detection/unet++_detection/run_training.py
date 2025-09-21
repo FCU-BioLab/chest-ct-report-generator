@@ -47,7 +47,8 @@ DEFAULT_CONFIG = {
     'multi_class_segmentation': False,
     'train_val_split_ratio': 0.8,
     'max_lesion_ratio': 0.7,
-    'max_files_per_patient': 50
+    'max_files_per_patient': 50,
+    'fast_eval': False
 }
 
 
@@ -670,7 +671,7 @@ def _train_with_metrics(trainer, train_loader, val_loader, train_metrics, val_me
         # 計算詳細評估指標（在驗證階段）
         try:
             logger.info("開始計算詳細評估指標...")
-            _calculate_detailed_metrics(trainer, val_loader, val_metrics)
+            _calculate_detailed_metrics(trainer, val_loader, val_metrics, config)
             logger.info("評估指標計算完成")
         except Exception as e:
             logger.warning(f"無法計算詳細評估指標: {e}")
@@ -754,7 +755,7 @@ def _train_with_metrics(trainer, train_loader, val_loader, train_metrics, val_me
     logger.info("增強訓練完成！")
 
 
-def _calculate_detailed_metrics(trainer, val_loader, metrics):
+def _calculate_detailed_metrics(trainer, val_loader, metrics, config=None):
     """
     計算詳細的評估指標
     
@@ -762,8 +763,16 @@ def _calculate_detailed_metrics(trainer, val_loader, metrics):
         trainer: 訓練器實例
         val_loader: 驗證數據載入器
         metrics: 評估指標實例
+        config: 配置參數字典，包含 fast_eval 等參數
     """
     trainer.model.eval()
+    
+    # 檢查是否使用快速評估模式
+    fast_eval = config.get('fast_eval', False) if config else False
+    if fast_eval:
+        logger.info("使用快速評估模式 - 只處理前 10 個批次")
+    else:
+        logger.info("使用完整評估模式 - 處理整個驗證集")
     
     batch_count = 0
     processed_samples = 0
@@ -1003,11 +1012,14 @@ def _calculate_detailed_metrics(trainer, val_loader, metrics):
                         logger.debug(f"詳細錯誤: {traceback.format_exc()}")
                 continue
             
-            # 只處理前幾個批次進行測試
-            if batch_idx >= 10:  # 只處理前10個批次以節省時間
+            # 根據配置決定是否使用快速評估模式
+            if fast_eval and batch_idx >= 10:
                 break
     
-    logger.info(f"評估指標計算完成：處理了 {batch_count} 個批次，{processed_samples} 個樣本")
+    if fast_eval:
+        logger.info(f"快速評估模式完成：處理了 {batch_count} 個批次，{processed_samples} 個樣本")
+    else:
+        logger.info(f"完整評估模式完成：處理了 {batch_count} 個批次，{processed_samples} 個樣本")
 
 
 def run_training_with_hierarchical_data(split_dataset_dir: str, flat_dataset_dir: str = None, config: dict = None):
@@ -1216,6 +1228,8 @@ def main():
                        help='每個患者的最大病灶比例 (默認: 0.7)')
     parser.add_argument('--max_files_per_patient', type=int, default=50,
                        help='每個患者的最大文件數 (默認: 50)')
+    parser.add_argument('--fast_eval', action='store_true',
+                       help='使用快速評估模式，只處理前 10 個批次計算指標 (默認: False)')
     
     args = parser.parse_args()
     
@@ -1227,7 +1241,8 @@ def main():
         'resume_from': args.resume_from,
         'train_val_split_ratio': args.train_val_split_ratio,
         'max_lesion_ratio': args.max_lesion_ratio,
-        'max_files_per_patient': args.max_files_per_patient
+        'max_files_per_patient': args.max_files_per_patient,
+        'fast_eval': args.fast_eval
     }
     
     if args.device:
