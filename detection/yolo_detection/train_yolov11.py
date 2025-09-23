@@ -1,784 +1,841 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-YOLOv11 K-Fold Cross-Validation Training for CT Detection
-基于原有 Faster R-CNN 训练逻辑，适配 YOLOv11 目标检测模型
+YOLOv11 Training for CT Detection.
 
-主要功能：
-1. K-fold交叉验证训练
-2. 综合指标评估 (mAP, IoU variants, FROC curves)
-3. 自动模型保存和结果可视化
-4. 支持负样本包含和数据增强
-
-作者: Based on Faster R-CNN training logic
-日期: 2025-09-06
+This script prepares CT detection datasets for YOLOv11, launches a single
+Ultralytics training run, evaluates the trained model, and records metrics.
 """
 
+from __future__ import annotations
+
+import json
+import logging
 import os
 import sys
-import json
+import textwrap
 import time
-import logging
-import math
-import numpy as np
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
-
-# Optional tensorboard import
-try:
-    from torch.utils.tensorboard import SummaryWriter
-    TENSORBOARD_AVAILABLE = True
-except ImportError:
-    TENSORBOARD_AVAILABLE = False
-    SummaryWriter = None
-
 import torchvision.transforms as transforms
-from sklearn.model_selection import KFold
 from tqdm import tqdm
 
-# Optional matplotlib imports
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    from matplotlib.colors import LinearSegmentedColormap
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-
-# Optional cv2 import
+# Optional cv2 import (required for dataset export)
 try:
     import cv2
+
     CV2_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - optional dependency
     CV2_AVAILABLE = False
 
-try:
-    from sklearn.metrics import roc_curve, auc
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-    logging.warning("scikit-learn not available. ROC/AUC metrics will be skipped.")
-
+# Optional ultralytics import (required for training and evaluation)
 try:
     from ultralytics import YOLO
+
     ULTRALYTICS_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - optional dependency
     ULTRALYTICS_AVAILABLE = False
-    logging.error("ultralytics not available. Please install: pip install ultralytics")
-    sys.exit(1)
 
-# 导入自定义模块
+# Locate shared modules (dataset definitions, utilities)
 try:
-    # 嘗試從新位置導入
-    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-    from faster_rcnn_detection.faster_rcnn_dataset import CTDetectionDataset
-    DATASET_AVAILABLE = True
-except ImportError:
-    try:
-        # 舊位置的備用導入
-        from faster_rcnn_dataset import CTDetectionDataset
-        DATASET_AVAILABLE = True
-    except ImportError:
-        DATASET_AVAILABLE = False
-        print("Warning: Could not import CTDetectionDataset")
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+    sys.path.append(str(REPO_ROOT))
+except Exception:  # pragma: no cover - best effort path adjustment
+    REPO_ROOT = Path.cwd()
 
-# 設置控制台編碼 (Windows)
-if sys.platform.startswith('win'):
+try:
+    from detection_dataset import CTDetectionDataset
+
+    DATASET_AVAILABLE = True
+except ImportError:  # pragma: no cover - fallback for alternate layout
     try:
-        os.system('chcp 65001 >nul')
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except:
+        from faster_rcnn_detection.faster_rcnn_dataset import CTDetectionDataset
+
+        DATASET_AVAILABLE = True
+    except ImportError:  # pragma: no cover - cannot proceed without dataset
+        DATASET_AVAILABLE = False
+
+# Optional utilities from metrics/data_processing packages
+try:
+    from metrics.dataset_statistics import calculate_dataset_statistics as external_calculate_dataset_statistics
+    from metrics.dataset_statistics import save_patient_lists as external_save_patient_lists
+except ImportError:  # pragma: no cover - fallback implementations
+    external_calculate_dataset_statistics = None
+    external_save_patient_lists = None
+
+try:
+    from utils import setup_logging as external_setup_logging
+except ImportError:  # pragma: no cover - use local logging setup
+    external_setup_logging = None
+
+LOGGER = logging.getLogger("yolov11_training")
+
+
+def _ensure_utf8_console() -> None:
+    """Best-effort UTF-8 console configuration for Windows."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        os.system("chcp 65001 >nul")
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:  # pragma: no cover - console setup is best effort
         pass
 
-# 尝试导入模块化计算函数
-try:
-    from metrics.detection_metrics import calculate_comprehensive_metrics, calculate_detection_metrics
-    from metrics.roc_froc import calculate_roc_froc_curves
-    from metrics.dataset_statistics import calculate_dataset_statistics, save_patient_lists
-    from metrics.iou_calculations import calculate_giou, calculate_diou, calculate_ciou, calculate_bbox_error, calculate_iou_matrix
-    from visualization import visualize_predictions, create_prediction_summary, create_comprehensive_summary, create_kfold_summary_plots
-    from data_processing import create_kfold_datasets
-    from evaluation import evaluate_model
-    from utils import collate_fn, setup_logging
-    MODULES_IMPORTED = True
-    logging.info("Successfully imported modular computation functions")
-except ImportError as e:
-    logging.warning(f"Modular import failed: {e}")
-    logging.warning("Using inline functions as fallback")
-    MODULES_IMPORTED = False
+
+_ensure_utf8_console()
 
 
-class YOLOv11CTDataset:
-    """YOLOv11格式的CT检测数据集适配器"""
-    
-    def __init__(self, data_dir: str, split: str = 'train', include_negative_samples: bool = True, 
-                 max_negative_per_patient: int = 0, patient_ids: Optional[List[str]] = None):
-        """
-        初始化YOLOv11数据集适配器
-        
-        Args:
-            data_dir: 数据根目录
-            split: 数据集分割类型 ('train', 'val', 'test')
-            include_negative_samples: 是否包含负样本
-            max_negative_per_patient: 每个病例最大负样本数
-            patient_ids: 指定使用的病例ID列表
-        """
-        self.data_dir = data_dir
-        self.split = split
-        self.include_negative_samples = include_negative_samples
-        self.max_negative_per_patient = max_negative_per_patient
-        self.patient_ids = patient_ids
-        
-        # 创建Faster R-CNN数据集实例来获取数据
-        # When patient_ids are specified, use 'all' split to access the flat directory structure
-        actual_split = 'all' if patient_ids is not None else split
-        self.rcnn_dataset = CTDetectionDataset(
-            data_root=data_dir,
-            split=actual_split,
-            target_size=640,  # YOLOv11推荐尺寸
-            specific_patients=patient_ids,
-            transforms=transforms.Compose([transforms.ToTensor()]),
-            include_negative_samples=include_negative_samples,
-            max_negative_per_patient=max_negative_per_patient
-        )
-        
-        self.samples = self.rcnn_dataset.samples
-        
-    def prepare_yolo_format(self, output_dir: str) -> str:
-        """
-        将数据转换为YOLOv11格式并保存
-        
-        Args:
-            output_dir: 输出目录
-            
-        Returns:
-            str: YOLO数据集配置文件路径
-        """
-        # 创建YOLO格式目录结构
-        yolo_dir = os.path.join(output_dir, f'yolo_dataset_{self.split}')
-        images_dir = os.path.join(yolo_dir, 'images', self.split)
-        labels_dir = os.path.join(yolo_dir, 'labels', self.split)
-        
-        os.makedirs(images_dir, exist_ok=True)
-        os.makedirs(labels_dir, exist_ok=True)
-        
-        logging.info(f"Preparing YOLOv11 format dataset to: {yolo_dir}")
-        
-        # Process each sample
-        for idx, sample in enumerate(tqdm(self.samples, desc=f"Converting {self.split} data")):
-            # 获取图像和标注
-            item = self.rcnn_dataset[idx]
-            image = item['image']
-            target = item['target']
-            
-            # 保存图像
-            # Use available sample information to create filename
-            patient_id = sample.get('patient_id', 'unknown')
-            file_name = sample.get('file_name', 'unknown')
-            sop_instance_uid = sample.get('sop_instance_uid', str(idx))
-            
-            # Create a simplified filename using available information
-            image_filename = f"{patient_id}_{sop_instance_uid}_{idx:06d}.png"
-            image_path = os.path.join(images_dir, image_filename)
-            
-            # 转换图像格式并保存
-            if isinstance(image, torch.Tensor):
-                # 从tensor转换为numpy
-                if image.dim() == 3 and image.shape[0] == 1:
-                    image_np = image.squeeze(0).numpy()
-                elif image.dim() == 3 and image.shape[0] == 3:
-                    image_np = image.permute(1, 2, 0).numpy()
-                else:
-                    image_np = image.numpy()
-                
-                # 归一化到0-255
-                if image_np.max() <= 1.0:
-                    image_np = (image_np * 255).astype(np.uint8)
-                
-                # 保存为PNG
-                if len(image_np.shape) == 2:
-                    cv2.imwrite(image_path, image_np)
-                else:
-                    cv2.imwrite(image_path, cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR))
-            
-            # 转换标注为YOLO格式
-            # Create label filename to match image filename
-            label_filename = f"{patient_id}_{sop_instance_uid}_{idx:06d}.txt"
-            label_path = os.path.join(labels_dir, label_filename)
-            
-            # 获取图像尺寸
-            img_height, img_width = 640, 640  # YOLOv11输入尺寸
-            
-            with open(label_path, 'w') as f:
-                if 'boxes' in target and len(target['boxes']) > 0:
-                    for box, label in zip(target['boxes'], target['labels']):
-                        # 转换边界框格式：从[x1,y1,x2,y2]到[center_x, center_y, width, height]
-                        x1, y1, x2, y2 = box.tolist()
-                        
-                        # 计算中心点和宽高（归一化）
-                        center_x = (x1 + x2) / 2.0 / img_width
-                        center_y = (y1 + y2) / 2.0 / img_height
-                        width = (x2 - x1) / img_width
-                        height = (y2 - y1) / img_height
-                        
-                        # YOLO类别ID（减1，因为我们的标签从1开始，YOLO从0开始）
-                        class_id = int(label.item()) - 1 if label.item() > 0 else 0
-                        
-                        # 写入YOLO格式标注
-                        f.write(f"{class_id} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}\n")
-        
-        # 创建数据集配置文件
-        dataset_config = {
-            'path': yolo_dir,
-            'train': f'images/{self.split}' if self.split == 'train' else None,
-            'val': f'images/{self.split}' if self.split == 'val' else None,
-            'test': f'images/{self.split}' if self.split == 'test' else None,
-            'nc': 1,  # 类别数量（只有病灶一类）
-            'names': ['lesion']  # 类别名称
-        }
-        
-        config_path = os.path.join(yolo_dir, 'dataset.yaml')
-        with open(config_path, 'w') as f:
-            yaml_content = f"""path: {yolo_dir}
-train: images/{self.split if self.split == 'train' else 'train'}
-val: images/{self.split if self.split == 'val' else 'val'}
+@dataclass
+class TrainingConfig:
+    """Container for YOLOv11 training hyperparameters and paths."""
 
-nc: 1
-names: ['lesion']
-"""
-            f.write(yaml_content)
-        
-        logging.info(f"YOLOv11 dataset configuration saved to: {config_path}")
-        return config_path
+    data_dir: str
+    num_epochs: int = 100
+    batch_size: int = 16
+    learning_rate: float = 0.01
+    save_dir: str = "./yolov11_models"
+    log_dir: str = "./yolov11_logs"
+    random_seed: int = 42
+    include_negative_samples: bool = True
+    max_negative_per_patient: int = 0
+    imgsz: int = 640
+    model_size: str = "n"
+    val_ratio: float = 0.2
+    train_split: str = "train"
+    val_split: Optional[str] = None
 
+    def as_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
-def setup_logging(log_dir: str) -> str:
-    """设置日志记录"""
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f'yolov11_training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-    
-    # 清除已有的处理器
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    
-    # 创建格式器
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', 
-                                 datefmt='%Y-%m-%d %H:%M:%S')
-    
-    # 文件处理器
-    file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    
-    # 控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    
-    # 配置根日志记录器
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
-    return log_file
-
-
-def calculate_yolo_metrics(results, confidence_threshold: float = 0.5) -> Dict[str, float]:
-    """
-    计算YOLOv11训练结果的指标
-    
-    Args:
-        results: YOLOv11训练结果对象
-        confidence_threshold: 置信度阈值
-        
-    Returns:
-        Dict[str, float]: 计算得到的指标字典
-    """
-    if results is None or not hasattr(results, 'results'):
-        return {}
-    
-    # 从YOLOv11结果中提取指标
-    metrics = {}
-    
-    try:
-        # 获取最后一个epoch的指标
-        if hasattr(results, 'results') and results.results:
-            last_result = results.results[-1]
-            
-            # 提取关键指标
-            if hasattr(last_result, 'box'):
-                box_metrics = last_result.box
-                metrics.update({
-                    'precision': float(getattr(box_metrics, 'p', 0)),
-                    'recall': float(getattr(box_metrics, 'r', 0)),
-                    'mAP@0.5': float(getattr(box_metrics, 'map50', 0)),
-                    'mAP@[0.5:0.95]': float(getattr(box_metrics, 'map', 0)),
-                })
-                
-                # 计算F1分数
-                p, r = metrics.get('precision', 0), metrics.get('recall', 0)
-                metrics['f1_score'] = 2 * p * r / (p + r) if (p + r) > 0 else 0
-        
-        # 如果有验证结果，也提取相关指标
-        if hasattr(results, 'val') and results.val:
-            val_metrics = results.val
-            if hasattr(val_metrics, 'box'):
-                val_box = val_metrics.box
-                metrics.update({
-                    'val_precision': float(getattr(val_box, 'p', 0)),
-                    'val_recall': float(getattr(val_box, 'r', 0)),
-                    'val_mAP@0.5': float(getattr(val_box, 'map50', 0)),
-                    'val_mAP@[0.5:0.95]': float(getattr(val_box, 'map', 0)),
-                })
-    
-    except Exception as e:
-        logging.warning(f"提取YOLOv11指标时出错: {e}")
-    
-    return metrics
-
-
-def evaluate_yolo_model(model_path: str, dataset_config: str, device: str = 'auto') -> Dict[str, Any]:
-    """
-    评估训练好的YOLOv11模型
-    
-    Args:
-        model_path: 模型路径
-        dataset_config: 数据集配置文件路径
-        device: 设备类型
-        
-    Returns:
-        Dict[str, Any]: 评估结果
-    """
-    try:
-        # 加载模型
-        model = YOLO(model_path)
-        
-        # 在验证集上评估
-        val_results = model.val(data=dataset_config, device=device)
-        
-        # 提取指标
-        metrics = calculate_yolo_metrics(val_results)
-        
+    def build_train_args(self, data_config: str, project_dir: Path, device: str) -> Dict[str, Any]:
+        """Compose Ultralytics training arguments."""
+        run_name = "training_run"
         return {
-            'metrics': metrics,
-            'val_results': val_results,
-            'model_path': model_path
+            "data": data_config,
+            "epochs": self.num_epochs,
+            "batch": self.batch_size,
+            "lr0": self.learning_rate,
+            "imgsz": self.imgsz,
+            "device": device,
+            "project": str(project_dir),
+            "name": run_name,
+            "save": True,
+            "save_period": 10,
+            "val": True,
+            "plots": True,
+            "verbose": True,
+            "patience": 50,
+            "workers": 4,
+            "seed": self.random_seed,
         }
-    
-    except Exception as e:
-        logging.error(f"评估YOLOv11模型时出错: {e}")
-        return {'metrics': {}, 'error': str(e)}
 
 
-def create_kfold_datasets(data_dir: str, k_folds: int = 5, random_seed: int = 42, 
-                         include_negative_samples: bool = True, max_negative_per_patient: int = 0) -> Tuple[List, Dict]:
-    """
-    创建按病例分割的K-fold数据集
-    
-    Args:
-        data_dir: 数据目录
-        k_folds: K折数量
-        random_seed: 随机种子
-        include_negative_samples: 是否包含负样本
-        max_negative_per_patient: 每个病例最大负样本数
-        
-    Returns:
-        Tuple[List, Dict]: (fold数据集列表, 数据集统计信息)
-    """
-    # 载入完整数据集
-    full_dataset = CTDetectionDataset(
-        data_root=data_dir,
-        split='train',
-        target_size=640,
-        specific_patients=None,
-        transforms=transforms.Compose([transforms.ToTensor()]),
-        include_negative_samples=include_negative_samples,
-        max_negative_per_patient=max_negative_per_patient
-    )
-    
-    # 收集所有病例ID
-    all_patient_ids = set()
-    for sample in full_dataset.samples:
-        all_patient_ids.add(sample['patient_id'])
-    
-    all_patient_ids = sorted(list(all_patient_ids))
-    total_patients = len(all_patient_ids)
-    
-    logging.info(f"数据集总大小: {len(full_dataset)} 张图像")
-    logging.info(f"总病例数: {total_patients} 位")
-    
-    # 设置随机种子并创建K-fold分割
-    np.random.seed(random_seed)
-    np.random.shuffle(all_patient_ids)
-    
-    # 使用KFold按病例分割
-    kfold = KFold(n_splits=k_folds, shuffle=False, random_state=None)
-    patient_indices = list(range(total_patients))
-    
-    fold_datasets = []
-    all_fold_stats = []
-    
-    # 计算完整数据集的统计信息
-    logging.info("计算完整数据集统计信息...")
-    full_dataset_stats = calculate_dataset_statistics(full_dataset, "完整数据集")
-    
-    for fold, (train_patient_idx, val_patient_idx) in enumerate(kfold.split(patient_indices)):
-        logging.info(f"\n=== 准备 Fold {fold + 1}/{k_folds} ===")
-        
-        # 获取训练和验证病例ID
-        train_patient_ids = [all_patient_ids[i] for i in train_patient_idx]
-        val_patient_ids = [all_patient_ids[i] for i in val_patient_idx]
-        
-        logging.info(f"训练病例数: {len(train_patient_ids)}")
-        logging.info(f"验证病例数: {len(val_patient_ids)}")
-        
-        # 创建YOLOv11数据集适配器
-        train_yolo_dataset = YOLOv11CTDataset(
-            data_dir=data_dir,
-            split='train',
-            include_negative_samples=include_negative_samples,
-            max_negative_per_patient=max_negative_per_patient,
-            patient_ids=train_patient_ids
-        )
-        
-        val_yolo_dataset = YOLOv11CTDataset(
-            data_dir=data_dir,
-            split='val',
-            include_negative_samples=include_negative_samples,
-            max_negative_per_patient=max_negative_per_patient,
-            patient_ids=val_patient_ids
-        )
-        
-        # 计算训练和验证集统计信息
-        train_stats = calculate_dataset_statistics(train_yolo_dataset.rcnn_dataset, f"Fold {fold + 1} 训练集")
-        val_stats = calculate_dataset_statistics(val_yolo_dataset.rcnn_dataset, f"Fold {fold + 1} 验证集")
-        
-        fold_datasets.append((train_yolo_dataset, val_yolo_dataset))
-        all_fold_stats.append({
-            'fold': fold + 1,
-            'train_patients': train_patient_ids,
-            'val_patients': val_patient_ids,
-            'train_stats': train_stats,
-            'val_stats': val_stats
-        })
-    
-    # 组合所有统计信息
-    dataset_statistics = {
-        'full_dataset_stats': full_dataset_stats,
-        'k_folds': k_folds,
-        'fold_statistics': all_fold_stats,
-        'total_dataset_size': len(full_dataset),
-        'total_patient_count': total_patients,
-        'all_patient_ids': all_patient_ids
-    }
-    
-    return fold_datasets, dataset_statistics
+@dataclass
+class DatasetArtifacts:
+    """Filesystem artifacts created during dataset preparation."""
+
+    export_root: Path
+    combined_config: Path
+    train_dataset_config: Path
+    val_dataset_config: Optional[Path]
 
 
-def calculate_dataset_statistics(dataset, dataset_name: str = "Dataset") -> Dict[str, Any]:
-    """计算数据集的详细统计信息"""
+def _fallback_calculate_dataset_statistics(dataset: Any, dataset_name: str) -> Dict[str, Any]:
+    """Minimal dataset statistics computation used when metrics module is absent."""
     total_images = len(dataset)
     total_annotations = 0
     images_with_annotations = 0
     images_without_annotations = 0
-    
-    logging.info(f"正在计算 {dataset_name} 统计信息...")
-    
-    for i in range(total_images):
+
+    LOGGER.info("Collecting statistics for %s (size=%s)", dataset_name, total_images)
+
+    for idx in range(total_images):
         try:
-            item = dataset[i]
-            target = item['target']
-            
-            if 'boxes' in target and len(target['boxes']) > 0:
-                num_boxes = len(target['boxes'])
-                total_annotations += num_boxes
+            item = dataset[idx]
+            if isinstance(item, dict) and "target" in item:
+                target = item["target"]
+            else:
+                _, target = item
+
+            boxes = target.get("boxes", []) if target else []
+            if boxes and len(boxes) > 0:
+                total_annotations += len(boxes)
                 images_with_annotations += 1
             else:
                 images_without_annotations += 1
-        except Exception as e:
-            logging.warning(f"处理第{i}个样本时出错: {e}")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOGGER.warning("Failed to analyse sample %s in %s: %s", idx, dataset_name, exc)
             images_without_annotations += 1
-    
+
     stats = {
-        'dataset_name': dataset_name,
-        'total_images': total_images,
-        'total_annotations': total_annotations,
-        'images_with_annotations': images_with_annotations,
-        'images_without_annotations': images_without_annotations,
-        'avg_annotations_per_image': total_annotations / total_images if total_images > 0 else 0,
-        'avg_annotations_per_annotated_image': total_annotations / images_with_annotations if images_with_annotations > 0 else 0
+        "dataset_name": dataset_name,
+        "total_images": total_images,
+        "total_annotations": total_annotations,
+        "images_with_annotations": images_with_annotations,
+        "images_without_annotations": images_without_annotations,
+        "avg_annotations_per_image": total_annotations / total_images if total_images else 0.0,
+        "avg_annotations_per_annotated_image": (
+            total_annotations / images_with_annotations if images_with_annotations else 0.0
+        ),
     }
-    
-    # 记录统计信息
-    logging.info(f"=== {dataset_name} 统计信息 ===")
-    logging.info(f"总影像数: {total_images}")
-    logging.info(f"总标记数: {total_annotations}")
-    logging.info(f"有标记的影像数: {images_with_annotations}")
-    logging.info(f"无标记的影像数: {images_without_annotations}")
-    logging.info(f"平均每张影像标记数: {stats['avg_annotations_per_image']:.2f}")
-    if images_with_annotations > 0:
-        logging.info(f"平均每张有标记影像的标记数: {stats['avg_annotations_per_annotated_image']:.2f}")
-    
+
+    LOGGER.info(
+        "[%s] images=%s, annotated=%s, empty=%s, avg_annotations=%.2f",
+        dataset_name,
+        total_images,
+        images_with_annotations,
+        images_without_annotations,
+        stats["avg_annotations_per_image"],
+    )
     return stats
 
 
-def train_yolov11_kfold(data_dir: str, k_folds: int = 5, num_epochs: int = 100, 
-                        batch_size: int = 16, learning_rate: float = 0.01,
-                        save_dir: str = './yolov11_models', log_dir: str = './yolov11_logs',
-                        random_seed: int = 42, include_negative_samples: bool = True,
-                        max_negative_per_patient: int = 0, imgsz: int = 640,
-                        model_size: str = 'n') -> Dict[str, Any]:
-    """
-    YOLOv11 K-fold交叉验证训练
-    
-    Args:
-        data_dir: 数据目录
-        k_folds: K折数量
-        num_epochs: 训练轮数
-        batch_size: 批次大小
-        learning_rate: 学习率
-        save_dir: 模型保存目录
-        log_dir: 日志目录
-        random_seed: 随机种子
-        include_negative_samples: 是否包含负样本
-        max_negative_per_patient: 每个病例最大负样本数
-        imgsz: 图像尺寸
-        model_size: 模型大小 ('n', 's', 'm', 'l', 'x')
-        
-    Returns:
-        Dict[str, Any]: 训练结果
-    """
-    # 设置日志
-    log_file = setup_logging(log_dir)
-    logging.info("开始YOLOv11 K-fold交叉验证训练")
-    
-    # 设置设备
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    logging.info(f"使用设备: {device}")
-    
-    # 创建保存目录
-    os.makedirs(save_dir, exist_ok=True)
-    
-    # 创建K-fold数据集
-    fold_datasets, dataset_statistics = create_kfold_datasets(
+DATASET_STATS_FN = (
+    external_calculate_dataset_statistics if external_calculate_dataset_statistics else _fallback_calculate_dataset_statistics
+)
+
+
+def setup_logging(log_dir: str) -> str:
+    """Create a timestamped log file and configure root logger."""
+    if external_setup_logging:
+        return external_setup_logging(log_dir)
+
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    log_file = log_path / f"yolov11_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    # Reset existing handlers to avoid duplicate logs between runs
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8", mode="w")
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.INFO)
+
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    return str(log_file)
+
+
+def select_device() -> str:
+    """Return the preferred torch device available on the current machine."""
+    if torch.cuda.is_available():
+        return "cuda"
+    mps_available = getattr(torch.backends, "mps", None)
+    if mps_available and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def set_global_seed(seed: int) -> None:
+    """Apply the same seed across numpy and torch for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _validate_dependencies() -> None:
+    """Ensure required dependencies are present before training starts."""
+    if not DATASET_AVAILABLE:
+        raise RuntimeError("CTDetectionDataset is not available. Please ensure the dataset module is importable.")
+    if not ULTRALYTICS_AVAILABLE:
+        raise RuntimeError("ultralytics package is required. Install with: pip install ultralytics")
+    if not CV2_AVAILABLE:
+        raise RuntimeError("OpenCV (cv2) is required to export images. Install with: pip install opencv-python")
+
+
+class YOLOv11CTDataset:
+    """Wrapper that adapts CTDetectionDataset samples to the YOLOv11 format."""
+
+    def __init__(
+        self,
+        data_dir: str,
+        split: str,
+        include_negative_samples: bool,
+        max_negative_per_patient: int,
+        patient_ids: Optional[List[str]],
+        image_size: int,
+    ) -> None:
+        # Keep the original split for directory structure, even when using specific patients
+        actual_split = split  # Don't change to "all" when using patient_ids
+        self.image_size = image_size
+        self.split = split
+
+        self.rcnn_dataset = CTDetectionDataset(
+            data_root=data_dir,
+            split=actual_split,
+            target_size=image_size,
+            specific_patients=patient_ids,
+            transforms=transforms.Compose([transforms.ToTensor()]),
+            include_negative_samples=include_negative_samples,
+            max_negative_per_patient=max_negative_per_patient,
+            format_type='yolo'  # 指定使用YOLO格式
+        )
+
+        self.samples = self.rcnn_dataset.samples
+
+    def prepare_yolo_format(self, output_dir: Path) -> Path:
+        """Convert samples to YOLO format and persist to disk."""
+        if not CV2_AVAILABLE:
+            raise RuntimeError("OpenCV (cv2) is required to write YOLO format images.")
+
+        base_dir = Path(output_dir) / f"yolo_dataset_{self.split}"
+        images_dir = base_dir / "images" / self.split
+        labels_dir = base_dir / "labels" / self.split
+
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+
+        LOGGER.info("Preparing YOLOv11 dataset for %s split at %s", self.split, base_dir)
+
+        for idx, sample in enumerate(
+            tqdm(self.samples, desc=f"Converting {self.split} data", leave=False)
+        ):
+            item = self.rcnn_dataset[idx]
+            image_tensor = item["image"]
+            target = item.get("target", {})
+
+            image_array = _tensor_to_image_array(image_tensor)
+            patient_id = (sample.get("patient_id") or "unknown").replace("/", "_")
+            sop_instance_uid = sample.get("sop_instance_uid") or f"uid_{idx:06d}"
+            image_filename = f"{patient_id}_{sop_instance_uid}_{idx:06d}.png"
+            image_path = images_dir / image_filename
+
+            if image_array.ndim == 2:
+                cv2.imwrite(str(image_path), image_array)
+            else:
+                cv2.imwrite(str(image_path), cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR))
+
+            label_filename = image_filename.replace(".png", ".txt")
+            label_path = labels_dir / label_filename
+            img_height, img_width = image_array.shape[:2]
+
+            with open(label_path, "w", encoding="utf-8") as handle:
+                boxes = target.get("boxes", [])
+                labels = target.get("labels", [])
+                if boxes is None or len(boxes) == 0:
+                    continue
+                
+                # 新的數據集已經提供YOLO格式，直接使用
+                if hasattr(boxes, 'shape') and len(boxes.shape) == 2 and boxes.shape[1] == 4:
+                    # YOLO格式：(center_x, center_y, width, height) 已正規化
+                    for i, (box, label) in enumerate(zip(boxes, labels)):
+                        center_x, center_y, width, height = box.tolist() if hasattr(box, 'tolist') else box
+                        class_id = max(_extract_label_id(label) - 1, 0)
+                        handle.write(f"{class_id} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}\n")
+                else:
+                    # 舊格式轉換（向後兼容）
+                    for box, label in zip(boxes, labels):
+                        x1, y1, x2, y2 = _extract_box_coordinates(box)
+                        center_x = ((x1 + x2) / 2.0) / img_width
+                        center_y = ((y1 + y2) / 2.0) / img_height
+                        width = (x2 - x1) / img_width
+                        height = (y2 - y1) / img_height
+
+                        class_id = max(_extract_label_id(label) - 1, 0)
+                        handle.write(f"{class_id} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}\n")
+
+        dataset_config = base_dir / "dataset.yaml"
+        dataset_config.write_text(
+            textwrap.dedent(
+                f"""
+                path: {base_dir}
+                train: images/{self.split if self.split == 'train' else 'train'}
+                val: images/{self.split if self.split == 'val' else 'val'}
+
+                nc: 1
+                names: ['lesion']
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        LOGGER.info("YOLO dataset configuration saved to %s", dataset_config)
+        return dataset_config
+
+
+def _tensor_to_image_array(tensor: torch.Tensor) -> np.ndarray:
+    """Convert a torch tensor (C,H,W) or (H,W) into a uint8 numpy array."""
+    array = tensor.detach().cpu()
+    if array.dim() == 3 and array.shape[0] in (1, 3):
+        if array.shape[0] == 1:
+            image = array.squeeze(0).numpy()
+        else:
+            image = array.permute(1, 2, 0).numpy()
+    elif array.dim() == 2:
+        image = array.numpy()
+    else:
+        raise ValueError(f"Unexpected tensor shape for image conversion: {tuple(array.shape)}")
+
+    image = np.clip(image, 0.0, 1.0) if image.max() <= 1.0 else np.clip(image, 0.0, 255.0)
+    image_uint8 = (image * 255.0 if image.max() <= 1.0 else image).astype(np.uint8)
+    return image_uint8
+
+
+def _extract_box_coordinates(box: Any) -> Tuple[float, float, float, float]:
+    """Return bounding box coordinates from tensor/list inputs."""
+    if hasattr(box, "tolist"):
+        x1, y1, x2, y2 = box.tolist()
+    else:
+        x1, y1, x2, y2 = map(float, box)
+    return float(x1), float(y1), float(x2), float(y2)
+
+
+def _extract_label_id(label: Any) -> int:
+    """Extract integer class label from tensor-like or numeric inputs."""
+    if hasattr(label, "item"):
+        return int(label.item())
+    return int(label)
+
+
+def _resolve_model_name(model_size: str) -> str:
+    valid_sizes = {"n", "s", "m", "l", "x"}
+    if model_size not in valid_sizes:
+        raise ValueError(f"Unsupported model_size '{model_size}'. Expected one of {sorted(valid_sizes)}")
+    return f"yolov11{model_size}.pt"
+
+
+def _write_combined_dataset_yaml(export_root: Path, train_config: Path, val_config: Optional[Path]) -> Path:
+    """Create a dataset.yaml that references train and validation splits."""
+    combined_config = export_root / "combined_dataset.yaml"
+
+    train_images = (train_config.parent / "images" / "train").resolve()
+    if val_config:
+        val_images = (val_config.parent / "images" / "val").resolve()
+    else:
+        val_images = train_images
+
+    train_rel = Path(os.path.relpath(train_images, export_root)).as_posix()
+    val_rel = Path(os.path.relpath(val_images, export_root)).as_posix()
+
+    combined_config.write_text(
+        textwrap.dedent(
+            f"""
+            path: {export_root}
+            train: {train_rel}
+            val: {val_rel}
+
+            nc: 1
+            names: ['lesion']
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return combined_config
+
+
+def _collect_patient_ids(dataset: YOLOv11CTDataset) -> List[str]:
+    patient_ids: List[str] = []
+    for idx, sample in enumerate(dataset.samples):
+        patient_id = sample.get("patient_id")
+        if not patient_id:
+            patient_id = f"unknown_{idx:06d}"
+        patient_ids.append(str(patient_id))
+    return sorted(set(patient_ids))
+
+
+
+def _split_patient_ids(patient_ids: List[str], val_ratio: float) -> Tuple[List[str], List[str]]:
+    """Split patient identifiers into train/validation subsets by ratio."""
+    if not patient_ids:
+        raise ValueError("No patient IDs available for splitting.")
+    if not 0.0 < val_ratio < 1.0:
+        raise ValueError("val_ratio must be between 0 and 1 when deriving validation data from the train split.")
+    if len(patient_ids) < 2:
+        raise ValueError("At least two unique patient IDs are required to create a validation subset.")
+
+    shuffled = np.random.permutation(patient_ids)
+    val_count = max(1, int(round(len(patient_ids) * val_ratio)))
+    val_count = min(val_count, len(patient_ids) - 1)
+
+    val_ids = [str(pid) for pid in shuffled[:val_count]]
+    train_ids = [str(pid) for pid in shuffled[val_count:]]
+    return train_ids, val_ids
+
+
+def prepare_single_run_datasets(config: TrainingConfig, export_root: Path) -> Tuple[DatasetArtifacts, Dict[str, Any]]:
+    """Create YOLO-ready train/validation datasets for a single training run."""
+    base_train_dataset = YOLOv11CTDataset(
+        data_dir=config.data_dir,
+        split=config.train_split,
+        include_negative_samples=config.include_negative_samples,
+        max_negative_per_patient=config.max_negative_per_patient,
+        patient_ids=None,
+        image_size=config.imgsz,
+    )
+
+    train_dataset: YOLOv11CTDataset = base_train_dataset
+    val_dataset: Optional[YOLOv11CTDataset] = None
+
+    train_patient_ids = _collect_patient_ids(base_train_dataset)
+    val_patient_ids: List[str] = []
+
+    if config.val_split:
+        val_dataset = YOLOv11CTDataset(
+            data_dir=config.data_dir,
+            split=config.val_split,
+            include_negative_samples=config.include_negative_samples,
+            max_negative_per_patient=config.max_negative_per_patient,
+            patient_ids=None,
+            image_size=config.imgsz,
+        )
+        val_patient_ids = _collect_patient_ids(val_dataset)
+    elif 0.0 < config.val_ratio < 1.0:
+        train_ids, val_ids = _split_patient_ids(train_patient_ids, config.val_ratio)
+        LOGGER.info("Using %.0f%% of training patients for validation (%d train / %d val)", config.val_ratio * 100, len(train_ids), len(val_ids))
+        train_dataset = YOLOv11CTDataset(
+            data_dir=config.data_dir,
+            split=config.train_split,
+            include_negative_samples=config.include_negative_samples,
+            max_negative_per_patient=config.max_negative_per_patient,
+            patient_ids=train_ids,
+            image_size=config.imgsz,
+        )
+        val_dataset = YOLOv11CTDataset(
+            data_dir=config.data_dir,
+            split=config.train_split,  # validation數據也來自train split
+            include_negative_samples=config.include_negative_samples,
+            max_negative_per_patient=config.max_negative_per_patient,
+            patient_ids=val_ids,
+            image_size=config.imgsz,
+        )
+        train_patient_ids = _collect_patient_ids(train_dataset)
+        val_patient_ids = _collect_patient_ids(val_dataset)
+    else:
+        val_dataset = None
+        val_patient_ids = []
+
+    train_stats_label = f"{config.train_split.title()} Split"
+    train_stats = DATASET_STATS_FN(train_dataset.rcnn_dataset, train_stats_label)
+
+    val_stats = None
+    if val_dataset:
+        if config.val_split:
+            val_stats_label = f"{config.val_split.title()} Split"
+        else:
+            val_stats_label = 'Validation Split (from train)'
+        val_stats = DATASET_STATS_FN(val_dataset.rcnn_dataset, val_stats_label)
+
+    export_root.mkdir(parents=True, exist_ok=True)
+    train_config_path = train_dataset.prepare_yolo_format(export_root)
+    val_config_path = val_dataset.prepare_yolo_format(export_root) if val_dataset else None
+    combined_config = _write_combined_dataset_yaml(
+        export_root,
+        Path(train_config_path),
+        Path(val_config_path) if val_config_path else None,
+    )
+
+    train_dataset_size = len(train_dataset.rcnn_dataset)
+    val_dataset_size = len(val_dataset.rcnn_dataset) if val_dataset else 0
+    total_annotations = train_stats.get('total_annotations', 0) + (val_stats.get('total_annotations', 0) if val_stats else 0)
+
+    dataset_statistics = {
+        'train_stats': train_stats,
+        'val_stats': val_stats,
+        'train_patient_ids': train_patient_ids,
+        'val_patient_ids': val_patient_ids,
+        'total_dataset_size': train_dataset_size + val_dataset_size,
+        'total_annotations': total_annotations,
+        'validation_strategy': 'existing_split' if config.val_split else ('ratio_split' if val_dataset else 'none'),
+        'val_ratio': config.val_ratio if not config.val_split else None,
+    }
+
+    if external_save_patient_lists:
+        try:
+            lists_root = export_root / 'patient_lists'
+            lists_root.mkdir(parents=True, exist_ok=True)
+            payload = {
+                'train_patient_ids': train_patient_ids,
+                'val_patient_ids': val_patient_ids,
+                'train_stats': train_stats,
+                'val_stats': val_stats or {},
+                'total_patient_count': len(train_patient_ids) + len(val_patient_ids),
+            }
+            external_save_patient_lists(lists_root, payload)
+        except Exception as exc:  # pragma: no cover - best effort export
+            LOGGER.warning('Failed to save patient lists: %s', exc)
+
+    artifacts = DatasetArtifacts(
+        export_root=export_root,
+        combined_config=combined_config,
+        train_dataset_config=Path(train_config_path),
+        val_dataset_config=Path(val_config_path) if val_config_path else None,
+    )
+
+    return artifacts, dataset_statistics
+
+
+def calculate_yolo_metrics(results: Any) -> Dict[str, float]:
+    """Extract common metrics from Ultralytics validation output."""
+    metrics: Dict[str, float] = {}
+
+    try:
+        if hasattr(results, "results") and results.results:
+            last_result = results.results[-1]
+            box_metrics = getattr(last_result, "box", None)
+            if box_metrics is not None:
+                metrics["precision"] = float(getattr(box_metrics, "p", 0.0))
+                metrics["recall"] = float(getattr(box_metrics, "r", 0.0))
+                metrics["mAP@0.5"] = float(getattr(box_metrics, "map50", 0.0))
+                metrics["mAP@[0.5:0.95]"] = float(getattr(box_metrics, "map", 0.0))
+
+        val_metrics = getattr(results, "val", None)
+        if val_metrics is not None and hasattr(val_metrics, "box"):
+            box_metrics = val_metrics.box
+            metrics.setdefault("precision", float(getattr(box_metrics, "p", 0.0)))
+            metrics.setdefault("recall", float(getattr(box_metrics, "r", 0.0)))
+            metrics.setdefault("mAP@0.5", float(getattr(box_metrics, "map50", 0.0)))
+            metrics.setdefault("mAP@[0.5:0.95]", float(getattr(box_metrics, "map", 0.0)))
+
+        precision = metrics.get("precision", 0.0)
+        recall = metrics.get("recall", 0.0)
+        metrics["f1_score"] = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    except Exception as exc:  # pragma: no cover - defensive logging
+        LOGGER.warning("Failed to extract YOLO metrics: %s", exc)
+
+    return metrics
+
+
+def evaluate_yolo_model(model_path: str, dataset_config: str, device: str = "auto") -> Dict[str, Any]:
+    """Evaluate a trained YOLO model on the validation split."""
+    try:
+        model = YOLO(model_path)
+        val_results = model.val(data=dataset_config, device=device)
+        metrics = calculate_yolo_metrics(val_results)
+        return {"metrics": metrics, "val_results": val_results, "model_path": model_path}
+    except Exception as exc:  # pragma: no cover - evaluation should not crash run
+        LOGGER.error("Validation failed for model %s: %s", model_path, exc)
+        return {"metrics": {}, "error": str(exc)}
+
+
+def run_training(config: TrainingConfig, artifacts: DatasetArtifacts, device: str) -> Tuple[Dict[str, Any], float]:
+    """Train and evaluate a YOLO model once."""
+    start_time = time.time()
+
+    model_name = _resolve_model_name(config.model_size)
+    LOGGER.info("Loading YOLO base model: %s", model_name)
+    model = YOLO(model_name)
+
+    train_args = config.build_train_args(
+        data_config=str(artifacts.combined_config),
+        project_dir=Path(config.save_dir),
+        device=device,
+    )
+
+    LOGGER.info("Starting training with data config %s", artifacts.combined_config)
+    results = model.train(**train_args)
+
+    run_dir = Path(config.save_dir) / train_args["name"]
+    best_model_path = run_dir / "weights" / "best.pt"
+    if not best_model_path.exists():
+        LOGGER.warning("best.pt not found, falling back to last.pt")
+        alternative = run_dir / "weights" / "last.pt"
+        if alternative.exists():
+            best_model_path = alternative
+
+    eval_results = evaluate_yolo_model(str(best_model_path), str(artifacts.combined_config), device=device)
+    elapsed = time.time() - start_time
+
+    run_summary = {
+        "training_time": elapsed,
+        "model_path": str(best_model_path),
+        "config_path": str(artifacts.combined_config),
+        "train_dataset_config": str(artifacts.train_dataset_config),
+        "val_dataset_config": str(artifacts.val_dataset_config) if artifacts.val_dataset_config else None,
+        "metrics": eval_results.get("metrics", {}),
+        "train_args": train_args,
+        "results": results,
+    }
+
+    return run_summary, elapsed
+
+
+def save_results_summary(save_dir: Path, summary: Dict[str, Any]) -> Path:
+    """Persist the aggregated results to JSON."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+    results_file = save_dir / "yolov11_training_results.json"
+    results_file.write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    LOGGER.info("Results saved to %s", results_file)
+    return results_file
+
+
+def log_training_summary(summary: Dict[str, Any]) -> None:
+    """Emit training summary to the logger."""
+    LOGGER.info("\n%s", "=" * 60)
+    LOGGER.info("YOLOv11 training complete")
+    LOGGER.info("%s\n", "=" * 60)
+
+    total_time = summary.get("training_time", 0.0)
+    LOGGER.info("Total training time: %.2f hours", total_time / 3600 if total_time else 0.0)
+
+    metrics = summary.get("metrics", {})
+    if metrics:
+        LOGGER.info("Evaluation metrics:")
+        for key, value in metrics.items():
+            LOGGER.info("  %s: %.3f", key, value)
+
+
+def _train_yolov11_with_config(config: TrainingConfig) -> Dict[str, Any]:
+    """Internal implementation that consumes a TrainingConfig instance."""
+    _validate_dependencies()
+
+    log_file = setup_logging(config.log_dir)
+    LOGGER.info("Log file created at %s", log_file)
+
+    device = select_device()
+    LOGGER.info("Using device: %s", device)
+
+    set_global_seed(config.random_seed)
+
+    save_dir = Path(config.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    export_root = save_dir / "dataset_exports"
+    artifacts, dataset_statistics = prepare_single_run_datasets(config, export_root)
+
+    run_summary, elapsed = run_training(config, artifacts, device)
+
+    summary = {
+        "metrics": run_summary.get("metrics", {}),
+        "training_time": elapsed,
+        "model_path": run_summary.get("model_path"),
+        "config": config.as_dict(),
+        "dataset_statistics": dataset_statistics,
+        "log_file": log_file,
+        "train_args": run_summary.get("train_args", {}),
+        "train_dataset_config": run_summary.get("train_dataset_config"),
+        "val_dataset_config": run_summary.get("val_dataset_config"),
+    }
+
+    results_file = save_results_summary(save_dir, summary)
+    summary["results_file"] = str(results_file)
+
+    log_training_summary(summary)
+
+    return summary
+
+
+def train_yolov11(
+    data_dir: str,
+    num_epochs: int = 100,
+    batch_size: int = 16,
+    learning_rate: float = 0.01,
+    save_dir: str = "./yolov11_models",
+    log_dir: str = "./yolov11_logs",
+    random_seed: int = 42,
+    include_negative_samples: bool = True,
+    max_negative_per_patient: int = 0,
+    imgsz: int = 640,
+    model_size: str = "n",
+    val_ratio: float = 0.2,
+    train_split: str = "train",
+    val_split: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Public API for running a single YOLOv11 training session."""
+    config = TrainingConfig(
         data_dir=data_dir,
-        k_folds=k_folds,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        save_dir=save_dir,
+        log_dir=log_dir,
         random_seed=random_seed,
         include_negative_samples=include_negative_samples,
-        max_negative_per_patient=max_negative_per_patient
+        max_negative_per_patient=max_negative_per_patient,
+        imgsz=imgsz,
+        model_size=model_size,
+        val_ratio=val_ratio,
+        train_split=train_split,
+        val_split=val_split,
     )
-    
-    # 存储所有fold的结果
-    all_fold_results = []
-    
-    # 创建总体进度条
-    fold_pbar = tqdm(
-        fold_datasets,
-        desc="YOLOv11 K-Fold 交叉验证进度",
-        unit="fold",
-        ncols=120
-    )
-    
-    for fold, (train_dataset, val_dataset) in enumerate(fold_pbar):
-        fold_start_time = time.time()
-        
-        logging.info(f"\n{'='*60}")
-        logging.info(f"开始训练 Fold {fold + 1}/{k_folds}")
-        logging.info(f"{'='*60}")
-        
-        # 为当前fold创建数据集配置
-        fold_save_dir = os.path.join(save_dir, f'fold_{fold + 1}')
-        os.makedirs(fold_save_dir, exist_ok=True)
-        
-        # 准备YOLOv11格式数据
-        train_config_path = train_dataset.prepare_yolo_format(fold_save_dir)
-        val_config_path = val_dataset.prepare_yolo_format(fold_save_dir)
-        
-        # 合并训练和验证数据集配置
-        combined_config_path = os.path.join(fold_save_dir, 'combined_dataset.yaml')
-        with open(combined_config_path, 'w') as f:
-            yaml_content = f"""path: {fold_save_dir}
-train: yolo_dataset_train/images/train
-val: yolo_dataset_val/images/val
-
-nc: 1
-names: ['lesion']
-"""
-            f.write(yaml_content)
-        
-        try:
-            # 初始化YOLOv11模型
-            model_name = f'yolov11{model_size}.pt'
-            model = YOLO(model_name)
-            
-            logging.info(f"使用模型: {model_name}")
-            logging.info(f"训练配置文件: {combined_config_path}")
-            
-            # 训练参数
-            train_args = {
-                'data': combined_config_path,
-                'epochs': num_epochs,
-                'batch': batch_size,
-                'lr0': learning_rate,
-                'imgsz': imgsz,
-                'device': device,
-                'project': fold_save_dir,
-                'name': f'fold_{fold + 1}_training',
-                'save': True,
-                'save_period': 10,  # 每10个epoch保存一次
-                'val': True,
-                'plots': True,
-                'verbose': True,
-                'patience': 50,  # 早停耐心值
-                'workers': 4,  # 数据加载进程数
-                'seed': random_seed,
-            }
-            
-            # 开始训练
-            logging.info(f"开始训练 Fold {fold + 1}")
-            results = model.train(**train_args)
-            
-            # 计算训练时间
-            fold_time = time.time() - fold_start_time
-            
-            # 评估模型
-            best_model_path = os.path.join(fold_save_dir, f'fold_{fold + 1}_training', 'weights', 'best.pt')
-            eval_results = evaluate_yolo_model(best_model_path, combined_config_path, device)
-            
-            # 保存fold结果
-            fold_result = {
-                'fold': fold + 1,
-                'training_time': fold_time,
-                'model_path': best_model_path,
-                'config_path': combined_config_path,
-                'metrics': eval_results.get('metrics', {}),
-                'train_args': train_args,
-                'results': results
-            }
-            
-            all_fold_results.append(fold_result)
-            
-            # 更新进度条描述
-            metrics = eval_results.get('metrics', {})
-            f1 = metrics.get('f1_score', 0)
-            map50 = metrics.get('mAP@0.5', 0)
-            fold_pbar.set_postfix({
-                'F1': f'{f1:.3f}', 
-                'mAP@0.5': f'{map50:.3f}',
-                'Time': f'{fold_time/3600:.1f}h'
-            })
-            
-            logging.info(f"Fold {fold + 1} 完成 - F1: {f1:.3f}, mAP@0.5: {map50:.3f}, 用时: {fold_time/3600:.1f}小时")
-            
-        except Exception as e:
-            logging.error(f"Fold {fold + 1} 训练失败: {e}")
-            fold_result = {
-                'fold': fold + 1,
-                'training_time': time.time() - fold_start_time,
-                'error': str(e),
-                'metrics': {}
-            }
-            all_fold_results.append(fold_result)
-            continue
-    
-    fold_pbar.close()
-    
-    # 计算平均结果
-    valid_results = [r for r in all_fold_results if 'error' not in r]
-    
-    if valid_results:
-        avg_metrics = {}
-        for metric in ['precision', 'recall', 'f1_score', 'mAP@0.5', 'mAP@[0.5:0.95]']:
-            values = [r['metrics'].get(metric, 0) for r in valid_results]
-            avg_metrics[metric] = np.mean(values) if values else 0
-            avg_metrics[f'{metric}_std'] = np.std(values) if values else 0
-    else:
-        avg_metrics = {}
-    
-    total_time = sum(result['training_time'] for result in all_fold_results)
-    
-    # 保存结果
-    results_summary = {
-        'average_metrics': avg_metrics,
-        'total_training_time': total_time,
-        'successful_folds': len(valid_results),
-        'total_folds': k_folds,
-        'fold_results': all_fold_results,
-        'config': {
-            'k_folds': k_folds,
-            'num_epochs': num_epochs,
-            'batch_size': batch_size,
-            'learning_rate': learning_rate,
-            'imgsz': imgsz,
-            'model_size': model_size,
-            'include_negative_samples': include_negative_samples,
-            'max_negative_per_patient': max_negative_per_patient
-        },
-        'dataset_statistics': dataset_statistics
-    }
-    
-    # 保存结果到JSON文件
-    results_file = os.path.join(save_dir, 'yolov11_kfold_results.json')
-    with open(results_file, 'w', encoding='utf-8') as f:
-        json.dump(results_summary, f, indent=2, ensure_ascii=False, default=str)
-    
-    # 输出最终结果摘要
-    logging.info(f"\n{'='*60}")
-    logging.info("YOLOv11 K-Fold 交叉验证完成")
-    logging.info(f"{'='*60}")
-    logging.info(f"成功完成的fold数: {len(valid_results)}/{k_folds}")
-    logging.info(f"总训练时间: {total_time/3600:.1f} 小时")
-    
-    if avg_metrics:
-        logging.info(f"平均指标:")
-        for metric, value in avg_metrics.items():
-            if not metric.endswith('_std'):
-                std_value = avg_metrics.get(f'{metric}_std', 0)
-                logging.info(f"  {metric}: {value:.3f} ± {std_value:.3f}")
-    
-    logging.info(f"结果已保存到: {results_file}")
-    
-    return results_summary
+    return _train_yolov11_with_config(config)
 
 
-def main():
-    """主函数"""
+def main() -> None:
+    """Entry point for CLI usage."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description='YOLOv11 K-fold Cross-Validation Training for CT Detection')
-    parser.add_argument('--data_dir', type=str, required=True, help='数据目录路径')
-    parser.add_argument('--k_folds', type=int, default=5, help='K折数量')
-    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=16, help='批次大小')
-    parser.add_argument('--lr', type=float, default=0.01, help='学习率')
-    parser.add_argument('--save_dir', type=str, default='./yolov11_models', help='模型保存目录')
-    parser.add_argument('--log_dir', type=str, default='./yolov11_logs', help='日志目录')
-    parser.add_argument('--seed', type=int, default=42, help='随机种子')
-    parser.add_argument('--include_negative', action='store_true', help='是否包含负样本')
-    parser.add_argument('--max_negative', type=int, default=0, help='每个病例最大负样本数')
-    parser.add_argument('--imgsz', type=int, default=640, help='图像尺寸')
-    parser.add_argument('--model_size', type=str, default='n', choices=['n', 's', 'm', 'l', 'x'], help='模型大小')
-    
+
+    parser = argparse.ArgumentParser(
+        description="YOLOv11 Training for CT Detection"
+    )
+    parser.add_argument("--data_dir", type=str, required=True, help="Path to dataset root directory")
+    parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
+    parser.add_argument("--lr", type=float, default=0.01, help="Initial learning rate")
+    parser.add_argument("--save_dir", type=str, default="./yolov11_models", help="Directory to store trained models")
+    parser.add_argument("--log_dir", type=str, default="./yolov11_logs", help="Directory to store logs")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument(
+        "--include_negative",
+        action="store_true",
+        help="Include negative samples during training",
+    )
+    parser.add_argument(
+        "--max_negative",
+        type=int,
+        default=0,
+        help="Maximum negative samples per patient (0 for no limit)",
+    )
+    parser.add_argument("--imgsz", type=int, default=640, help="Input image size for YOLO")
+    parser.add_argument(
+        "--model_size",
+        type=str,
+        default="n",
+        choices=["n", "s", "m", "l", "x"],
+        help="YOLOv11 model variant",
+    )
+    parser.add_argument(
+        "--train_split",
+        type=str,
+        default="train",
+        help="Dataset split name used for training",
+    )
+    parser.add_argument(
+        "--val_split",
+        type=str,
+        default="",
+        help="Dataset split name used for validation (set empty string to use val_ratio from train split)",
+    )
+    parser.add_argument(
+        "--val_ratio",
+        type=float,
+        default=0.2,
+        help="Ratio of training patients allocated to validation when --val_split is disabled",
+    )
+
     args = parser.parse_args()
-    
-    # 检查ultralytics是否可用
+
     if not ULTRALYTICS_AVAILABLE:
-        print("错误: 请安装ultralytics库")
-        print("安装命令: pip install ultralytics")
-        return
-    
-    # 开始训练
-    results = train_yolov11_kfold(
+        print("Error: ultralytics package not installed. Install with: pip install ultralytics")
+        sys.exit(1)
+
+    val_split = args.val_split or None
+
+    summary = train_yolov11(
         data_dir=args.data_dir,
-        k_folds=args.k_folds,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
@@ -788,10 +845,13 @@ def main():
         include_negative_samples=args.include_negative,
         max_negative_per_patient=args.max_negative,
         imgsz=args.imgsz,
-        model_size=args.model_size
+        model_size=args.model_size,
+        val_ratio=args.val_ratio,
+        train_split=args.train_split,
+        val_split=val_split,
     )
-    
-    print(f"\n训练完成! 结果保存在: {args.save_dir}")
+
+    print("\nTraining complete! Results saved to:", summary.get("results_file", args.save_dir))
 
 
 if __name__ == "__main__":
