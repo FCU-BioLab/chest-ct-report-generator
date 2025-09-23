@@ -127,7 +127,7 @@ def main():
     if success:
         print("\n🎉 測試成功！特徵提取功能正常工作")
         print("\n現在可以運行完整測試:")
-        print("python detection\\test_detection.py --split test")
+        print("python detection\\faster_rcnn_detection\\test_detection.py --split test")
     else:
         print("\n💥 測試失敗，請檢查錯誤信息")
     

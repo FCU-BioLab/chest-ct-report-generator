@@ -32,8 +32,8 @@ import pickle
 # 添加上級目錄到路徑
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from faster_rcnn_model import FasterRCNN
-from faster_rcnn_dataset import CTDetectionDataset
+from faster_rcnn_detection.faster_rcnn_model import FasterRCNN
+from faster_rcnn_detection.faster_rcnn_dataset import CTDetectionDataset
 
 
 class DeepFeatureExtractor(nn.Module):

@@ -68,7 +68,7 @@ def check_limits_quick():
             print("   ⚠️  faster_rcnn_dataset.py: 可能仍有檔案限制")
     
     # 檢查 train_detection.py
-    train_file = 'train_detection.py'
+    train_file = 'faster_rcnn_detection/train_detection.py'
     if os.path.exists(train_file):
         with open(train_file, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -86,7 +86,7 @@ def check_limits_quick():
     # 3. 測試單一樣本載入
     print("\n🔍 3. 單一樣本測試:")
     try:
-        from faster_rcnn_dataset import CTDetectionDataset
+        from faster_rcnn_detection.faster_rcnn_dataset import CTDetectionDataset
         
         # 只載入第一個患者進行測試
         first_patient = patients[0] if patients else None
@@ -121,8 +121,8 @@ def check_limits_quick():
     # 5. 下一步操作
     print("\n📋 5. 建議的下一步:")
     print("   1️⃣  python test_small_scale.py  # 測試小規模載入")
-    print("   2️⃣  python train_detection.py --mode custom --num_epochs 5  # 短期訓練測試")
-    print("   3️⃣  python train_detection.py --mode traditional  # 完整訓練")
+    print("   2️⃣  python faster_rcnn_detection/train_detection.py --mode custom --num_epochs 5  # 短期訓練測試")
+    print("   3️⃣  python faster_rcnn_detection/train_detection.py --mode traditional  # 完整訓練")
     
     print("\n" + "="*60)
     print("✅ 快速檢查完成！")

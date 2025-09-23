@@ -186,7 +186,7 @@ def main():
         print(f"└── feature_summary_report.md")
         
         print(f"\n現在可以運行:")
-        print(f"python detection\\test_detection.py --split test")
+        print(f"python detection\\faster_rcnn_detection\\test_detection.py --split test")
     else:
         print(f"\n💥 測試失敗")
     
