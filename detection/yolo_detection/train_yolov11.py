@@ -292,22 +292,24 @@ class YOLOv11CTDataset:
 
         self.samples = self.rcnn_dataset.samples
 
-    def prepare_yolo_format(self, output_dir: Path) -> Path:
+    def prepare_yolo_format(self, output_dir: Path, dataset_type: str = None) -> Path:
         """Convert samples to YOLO format and persist to disk."""
         if not CV2_AVAILABLE:
             raise RuntimeError("OpenCV (cv2) is required to write YOLO format images.")
 
-        base_dir = Path(output_dir) / f"yolo_dataset_{self.split}"
-        images_dir = base_dir / "images" / self.split
-        labels_dir = base_dir / "labels" / self.split
+        # Use dataset_type if provided, otherwise use self.split
+        dir_name = dataset_type if dataset_type else self.split
+        base_dir = Path(output_dir) / f"yolo_dataset_{dir_name}"
+        images_dir = base_dir / "images" / dir_name
+        labels_dir = base_dir / "labels" / dir_name
 
         images_dir.mkdir(parents=True, exist_ok=True)
         labels_dir.mkdir(parents=True, exist_ok=True)
 
-        LOGGER.info("Preparing YOLOv11 dataset for %s split at %s", self.split, base_dir)
+        LOGGER.info("Preparing YOLOv11 dataset for %s split at %s", dir_name, base_dir)
 
         for idx, sample in enumerate(
-            tqdm(self.samples, desc=f"Converting {self.split} data", leave=False)
+            tqdm(self.samples, desc=f"Converting {dir_name} data", leave=False)
         ):
             item = self.rcnn_dataset[idx]
             image_tensor = item["image"]
@@ -358,8 +360,8 @@ class YOLOv11CTDataset:
             textwrap.dedent(
                 f"""
                 path: {base_dir}
-                train: images/{self.split if self.split == 'train' else 'train'}
-                val: images/{self.split if self.split == 'val' else 'val'}
+                train: images/{dir_name if dir_name == 'train' else 'train'}
+                val: images/{dir_name if dir_name == 'val' else 'val'}
 
                 nc: 1
                 names: ['lesion']
@@ -435,10 +437,14 @@ def _write_combined_dataset_yaml(export_root: Path, train_config: Path, val_conf
     """Create a dataset.yaml that references train and validation splits."""
     combined_config = export_root / "combined_dataset.yaml"
 
+    # For train dataset
     train_images = (train_config.parent / "images" / "train").resolve()
+    
+    # For validation dataset - check if we have a separate validation config
     if val_config:
         val_images = (val_config.parent / "images" / "val").resolve()
     else:
+        # If no separate validation config, use the same as training
         val_images = train_images
 
     train_rel = Path(os.path.relpath(train_images, export_root)).as_posix()
@@ -554,8 +560,8 @@ def prepare_single_run_datasets(config: TrainingConfig, export_root: Path) -> Tu
         val_stats = DATASET_STATS_FN(val_dataset.rcnn_dataset, val_stats_label)
 
     export_root.mkdir(parents=True, exist_ok=True)
-    train_config_path = train_dataset.prepare_yolo_format(export_root)
-    val_config_path = val_dataset.prepare_yolo_format(export_root) if val_dataset else None
+    train_config_path = train_dataset.prepare_yolo_format(export_root, "train")
+    val_config_path = val_dataset.prepare_yolo_format(export_root, "val") if val_dataset else None
     combined_config = _write_combined_dataset_yaml(
         export_root,
         Path(train_config_path),
