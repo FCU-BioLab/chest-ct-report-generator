@@ -411,7 +411,24 @@ def _resolve_model_name(model_size: str) -> str:
     valid_sizes = {"n", "s", "m", "l", "x"}
     if model_size not in valid_sizes:
         raise ValueError(f"Unsupported model_size '{model_size}'. Expected one of {sorted(valid_sizes)}")
-    return f"yolov11{model_size}.pt"
+    
+    # Try to find model files in yolo_detection/models directory first
+    current_dir = Path(__file__).resolve().parent
+    models_dir = current_dir / "models"
+    model_filename = f"yolo11{model_size}.pt"  # Note: no 'v' in filename
+    local_model_path = models_dir / model_filename
+    
+    if local_model_path.exists():
+        return str(local_model_path)
+    
+    # Try repository root as fallback
+    repo_model_path = REPO_ROOT / model_filename
+    if repo_model_path.exists():
+        return str(repo_model_path)
+    
+    # Fallback to standard YOLOv11 naming (with 'v') - will download if needed
+    standard_name = f"yolov11{model_size}.pt"
+    return standard_name
 
 
 def _write_combined_dataset_yaml(export_root: Path, train_config: Path, val_config: Optional[Path]) -> Path:
@@ -797,7 +814,7 @@ def main() -> None:
     parser.add_argument(
         "--max_negative",
         type=int,
-        default=20,
+        default=40,
         help="Maximum negative samples per patient (0 for no limit)",
     )
     parser.add_argument("--imgsz", type=int, default=640, help="Input image size for YOLO")
