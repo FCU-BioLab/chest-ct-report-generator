@@ -15,6 +15,6 @@ detection/yolo_detection/yolov11_*
 *.pt
 temp
 **/*pycache*/
-**/results/
+**/*results/
 **/checkpoints/
-**/logs/
+**/*logs/

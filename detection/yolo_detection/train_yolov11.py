@@ -790,13 +790,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument(
         "--include_negative",
+        default=True,
         action="store_true",
         help="Include negative samples during training",
     )
     parser.add_argument(
         "--max_negative",
         type=int,
-        default=0,
+        default=20,
         help="Maximum negative samples per patient (0 for no limit)",
     )
     parser.add_argument("--imgsz", type=int, default=640, help="Input image size for YOLO")
