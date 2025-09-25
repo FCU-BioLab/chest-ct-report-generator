@@ -113,9 +113,9 @@ class TrainingConfig:
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-    def build_train_args(self, data_config: str, project_dir: Path, device: str) -> Dict[str, Any]:
+    def build_train_args(self, data_config: str, project_dir: Path, device: str, timestamp: str) -> Dict[str, Any]:
         """Compose Ultralytics training arguments."""
-        run_name = "training_run"
+        run_name = f"training_run_{timestamp}"
         return {
             "data": data_config,
             "epochs": self.num_epochs,
@@ -613,28 +613,75 @@ def calculate_yolo_metrics(results: Any) -> Dict[str, float]:
     metrics: Dict[str, float] = {}
 
     try:
-        if hasattr(results, "results") and results.results:
-            last_result = results.results[-1]
-            box_metrics = getattr(last_result, "box", None)
-            if box_metrics is not None:
-                metrics["precision"] = float(getattr(box_metrics, "p", 0.0))
-                metrics["recall"] = float(getattr(box_metrics, "r", 0.0))
-                metrics["mAP@0.5"] = float(getattr(box_metrics, "map50", 0.0))
-                metrics["mAP@[0.5:0.95]"] = float(getattr(box_metrics, "map", 0.0))
-
-        val_metrics = getattr(results, "val", None)
-        if val_metrics is not None and hasattr(val_metrics, "box"):
-            box_metrics = val_metrics.box
-            metrics.setdefault("precision", float(getattr(box_metrics, "p", 0.0)))
-            metrics.setdefault("recall", float(getattr(box_metrics, "r", 0.0)))
-            metrics.setdefault("mAP@0.5", float(getattr(box_metrics, "map50", 0.0)))
-            metrics.setdefault("mAP@[0.5:0.95]", float(getattr(box_metrics, "map", 0.0)))
-
+        LOGGER.info("Debug: results type = %s", type(results))
+        LOGGER.info("Debug: results attributes = %s", [attr for attr in dir(results) if not attr.startswith('_')])
+        
+        # Check if results has box attribute and inspect it
+        if hasattr(results, "box") and results.box is not None:
+            box = results.box
+            LOGGER.info("Debug: box type = %s", type(box))
+            LOGGER.info("Debug: box attributes = %s", [attr for attr in dir(box) if not attr.startswith('_')])
+            
+            # Try to access metrics directly
+            try:
+                p = getattr(box, "p", None)
+                r = getattr(box, "r", None)
+                map50 = getattr(box, "map50", None)
+                map_all = getattr(box, "map", None)
+                
+                LOGGER.info("Debug: p = %s (type: %s)", p, type(p))
+                LOGGER.info("Debug: r = %s (type: %s)", r, type(r))
+                LOGGER.info("Debug: map50 = %s (type: %s)", map50, type(map50))
+                LOGGER.info("Debug: map = %s (type: %s)", map_all, type(map_all))
+                
+                # Extract scalar values safely
+                def safe_extract(value, default=0.0):
+                    if value is None:
+                        return default
+                    if hasattr(value, 'item'):
+                        return float(value.item())
+                    elif hasattr(value, '__getitem__') and hasattr(value, '__len__'):
+                        if len(value) > 0:
+                            return float(value[-1]) if hasattr(value[-1], '__float__') else float(value[-1].item() if hasattr(value[-1], 'item') else value[-1])
+                        else:
+                            return default
+                    else:
+                        return float(value)
+                
+                metrics["precision"] = safe_extract(p)
+                metrics["recall"] = safe_extract(r)
+                metrics["mAP@0.5"] = safe_extract(map50)
+                metrics["mAP@[0.5:0.95]"] = safe_extract(map_all)
+                
+                LOGGER.info("Extracted metrics from results.box: precision=%.3f, recall=%.3f, mAP50=%.3f, mAP=%.3f", 
+                           metrics["precision"], metrics["recall"], metrics["mAP@0.5"], metrics["mAP@[0.5:0.95]"])
+                
+            except Exception as e:
+                LOGGER.error("Error extracting from box: %s", e)
+                
+        # Calculate F1 score
         precision = metrics.get("precision", 0.0)
         recall = metrics.get("recall", 0.0)
-        metrics["f1_score"] = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
-    except Exception as exc:  # pragma: no cover - defensive logging
-        LOGGER.warning("Failed to extract YOLO metrics: %s", exc)
+        if precision > 0.0 and recall > 0.0:
+            metrics["f1_score"] = (2 * precision * recall) / (precision + recall)
+        else:
+            metrics["f1_score"] = 0.0
+
+        LOGGER.info("Final calculated F1 score: %.3f (precision=%.3f, recall=%.3f)", 
+                   metrics["f1_score"], precision, recall)
+
+    except Exception as exc:
+        LOGGER.error("Failed to extract YOLO metrics: %s", exc)
+        # Return default metrics
+        metrics = {
+            "precision": 0.0,
+            "recall": 0.0,
+            "mAP@0.5": 0.0,
+            "mAP@[0.5:0.95]": 0.0,
+            "f1_score": 0.0
+        }
+
+    return metrics
 
     return metrics
 
@@ -642,16 +689,24 @@ def calculate_yolo_metrics(results: Any) -> Dict[str, float]:
 def evaluate_yolo_model(model_path: str, dataset_config: str, device: str = "auto") -> Dict[str, Any]:
     """Evaluate a trained YOLO model on the validation split."""
     try:
+        LOGGER.info("Starting model evaluation with model: %s", model_path)
         model = YOLO(model_path)
-        val_results = model.val(data=dataset_config, device=device)
+        val_results = model.val(data=dataset_config, device=device, verbose=False)
+        
+        LOGGER.info("Validation completed, extracting metrics...")
         metrics = calculate_yolo_metrics(val_results)
+        
+        # Log the raw results for debugging
+        LOGGER.info("Raw validation results type: %s", type(val_results))
+        LOGGER.info("Extracted metrics: %s", metrics)
+        
         return {"metrics": metrics, "val_results": val_results, "model_path": model_path}
-    except Exception as exc:  # pragma: no cover - evaluation should not crash run
+    except Exception as exc:
         LOGGER.error("Validation failed for model %s: %s", model_path, exc)
         return {"metrics": {}, "error": str(exc)}
 
 
-def run_training(config: TrainingConfig, artifacts: DatasetArtifacts, device: str) -> Tuple[Dict[str, Any], float]:
+def run_training(config: TrainingConfig, artifacts: DatasetArtifacts, device: str, save_dir: Path, timestamp: str) -> Tuple[Dict[str, Any], float]:
     """Train and evaluate a YOLO model once."""
     start_time = time.time()
 
@@ -661,14 +716,15 @@ def run_training(config: TrainingConfig, artifacts: DatasetArtifacts, device: st
 
     train_args = config.build_train_args(
         data_config=str(artifacts.combined_config),
-        project_dir=Path(config.save_dir),
+        project_dir=save_dir,
         device=device,
+        timestamp=timestamp,
     )
 
     LOGGER.info("Starting training with data config %s", artifacts.combined_config)
     results = model.train(**train_args)
 
-    run_dir = Path(config.save_dir) / train_args["name"]
+    run_dir = save_dir / train_args["name"]
     best_model_path = run_dir / "weights" / "best.pt"
     if not best_model_path.exists():
         LOGGER.warning("best.pt not found, falling back to last.pt")
@@ -693,10 +749,10 @@ def run_training(config: TrainingConfig, artifacts: DatasetArtifacts, device: st
     return run_summary, elapsed
 
 
-def save_results_summary(save_dir: Path, summary: Dict[str, Any]) -> Path:
+def save_results_summary(save_dir: Path, summary: Dict[str, Any], timestamp: str) -> Path:
     """Persist the aggregated results to JSON."""
     save_dir.mkdir(parents=True, exist_ok=True)
-    results_file = save_dir / "yolov11_training_results.json"
+    results_file = save_dir / f"yolov11_training_results_{timestamp}.json"
     results_file.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
@@ -733,13 +789,17 @@ def _train_yolov11_with_config(config: TrainingConfig) -> Dict[str, Any]:
 
     set_global_seed(config.random_seed)
 
-    save_dir = Path(config.save_dir)
+    # Create timestamped save directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_save_dir = Path(config.save_dir)
+    save_dir = base_save_dir / f"run_{timestamp}"
     save_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("Created timestamped save directory: %s", save_dir)
 
     export_root = save_dir / "dataset_exports"
     artifacts, dataset_statistics = prepare_single_run_datasets(config, export_root)
 
-    run_summary, elapsed = run_training(config, artifacts, device)
+    run_summary, elapsed = run_training(config, artifacts, device, save_dir, timestamp)
 
     summary = {
         "metrics": run_summary.get("metrics", {}),
@@ -753,7 +813,7 @@ def _train_yolov11_with_config(config: TrainingConfig) -> Dict[str, Any]:
         "val_dataset_config": run_summary.get("val_dataset_config"),
     }
 
-    results_file = save_results_summary(save_dir, summary)
+    results_file = save_results_summary(save_dir, summary, timestamp)
     summary["results_file"] = str(results_file)
 
     log_training_summary(summary)
@@ -806,7 +866,7 @@ def main() -> None:
     )
     parser.add_argument("--data_dir", type=str, required=True, help="Path to dataset root directory")
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.01, help="Initial learning rate")
     parser.add_argument("--save_dir", type=str, default="./yolov11_models", help="Directory to store trained models")
     parser.add_argument("--log_dir", type=str, default="./yolov11_logs", help="Directory to store logs")
@@ -827,7 +887,7 @@ def main() -> None:
     parser.add_argument(
         "--model_size",
         type=str,
-        default="n",
+        default="s",
         choices=["n", "s", "m", "l", "x"],
         help="YOLOv11 model variant",
     )

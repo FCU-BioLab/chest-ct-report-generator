@@ -13,6 +13,7 @@ detection/test_logs*
 detection/test_results*
 detection/yolo_detection/yolov11_*
 detection/yolo_detection/yolov11_models/dataset_exports
+runs
 *.pt
 temp
 **/*pycache*/
