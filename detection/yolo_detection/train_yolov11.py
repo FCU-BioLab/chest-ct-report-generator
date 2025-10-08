@@ -865,8 +865,8 @@ def main() -> None:
         description="YOLOv11 Training for CT Detection"
     )
     parser.add_argument("--data_dir", type=str, required=True, help="Path to dataset root directory")
-    parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=300, help="Training epochs")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.01, help="Initial learning rate")
     parser.add_argument("--save_dir", type=str, default="./yolov11_models", help="Directory to store trained models")
     parser.add_argument("--log_dir", type=str, default="./yolov11_logs", help="Directory to store logs")
@@ -887,7 +887,7 @@ def main() -> None:
     parser.add_argument(
         "--model_size",
         type=str,
-        default="s",
+        default="n",
         choices=["n", "s", "m", "l", "x"],
         help="YOLOv11 model variant",
     )

@@ -1,0 +1,26 @@
+# YOLOv8 Medical CT Tumor Detection Requirements
+
+# Core Dependencies
+ultralytics>=8.0.0        # YOLOv8 framework
+torch>=2.0.0              # PyTorch
+torchvision>=0.15.0       # Torchvision for transforms
+numpy>=1.24.0             # Numerical computing
+opencv-python>=4.8.0      # Image processing
+
+# Medical Imaging
+pydicom>=2.4.0            # DICOM file handling
+albumentations>=1.3.0     # Advanced data augmentation
+
+# Optional but Recommended
+matplotlib>=3.7.0         # Plotting and visualization
+seaborn>=0.12.0          # Statistical visualization
+pandas>=2.0.0            # Data analysis
+Pillow>=10.0.0           # Image handling
+scikit-learn>=1.3.0      # Metrics and utilities
+tqdm>=4.65.0             # Progress bars
+
+# Development Tools (Optional)
+pytest>=7.4.0            # Testing
+black>=23.7.0            # Code formatting
+flake8>=6.1.0            # Linting
+mypy>=1.5.0              # Type checking
