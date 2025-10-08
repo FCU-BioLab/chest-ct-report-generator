@@ -1,6 +1,6 @@
 # Chest CT Report Generator - Unified Requirements
-# Includes support for both Faster R-CNN and YOLOv11 detection models
-# Updated 2025-09-06: Added YOLOv11 support
+# Includes support for Faster R-CNN, YOLOv7, YOLOv8, and YOLOv11 detection models
+# Updated 2025-10-08: Consolidated YOLOv7 and YOLOv8 medical CT requirements
 
 # Core ML/DL Libraries
 torch>=2.1.0
@@ -9,13 +9,13 @@ transformers>=4.35.0
 
 # Computer Vision and Image Processing
 opencv-python>=4.8.0
-Pillow>=9.5.0
-pydicom>=2.4.0
+Pillow>=10.0.0
 segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
 
 # Medical Image Processing
 SimpleITK>=2.2.0
 nibabel>=5.1.0
+pydicom>=2.4.0  # DICOM file handling (required for medical CT processing)
 
 # Data Science and Analysis
 numpy>=1.24.0
@@ -29,9 +29,7 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 tensorboard>=2.13.0
 plotly>=5.15.0
-albumentations>=1.3.0  # Advanced image augmentation for YOLO training
-
-# Additional visualization dependencies for detection module
+albumentations>=1.3.0  # Advanced image augmentation for YOLO/medical CT training
 matplotlib-inline>=0.1.6
 
 # ML Training and Fine-tuning
@@ -40,22 +38,30 @@ peft
 huggingface_hub
 accelerate>=0.20.0
 evaluate>=0.4.0
-wandb>=0.15.0
+wandb>=0.15.0  # Experiment tracking (supports YOLOv7 training)
 
 # Utilities and Progress
 tqdm>=4.65.0
-pyyaml>=6.0
+PyYAML>=6.0  # YAML config parsing (required for YOLOv7)
 colorlog>=6.7.0
 wget>=3.2
 gdown>=4.7.0
 psutil>=5.9.0  # System monitoring during training
 
 # Object Detection and YOLO
-ultralytics>=8.0.0  # YOLOv11 and other YOLO variants
+ultralytics>=8.0.0  # YOLOv8/YOLOv11 framework (medical CT tumor detection)
 roboflow  # Dataset management and augmentation (optional)
 supervision>=0.14.0  # Computer vision utilities (optional)
 onnx>=1.14.0  # ONNX model export for deployment
 onnxruntime>=1.15.0  # ONNX runtime for inference
+
+# YOLOv7 Native Support (for train_yolov7_medical.py)
+# Note: YOLOv7 uses native PyTorch implementation (not Ultralytics)
+# All required dependencies already included above:
+# - torch, torchvision, numpy, opencv-python, PyYAML, tqdm
+# - pydicom, SimpleITK (medical imaging)
+# - matplotlib, seaborn (visualization)
+# - tensorboard, wandb (monitoring)
 
 # RAG and Embeddings
 faiss-cpu
@@ -67,6 +73,12 @@ ollama
 # GUI and PDF Processing
 PyQt6
 pymupdf
+
+# Development Tools (Optional)
+pytest>=7.4.0  # Testing framework
+black>=23.7.0  # Code formatting
+flake8>=6.1.0  # Linting
+mypy>=1.5.0  # Type checking
 
 # Packaging
 pyinstaller
