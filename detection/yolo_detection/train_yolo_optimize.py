@@ -1070,11 +1070,11 @@ def main() -> None:
     parser.add_argument("--max_negative", type=int, default=20, help="Max negative samples per patient (0 = no limit)")
 
     # Training parameters
-    parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-    parser.add_argument("--lr", type=float, default=5e-4, help="Initial learning rate")
+    parser.add_argument("--epochs", type=int, default=200, help="Training epochs")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
+    parser.add_argument("--lr", type=float, default=7e-4, help="Initial learning rate")
     parser.add_argument("--imgsz", type=int, default=640, help="Input image size for YOLO")
-    parser.add_argument("--model_size", type=str, default="m", choices=["n", "s", "m", "l", "x"], help="YOLO model size")
+    parser.add_argument("--model_size", type=str, default="n", choices=["n", "s", "m", "l", "x"], help="YOLO model size")
 
     # Optimizer parameters
     parser.add_argument("--optimizer", type=str, default="AdamW", choices=["SGD", "Adam", "AdamW"], help="Optimizer type")
@@ -1085,21 +1085,21 @@ def main() -> None:
     parser.add_argument("--ema", type=int, default=1, help="Use EMA (1/0)")
 
     # Detection parameters
-    parser.add_argument("--conf_threshold", type=float, default=0.25, help="Confidence threshold")
-    parser.add_argument("--iou_threshold", type=float, default=0.45, help="NMS IoU threshold")
+    parser.add_argument("--conf_threshold", type=float, default=0.15, help="Confidence threshold")
+    parser.add_argument("--iou_threshold", type=float, default=0.55, help="NMS IoU threshold")
 
     # Augmentation parameters
-    parser.add_argument("--mosaic", type=float, default=0.5, help="Mosaic augmentation probability")
-    parser.add_argument("--mixup", type=float, default=0.1, help="MixUp augmentation probability")
-    parser.add_argument("--copy_paste", type=float, default=0.1, help="Copy-paste augmentation probability")
-    parser.add_argument("--scale", type=float, default=0.1, help="Scale gain")
+    parser.add_argument("--mosaic", type=float, default=0.7, help="Mosaic augmentation probability")
+    parser.add_argument("--mixup", type=float, default=0.15, help="MixUp augmentation probability")
+    parser.add_argument("--copy_paste", type=float, default=0.2, help="Copy-paste augmentation probability")
+    parser.add_argument("--scale", type=float, default=0.2, help="Scale gain")
     parser.add_argument("--fliplr", type=float, default=0.5, help="Horizontal flip prob")
     parser.add_argument("--flipud", type=float, default=0.0, help="Vertical flip prob")
     parser.add_argument("--degrees", type=float, default=0.0, help="Rotation degrees")
     parser.add_argument("--translate", type=float, default=0.05, help="Translate fraction")
     parser.add_argument("--perspective", type=float, default=0.0, help="Perspective")
     parser.add_argument("--multi_scale", type=int, default=1, help="Use multi-scale (1/0)")
-    parser.add_argument("--close_mosaic_last_n", type=int, default=10, help="Close mosaic in last N epochs")
+    parser.add_argument("--close_mosaic_last_n", type=int, default=20, help="Close mosaic in last N epochs")
 
     # Output parameters
     parser.add_argument("--save_dir", type=str, default="./yolov11_models", help="Directory to store trained models")
