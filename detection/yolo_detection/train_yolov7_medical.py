@@ -11,8 +11,11 @@ Converted from YOLOv11 Ultralytics API to YOLOv7 native training with:
 - EMA and advanced training techniques
 
 Usage:
-    python train_yolov7_medical.py --data_dir ./datasets/ct_data --epochs 120 \\
-        --use_medical_modules --enable_hu_windowing 1
+    # With medical modules (default config includes medical modules)
+    python train_yolov7_medical.py --data_dir ./datasets/ct_data --epochs 120 --use_medical_modules
+    
+    # Without medical modules
+    python train_yolov7_medical.py --data_dir ./datasets/ct_data --epochs 120 --no_medical_modules
 """
 
 from __future__ import annotations
@@ -57,13 +60,22 @@ from yolov7_utils import (
     compute_metrics,
 )
 
+# Try to import evaluation visualizer
+try:
+    from yolov7_eval_visualizer import YOLOv7EvalVisualizer
+    VISUALIZER_AVAILABLE = True
+except ImportError:
+    VISUALIZER_AVAILABLE = False
+    LOGGER = logging.getLogger(__name__)
+    LOGGER.warning("YOLOv7EvalVisualizer not available, evaluation visualization disabled")
+
 LOGGER = logging.getLogger(__name__)
 
 
 # ==================== Configuration ====================
 @dataclass
 class TrainingConfig:
-    """Training configuration for YOLOv7"""
+    """Training configuration for YOLOv7 with Enhanced Features"""
     
     # Data parameters
     data_dir: str
@@ -75,7 +87,8 @@ class TrainingConfig:
     
     # Training parameters
     num_epochs: int = 120
-    batch_size: int = 16
+    batch_size: int = 8  # Enhanced: increased from 4 to 8
+    accumulation_steps: int = 4  # Enhanced: gradient accumulation for effective batch=32
     learning_rate: float = 0.001
     imgsz: int = 640
     
@@ -85,7 +98,7 @@ class TrainingConfig:
     pretrained_weights: Optional[str] = None
     
     # Optimizer parameters
-    optimizer_type: str = "Adam"  # SGD, Adam, AdamW
+    optimizer_type: str = "AdamW"  # Enhanced: AdamW for better convergence
     weight_decay: float = 5e-4
     momentum: float = 0.937
     warmup_epochs: int = 5
@@ -100,6 +113,23 @@ class TrainingConfig:
     clahe_tile_grid: int = 8
     robust_percentile_stretch: bool = True
     
+    # Enhanced: Augmentation parameters
+    enable_augmentation: bool = True
+    mosaic_prob: float = 0.5
+    mixup_prob: float = 0.3
+    copy_paste_prob: float = 0.3
+    cache_images: bool = False
+    
+    # Enhanced: Positive sample oversampling
+    positive_oversample: bool = True
+    positive_ratio: float = 0.7  # 70% positive samples
+    
+    # Enhanced: Loss configuration
+    cls_loss_gain: float = 1.8  # Enhanced for small lesions
+    use_focal_loss: bool = True
+    focal_alpha: float = 0.25
+    focal_gamma: float = 2.0
+    
     # Advanced training
     use_ema: bool = True
     ema_decay: float = 0.9999
@@ -107,13 +137,21 @@ class TrainingConfig:
     mixed_precision: bool = True
     multi_scale: bool = True
     
+    # Enhanced: Evaluation & Visualization
+    eval_interval: int = 1
+    save_interval: int = 5
+    visualize_predictions: bool = True  # Per-epoch visualization
+    vis_conf_threshold: float = 0.001  # Low threshold for diagnosis
+    vis_nms_iou: float = 0.45
+    num_vis_samples: int = 20
+    
     # Output directories
-    save_dir: str = "./yolov7_models"
-    log_dir: str = "./yolov7_logs"
+    save_dir: str = "./yolov7_logs/runs"
+    log_dir: str = "./yolov7_logs/logs"
     
     # Misc
     random_seed: int = 42
-    num_workers: int = 4
+    num_workers: int = 4  # Enhanced: increased from 0 to 4
     device: str = ""  # Empty = auto-select
     
     def as_dict(self) -> Dict[str, Any]:
@@ -232,7 +270,7 @@ def create_dataloaders(
     """
     LOGGER.info("Creating dataloaders with medical preprocessing...")
     
-    # Training dataloader
+    # Training dataloader with enhanced features
     train_loader = create_yolov7_dataloader(
         dataset=train_dataset,
         batch_size=config.batch_size,
@@ -247,7 +285,13 @@ def create_dataloaders(
         clahe_clip_limit=config.clahe_clip_limit,
         clahe_tile_size=config.clahe_tile_grid,
         robust_percentile_stretch=config.robust_percentile_stretch,
-        augment=True,
+        augment=config.enable_augmentation,  # Enhanced
+        mosaic_prob=config.mosaic_prob,  # Enhanced
+        mixup_prob=config.mixup_prob,  # Enhanced
+        copy_paste_prob=config.copy_paste_prob,  # Enhanced
+        cache_images=config.cache_images,  # Enhanced
+        positive_oversample=config.positive_oversample,  # Enhanced
+        positive_ratio=config.positive_ratio,  # Enhanced
     )
     
     # Validation dataloader
@@ -266,6 +310,7 @@ def create_dataloaders(
         clahe_tile_size=config.clahe_tile_grid,
         robust_percentile_stretch=config.robust_percentile_stretch,
         augment=False,
+        positive_oversample=False,  # No oversampling for validation
     )
     
     return train_loader, val_loader
@@ -307,6 +352,9 @@ def train_one_epoch(
     obj_loss = 0.0
     cls_loss = 0.0
     
+    # Enhanced: Gradient accumulation - zero grad at start
+    optimizer.zero_grad()
+    
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{config.num_epochs}")
     
     for batch_idx, (images, targets, metadata) in enumerate(pbar):
@@ -318,45 +366,51 @@ def train_one_epoch(
             with amp.autocast():
                 outputs = model(images)
                 loss, loss_items = loss_fn(outputs, targets)
+                loss = loss / config.accumulation_steps  # Enhanced: Scale loss for accumulation
         else:
             outputs = model(images)
             loss, loss_items = loss_fn(outputs, targets)
+            loss = loss / config.accumulation_steps  # Enhanced: Scale loss for accumulation
         
         # Backward pass
-        optimizer.zero_grad()
-        
         if config.mixed_precision and scaler is not None:
             scaler.scale(loss).backward()
             
-            # Gradient clipping
-            if config.gradient_clip > 0:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
-            
-            scaler.step(optimizer)
-            scaler.update()
+            # Enhanced: Gradient accumulation - only update every N steps
+            if (batch_idx + 1) % config.accumulation_steps == 0:
+                # Gradient clipping
+                if config.gradient_clip > 0:
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+                
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
         else:
             loss.backward()
             
-            # Gradient clipping
-            if config.gradient_clip > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
-            
-            optimizer.step()
+            # Enhanced: Gradient accumulation - only update every N steps
+            if (batch_idx + 1) % config.accumulation_steps == 0:
+                # Gradient clipping
+                if config.gradient_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+                
+                optimizer.step()
+                optimizer.zero_grad()
         
-        # Update EMA
-        if ema is not None:
+        # Update EMA (only after optimizer update)
+        if ema is not None and (batch_idx + 1) % config.accumulation_steps == 0:
             ema.update(model)
         
-        # Update metrics
-        total_loss += loss.item()
+        # Update metrics (scaled back to original scale)
+        total_loss += loss.item() * config.accumulation_steps
         box_loss += loss_items[0].item()
         obj_loss += loss_items[1].item()
         cls_loss += loss_items[2].item()
         
         # Update progress bar
         pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
+            'loss': f'{loss.item() * config.accumulation_steps:.4f}',
             'box': f'{loss_items[0].item():.4f}',
             'obj': f'{loss_items[1].item():.4f}',
             'cls': f'{loss_items[2].item():.4f}',
@@ -372,6 +426,77 @@ def train_one_epoch(
     }
 
 
+def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, max_det=300):
+    """
+    Non-Maximum Suppression (NMS) for YOLOv7 predictions
+    
+    Args:
+        prediction: Model output (bs, num_boxes, 6) [x, y, w, h, conf, class]
+        conf_thres: Confidence threshold
+        iou_thres: IoU threshold for NMS
+        max_det: Maximum detections per image
+    
+    Returns:
+        List of detections per image [(n, 6) for x, y, w, h, conf, class]
+    """
+    # Convert to list if not already
+    if not isinstance(prediction, list):
+        prediction = [prediction]
+    
+    bs = prediction[0].shape[0]
+    nc = prediction[0].shape[2] - 5  # number of classes
+    xc = prediction[0][..., 4] > conf_thres  # candidates
+    
+    # Settings
+    max_wh = 7680  # maximum box width and height
+    max_nms = 30000  # maximum number of boxes for NMS
+    
+    output = [torch.zeros((0, 6), device=prediction[0].device)] * bs
+    
+    for xi, x in enumerate(prediction):  # image index, image inference
+        # Apply constraints
+        x = x[xi]  # Get predictions for image xi
+        x = x[xc[xi]]  # confidence filtering
+        
+        if not x.shape[0]:
+            continue
+        
+        # Box (center x, center y, width, height) to (x1, y1, x2, y2)
+        box = x[:, :4].clone()
+        box[:, 0] = x[:, 0] - x[:, 2] / 2  # x1
+        box[:, 1] = x[:, 1] - x[:, 3] / 2  # y1
+        box[:, 2] = x[:, 0] + x[:, 2] / 2  # x2
+        box[:, 3] = x[:, 1] + x[:, 3] / 2  # y2
+        
+        # Detections matrix (n, 6) [x1, y1, x2, y2, conf, class]
+        if nc == 1:
+            conf = x[:, 4:5]
+            j = torch.zeros((x.shape[0], 1), dtype=torch.long, device=x.device)  # 2D tensor
+        else:
+            conf, j = x[:, 5:].max(1, keepdim=True)
+            conf *= x[:, 4:5]  # multiply by objectness
+        
+        x = torch.cat((box, conf, j.float()), 1)[conf.view(-1) > conf_thres]
+        
+        # Check shape
+        n = x.shape[0]
+        if not n:
+            continue
+        elif n > max_nms:
+            x = x[x[:, 4].argsort(descending=True)[:max_nms]]
+        
+        # Batched NMS
+        c = x[:, 5:6] * max_wh  # classes
+        boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
+        i = torch.ops.torchvision.nms(boxes, scores, iou_thres)
+        if i.shape[0] > max_det:
+            i = i[:max_det]
+        
+        output[xi] = x[i]
+    
+    return output
+
+
 @torch.no_grad()
 def validate(
     model: nn.Module,
@@ -381,7 +506,7 @@ def validate(
     config: TrainingConfig,
 ) -> Dict[str, float]:
     """
-    Validate model
+    Validate model with detection metrics
     
     Args:
         model: YOLOv7 model
@@ -391,41 +516,257 @@ def validate(
         config: Training configuration
     
     Returns:
-        Dictionary of metrics
+        Dictionary of metrics (loss, mAP, precision, recall)
     """
-    model.eval()
+    # Keep model in training mode for loss calculation
+    was_training = model.training
+    model.train()
     
     total_loss = 0.0
     box_loss = 0.0
     obj_loss = 0.0
     cls_loss = 0.0
     
+    # For detection metrics
+    stats = []
+    seen = 0
+    iouv = torch.linspace(0.5, 0.95, 10, device=device)  # IoU vector for mAP@0.5:0.95
+    niou = iouv.numel()
+    
     pbar = tqdm(val_loader, desc="Validation")
     
     for images, targets, metadata in pbar:
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
+        nb, _, height, width = images.shape
         
-        # Forward pass
+        # Forward pass for loss
         outputs = model(images)
         loss, loss_items = loss_fn(outputs, targets)
         
-        # Update metrics
+        # Update loss metrics
         total_loss += loss.item()
         box_loss += loss_items[0].item()
         obj_loss += loss_items[1].item()
         cls_loss += loss_items[2].item()
         
+        # Switch to eval mode for inference
+        model.eval()
+        
+        # Get predictions (inference mode)
+        with torch.no_grad():
+            preds = model(images)
+            
+        # Process predictions
+        if isinstance(preds, tuple):
+            preds = preds[0]  # Get inference output
+        
+        # Apply NMS
+        preds = non_max_suppression(preds, conf_thres=0.001, iou_thres=0.6)
+        
+        # Metrics
+        for si, pred in enumerate(preds):
+            labels = targets[targets[:, 0] == si, 1:]
+            nl = len(labels)
+            tcls = labels[:, 0].tolist() if nl else []
+            seen += 1
+            
+            if len(pred) == 0:
+                if nl:
+                    stats.append((torch.zeros(0, niou, dtype=torch.bool), 
+                                torch.Tensor(), torch.Tensor(), 
+                                torch.tensor(tcls)))
+                continue
+            
+            # Predictions
+            predn = pred.clone()
+            
+            # Evaluate
+            if nl:
+                tbox = labels[:, 1:5].clone()  # target boxes
+                tbox[:, 0] *= width  # x center
+                tbox[:, 1] *= height  # y center
+                tbox[:, 2] *= width  # width
+                tbox[:, 3] *= height  # height
+                
+                # Convert to x1y1x2y2
+                tbox[:, 0] -= tbox[:, 2] / 2
+                tbox[:, 1] -= tbox[:, 3] / 2
+                tbox[:, 2] = tbox[:, 0] + tbox[:, 2]
+                tbox[:, 3] = tbox[:, 1] + tbox[:, 3]
+                
+                labelsn = torch.cat((labels[:, 0:1], tbox), 1)  # native-space labels
+                correct = process_batch(predn, labelsn, iouv)
+            else:
+                correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool)
+            
+            # Move tensors to CPU before appending to stats
+            # Convert tcls to tensor
+            tcls_tensor = torch.tensor(tcls) if isinstance(tcls, list) else tcls
+            stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls_tensor.cpu()))
+        
+        # Restore training mode
+        model.train()
+        
         pbar.set_postfix({'val_loss': f'{loss.item():.4f}'})
+    
+    # Restore original training state
+    if not was_training:
+        model.eval()
     
     n_batches = len(val_loader)
     
-    return {
+    # Compute detection metrics
+    metrics = {}
+    if len(stats):
+        # Stats are already on CPU, just concatenate and convert to numpy
+        stats = [torch.cat(x, 0).numpy() for x in zip(*stats)]  # to numpy
+        if len(stats) and stats[0].any():
+            tp, fp, p, r, f1, ap, ap_class = ap_per_class(*stats, plot=False, save_dir=None, names={0: 'tumor'})
+            ap50, ap = ap[:, 0], ap.mean(1)  # AP@0.5, AP@0.5:0.95
+            mp, mr, map50, map = p.mean(), r.mean(), ap50.mean(), ap.mean()
+            
+            metrics.update({
+                'precision': mp,
+                'recall': mr,
+                'mAP@0.5': map50,
+                'mAP@0.5:0.95': map,
+                'f1': f1.mean(),
+            })
+    
+    metrics.update({
         'val_loss': total_loss / n_batches,
         'val_box_loss': box_loss / n_batches,
         'val_obj_loss': obj_loss / n_batches,
         'val_cls_loss': cls_loss / n_batches,
-    }
+    })
+    
+    return metrics
+
+
+def process_batch(detections, labels, iouv):
+    """
+    Return correct predictions matrix
+    
+    Args:
+        detections: (n, 6) x1, y1, x2, y2, conf, class
+        labels: (m, 5) class, x1, y1, x2, y2
+        iouv: IoU vector for mAP@0.5:0.95
+    
+    Returns:
+        correct: (n, 10) for 10 IoU levels
+    """
+    correct = torch.zeros(detections.shape[0], iouv.shape[0], dtype=torch.bool, device=iouv.device)
+    iou = box_iou(labels[:, 1:], detections[:, :4])
+    x = torch.where((iou >= iouv[0]) & (labels[:, 0:1] == detections[:, 5]))
+    if x[0].shape[0]:
+        matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
+        if x[0].shape[0] > 1:
+            matches = matches[matches[:, 2].argsort()[::-1]]
+            matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+            matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+        matches = torch.Tensor(matches).to(iouv.device)
+        correct[matches[:, 1].long()] = matches[:, 2:3] >= iouv
+    return correct
+
+
+def box_iou(box1, box2):
+    """
+    Calculate IoU between two sets of boxes
+    
+    Args:
+        box1: (n, 4) x1, y1, x2, y2
+        box2: (m, 4) x1, y1, x2, y2
+    
+    Returns:
+        iou: (n, m)
+    """
+    def box_area(box):
+        return (box[2] - box[0]) * (box[3] - box[1])
+    
+    area1 = box_area(box1.T)
+    area2 = box_area(box2.T)
+    
+    inter = (torch.min(box1[:, None, 2:], box2[:, 2:]) - 
+             torch.max(box1[:, None, :2], box2[:, :2])).clamp(0).prod(2)
+    
+    return inter / (area1[:, None] + area2 - inter)
+
+
+def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir='.', names=(), eps=1e-16):
+    """
+    Compute Average Precision per class
+    
+    Args:
+        tp: True positives (n, 10)
+        conf: Confidence scores (n,)
+        pred_cls: Predicted classes (n,)
+        target_cls: Target classes
+        plot: Plot PR curves
+        save_dir: Save directory
+        names: Class names
+        eps: Small value
+    
+    Returns:
+        tp, fp, p, r, f1, ap, unique_classes
+    """
+    # Sort by confidence
+    i = np.argsort(-conf)
+    tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
+    
+    # Find unique classes
+    unique_classes = np.unique(target_cls)
+    nc = unique_classes.shape[0]
+    
+    # Create Precision-Recall curve
+    px, py = np.linspace(0, 1, 1000), []
+    
+    # Per class AP, precision, recall
+    ap, p, r = np.zeros((nc, tp.shape[1])), np.zeros(nc), np.zeros(nc)
+    
+    for ci, c in enumerate(unique_classes):
+        i = pred_cls == c
+        n_l = (target_cls == c).sum()  # number of labels
+        n_p = i.sum()  # number of predictions
+        
+        if n_p == 0 or n_l == 0:
+            continue
+        
+        # Accumulate FPs and TPs
+        fpc = (1 - tp[i]).cumsum(0)
+        tpc = tp[i].cumsum(0)
+        
+        # Recall
+        recall = tpc / (n_l + eps)
+        r[ci] = recall[-1, 0]  # recall at last threshold
+        
+        # Precision
+        precision = tpc / (tpc + fpc)
+        p[ci] = precision[-1, 0]  # precision at last threshold
+        
+        # AP from recall-precision curve
+        for j in range(tp.shape[1]):
+            ap[ci, j], mpre, mrec = compute_ap_single(recall[:, j], precision[:, j])
+    
+    # Compute F1
+    f1 = 2 * p * r / (p + r + eps)
+    
+    return tp, fpc, p, r, f1, ap, unique_classes.astype('int32')
+
+
+def compute_ap_single(recall, precision):
+    """Compute AP for single IoU threshold"""
+    mrec = np.concatenate(([0.], recall, [1.]))
+    mpre = np.concatenate(([1.], precision, [0.]))
+    
+    # Compute precision envelope
+    mpre = np.flip(np.maximum.accumulate(np.flip(mpre)))
+    
+    # Calculate area under PR curve
+    x = np.linspace(0, 1, 101)
+    ap = np.trapz(np.interp(x, mrec, mpre), x)
+    
+    return ap, mpre, mrec
 
 
 def train_yolov7(config: TrainingConfig) -> Dict[str, Any]:
@@ -460,6 +801,21 @@ def train_yolov7(config: TrainingConfig) -> Dict[str, Any]:
     # Prepare datasets
     train_dataset, val_dataset = prepare_datasets(config)
     train_loader, val_loader = create_dataloaders(train_dataset, val_dataset, config)
+    
+    # Enhanced: Initialize visualizer if enabled and available
+    visualizer = None
+    if config.visualize_predictions and VISUALIZER_AVAILABLE:
+        vis_dir = save_dir / "visualizations"
+        vis_dir.mkdir(exist_ok=True)
+        visualizer = YOLOv7EvalVisualizer(
+            output_dir=str(vis_dir),
+            conf_threshold=config.vis_conf_threshold,
+            nms_iou=config.vis_nms_iou,
+            max_samples=config.num_vis_samples,
+        )
+        LOGGER.info(f"✓ Visualizer initialized: {vis_dir}")
+    elif config.visualize_predictions and not VISUALIZER_AVAILABLE:
+        LOGGER.warning("⚠ Visualizer requested but not available (missing dependencies)")
     
     # Load model
     model_cfg_path = SCRIPT_DIR / config.model_config
@@ -497,8 +853,14 @@ def train_yolov7(config: TrainingConfig) -> Dict[str, Any]:
         LOGGER.info(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
     
-    # Setup training components
-    loss_fn = ComputeLoss(model)
+    # Enhanced: Setup training components with focal loss support
+    loss_fn = ComputeLoss(
+        model,
+        cls_loss_gain=config.cls_loss_gain,
+        use_focal_loss=config.use_focal_loss,
+        focal_alpha=config.focal_alpha,
+        focal_gamma=config.focal_gamma,
+    )
     
     # Optimizer
     if config.optimizer_type == "SGD":
@@ -574,6 +936,20 @@ def train_yolov7(config: TrainingConfig) -> Dict[str, Any]:
             config=config,
         )
         
+        # Enhanced: Visualize predictions after validation
+        if visualizer is not None and epoch % max(1, config.num_epochs // 10) == 0:
+            LOGGER.info(f"Generating visualizations for epoch {epoch}...")
+            try:
+                visualizer.visualize_epoch(
+                    model=eval_model,
+                    dataloader=val_loader,
+                    device=device,
+                    epoch=epoch,
+                )
+                LOGGER.info("✓ Visualizations saved")
+            except Exception as e:
+                LOGGER.warning(f"⚠ Visualization failed: {e}")
+        
         # Update learning rate
         if scheduler is not None:
             current_lr = scheduler.step(epoch)
@@ -596,6 +972,15 @@ def train_yolov7(config: TrainingConfig) -> Dict[str, Any]:
         LOGGER.info(f"  LR: {current_lr:.6f}")
         LOGGER.info(f"  Train Loss: {train_metrics['train_loss']:.4f}")
         LOGGER.info(f"  Val Loss: {val_metrics['val_loss']:.4f}")
+        
+        # Log detection metrics if available
+        if 'mAP@0.5' in val_metrics:
+            LOGGER.info(f"  Precision: {val_metrics['precision']:.4f}")
+            LOGGER.info(f"  Recall: {val_metrics['recall']:.4f}")
+            LOGGER.info(f"  mAP@0.5: {val_metrics['mAP@0.5']:.4f}")
+            LOGGER.info(f"  mAP@0.5:0.95: {val_metrics['mAP@0.5:0.95']:.4f}")
+            LOGGER.info(f"  F1: {val_metrics['f1']:.4f}")
+        
         LOGGER.info("=" * 80)
         
         # Save checkpoint
@@ -665,17 +1050,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
         Examples:
-          # Train with medical modules (default)
-          python train_yolov7_medical.py --data_dir ./datasets/ct_data --epochs 120
+          # Train with medical modules
+          python train_yolov7_medical.py --data_dir ./datasets/ct_data --epochs 120 --use_medical_modules
           
           # Train baseline (without medical modules)
           python train_yolov7_medical.py --data_dir ./datasets/ct_data --epochs 120 \\
-              --use_medical_modules 0 --model_config models/yolov7_baseline.yaml
+              --no_medical_modules --model_config models/yolov7_baseline.yaml
           
           # Advanced training with custom preprocessing
           python train_yolov7_medical.py --data_dir ./datasets/ct_data --epochs 150 \\
               --batch_size 32 --imgsz 800 --window_center -600 --window_width 1500 \\
-              --use_ema --mixed_precision --multi_scale
+              --use_medical_modules --use_ema --mixed_precision --multi_scale
         """)
     )
     
@@ -690,12 +1075,44 @@ def main():
     # Training parameters
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
+    parser.add_argument("--accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--imgsz", type=int, default=640, help="Image size")
     
+    # Enhanced: Augmentation parameters
+    parser.add_argument("--enable_augmentation", action="store_true", default=False,
+                       help="Enable advanced augmentations (Mosaic, MixUp, Copy-Paste)")
+    parser.add_argument("--mosaic_prob", type=float, default=0.0, help="Mosaic augmentation probability")
+    parser.add_argument("--mixup_prob", type=float, default=0.0, help="MixUp augmentation probability")
+    parser.add_argument("--copy_paste_prob", type=float, default=0.0, help="Copy-Paste augmentation probability")
+    parser.add_argument("--cache_images", action="store_true", default=False, help="Cache images in memory")
+    
+    # Enhanced: Positive oversampling
+    parser.add_argument("--positive_oversample", action="store_true", default=False,
+                       help="Enable positive sample oversampling")
+    parser.add_argument("--positive_ratio", type=float, default=0.7, 
+                       help="Target positive sample ratio (0.0-1.0)")
+    
+    # Enhanced: Loss function parameters
+    parser.add_argument("--cls_loss_gain", type=float, default=1.0, help="Classification loss gain multiplier")
+    parser.add_argument("--use_focal_loss", action="store_true", default=False, help="Use Focal Loss for classification")
+    parser.add_argument("--focal_alpha", type=float, default=0.25, help="Focal Loss alpha parameter")
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal Loss gamma parameter")
+    
+    # Enhanced: Visualization parameters
+    parser.add_argument("--visualize_predictions", action="store_true", default=False,
+                       help="Generate per-epoch prediction visualizations")
+    parser.add_argument("--vis_conf_threshold", type=float, default=0.001, 
+                       help="Confidence threshold for visualization")
+    parser.add_argument("--vis_nms_iou", type=float, default=0.45, help="NMS IoU threshold for visualization")
+    parser.add_argument("--num_vis_samples", type=int, default=20, help="Number of samples to visualize per epoch")
+    
     # Model parameters
     parser.add_argument("--model_config", type=str, default="models/yolov7_medical.yaml")
-    parser.add_argument("--use_medical_modules", type=int, default=1, help="Use medical modules (1/0)")
+    parser.add_argument("--use_medical_modules", action="store_true", default=False, 
+                       help="Enable medical modules (use flag to enable, default: False)")
+    parser.add_argument("--no_medical_modules", action="store_true", 
+                       help="Explicitly disable medical modules")
     parser.add_argument("--pretrained", type=str, default="", help="Pretrained weights path")
     
     # Optimizer
@@ -742,11 +1159,35 @@ def main():
         
         num_epochs=args.epochs,
         batch_size=args.batch_size,
+        accumulation_steps=args.accumulation_steps,
         learning_rate=args.lr,
         imgsz=args.imgsz,
         
+        # Enhanced: Augmentation parameters
+        enable_augmentation=args.enable_augmentation,
+        mosaic_prob=args.mosaic_prob,
+        mixup_prob=args.mixup_prob,
+        copy_paste_prob=args.copy_paste_prob,
+        cache_images=args.cache_images,
+        
+        # Enhanced: Positive oversampling
+        positive_oversample=args.positive_oversample,
+        positive_ratio=args.positive_ratio,
+        
+        # Enhanced: Loss parameters
+        cls_loss_gain=args.cls_loss_gain,
+        use_focal_loss=args.use_focal_loss,
+        focal_alpha=args.focal_alpha,
+        focal_gamma=args.focal_gamma,
+        
+        # Enhanced: Visualization parameters
+        visualize_predictions=args.visualize_predictions,
+        vis_conf_threshold=args.vis_conf_threshold,
+        vis_nms_iou=args.vis_nms_iou,
+        num_vis_samples=args.num_vis_samples,
+        
         model_config=args.model_config,
-        use_medical_modules=bool(args.use_medical_modules),
+        use_medical_modules=args.use_medical_modules if not args.no_medical_modules else False,
         pretrained_weights=args.pretrained if args.pretrained else None,
         
         optimizer_type=args.optimizer,
@@ -783,9 +1224,17 @@ def main():
     print(f"Medical Modules: {'ENABLED' if config.use_medical_modules else 'DISABLED'}")
     print(f"Image Size: {config.imgsz}x{config.imgsz}")
     print(f"Epochs: {config.num_epochs}")
-    print(f"Batch Size: {config.batch_size}")
+    print(f"Batch Size: {config.batch_size} (Effective: {config.batch_size * config.accumulation_steps})")
+    print(f"Gradient Accumulation: {config.accumulation_steps} steps")
     print(f"HU Windowing: {config.enable_hu_windowing} (WC={config.window_center}, WW={config.window_width})")
     print(f"CLAHE: {config.enable_clahe}")
+    print("")
+    print("Enhanced Features:")
+    print(f"  Augmentation: {config.enable_augmentation} (Mosaic={config.mosaic_prob:.2f}, MixUp={config.mixup_prob:.2f}, Copy-Paste={config.copy_paste_prob:.2f})")
+    print(f"  Positive Oversample: {config.positive_oversample} (Target Ratio={config.positive_ratio:.2f})")
+    print(f"  Focal Loss: {config.use_focal_loss} (α={config.focal_alpha:.2f}, γ={config.focal_gamma:.2f})")
+    print(f"  Classification Gain: {config.cls_loss_gain:.2f}")
+    print(f"  Visualization: {config.visualize_predictions} (Conf={config.vis_conf_threshold:.3f})")
     print("=" * 80 + "\n")
     
     # Train

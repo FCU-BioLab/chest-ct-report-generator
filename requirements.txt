@@ -57,11 +57,15 @@ onnxruntime>=1.15.0  # ONNX runtime for inference
 
 # YOLOv7 Native Support (for train_yolov7_medical.py)
 # Note: YOLOv7 uses native PyTorch implementation (not Ultralytics)
-# All required dependencies already included above:
-# - torch, torchvision, numpy, opencv-python, PyYAML, tqdm
-# - pydicom, SimpleITK (medical imaging)
-# - matplotlib, seaborn (visualization)
-# - tensorboard, wandb (monitoring)
+# Enhanced YOLOv7 Medical CT Detection Requirements:
+# Core: torch>=1.10.0, torchvision>=0.11.0
+# CV: opencv-python-headless>=4.5.0, albumentations>=1.3.0, Pillow>=9.0.0
+# Visualization: matplotlib>=3.3.0, seaborn>=0.11.0
+# Data: numpy>=1.21.0, pandas>=1.3.0
+# Config: pyyaml>=6.0, tqdm>=4.62.0
+# Medical: pydicom>=2.3.0, SimpleITK>=2.2.0
+# ML Utils: scikit-learn>=1.0.0, scipy>=1.7.0
+# All YOLOv7 dependencies already satisfied by versions above
 
 # RAG and Embeddings
 faiss-cpu

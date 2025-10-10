@@ -60,7 +60,33 @@ class Concat(nn.Module):
         self.d = dimension
     
     def forward(self, x):
+        # Handle size mismatches by resizing to match the first tensor
+        if isinstance(x, list) and len(x) > 1:
+            target_size = x[0].shape[2:]
+            aligned_tensors = [x[0]]
+            for i in range(1, len(x)):
+                if x[i].shape[2:] != target_size:
+                    # Resize to match target size
+                    resized = torch.nn.functional.interpolate(
+                        x[i], size=target_size, mode='bilinear', align_corners=False
+                    )
+                    aligned_tensors.append(resized)
+                else:
+                    aligned_tensors.append(x[i])
+            return torch.cat(aligned_tensors, self.d)
         return torch.cat(x, self.d)
+
+
+class Split(nn.Module):
+    """Split a list of tensors - used after modules that return lists like BiFPN"""
+    def __init__(self, index=0):
+        super().__init__()
+        self.index = index
+    
+    def forward(self, x):
+        if isinstance(x, list):
+            return x[self.index]
+        return x
 
 
 class SPPCSPC(nn.Module):
@@ -132,6 +158,7 @@ class Detect(nn.Module):
         self.nl = len(anchors)  # number of detection layers
         self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl
+        self.stride = None  # Will be set by model
         
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)
@@ -198,6 +225,9 @@ class YOLOv7Model(nn.Module):
         # Initialize weights
         self._initialize_weights()
         
+        # Initialize stride for Detect layers
+        self._initialize_detect_stride()
+        
         LOGGER.info(f"YOLOv7Model created with {self.nc} classes, medical_modules={use_medical_modules}")
     
     def _parse_model(self, ch: int) -> Tuple[nn.Sequential, List[int]]:
@@ -208,6 +238,7 @@ class YOLOv7Model(nn.Module):
             'Conv': Conv,
             'MP': MP,
             'Concat': Concat,
+            'Split': Split,
             'SPPCSPC': SPPCSPC,
             'RepConv': RepConv,
             'Detect': Detect,
@@ -232,43 +263,63 @@ class YOLOv7Model(nn.Module):
         
         layers = []
         save = []
-        c2 = ch  # output channels
+        c_out = []  # output channels tracking (index i corresponds to layer i's output)
+        c2 = ch  # current output channels
+        
+        # Calculate number of anchors per output
+        na = len(anchors[0]) // 2 if anchors else 3
+        
+        # Create safe namespace for eval
+        eval_namespace = {
+            'na': na,
+            'nc': self.nc,
+            'anchors': anchors
+        }
         
         # Parse backbone + head
         for i, (f, n, m, args) in enumerate(backbone_cfg + head_cfg):
             m_str = m
             m = module_dict.get(m, eval(m) if isinstance(m, str) else m)
             
-            # Parse args
+            # Parse args with safe namespace
             if isinstance(args, list):
-                args = [eval(str(a)) if isinstance(a, str) else a for a in args]
+                args = [eval(str(a), eval_namespace) if isinstance(a, str) else a for a in args]
             
             # Handle different module types
             if m in [Conv, RepConv]:
-                c1, c2 = ch if i == 0 else layers[f if f != -1 else i - 1].shape[1], args[0]
+                c1 = ch if i == 0 else c_out[f if f != -1 else i - 1]
+                c2 = args[0]
                 args = [c1, c2, *args[1:]]
             elif m == Concat:
-                c2 = sum([layers[x].shape[1] for x in f])
+                c2 = sum([c_out[x] for x in f])
+            elif m == Split:
+                c2 = c_out[f] if f != -1 else c2
+                # args[0] is the index to split
             elif m in [CBAM, SimAM] and self.use_medical_modules:
-                c2 = layers[f].shape[1] if f != -1 else c2
+                c2 = c_out[f] if f != -1 else c2
                 args = [c2, *args] if m == CBAM else args
             elif m == SwinTransformerBlock and self.use_medical_modules:
-                c2 = layers[f].shape[1] if f != -1 else c2
+                c2 = c_out[f] if f != -1 else c2
                 args = [c2, *args]
             elif m == BiFPN and self.use_medical_modules:
                 c2 = args[0]
+            elif m == nn.Conv2d:
+                c1 = c_out[f if f != -1 else i - 1]
+                c2 = args[0]
+                args = [c1, c2, *args[1:]]
             elif m == Detect:
-                args.append([layers[x].shape[1] for x in f])
+                args.append([c_out[x] for x in f])
             
             # Create module
             module = m(*args) if isinstance(args, list) else m(**args) if isinstance(args, dict) else m()
             
-            # Store module
+            # Store module metadata
             module.i = i
             module.f = f
             module.type = m_str
             
             layers.append(module)
+            c_out.append(c2)  # Track output channels for this layer (c_out[i] = layer i's output channels)
             
             if i in save or i == len(backbone_cfg + head_cfg) - 1:
                 save.append(i)
@@ -290,6 +341,16 @@ class YOLOv7Model(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
     
+    def _initialize_detect_stride(self):
+        """Initialize stride for Detect layers"""
+        m = self.model[-1]  # Detect layer should be last
+        if isinstance(m, Detect):
+            # Compute stride by forward pass
+            s = 640  # default image size
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, 3, s, s))])
+            m.anchors /= m.stride.view(-1, 1, 1)
+            self.stride = m.stride
+    
     def forward(self, x):
         """Forward pass"""
         y = []
@@ -297,7 +358,7 @@ class YOLOv7Model(nn.Module):
             if m.f != -1:
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
             x = m(x)
-            y.append(x if m.i in self.save else None)
+            y.append(x)  # Always save output for potential use by later layers
         return x
     
     def count_parameters(self) -> Dict[str, int]:

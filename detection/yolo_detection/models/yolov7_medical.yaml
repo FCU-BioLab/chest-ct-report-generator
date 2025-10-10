@@ -98,22 +98,24 @@ head:
    # BiFPN layer
    [[56, 57, 58], 1, BiFPN, [256, 3]],  # 59-BiFPN outputs [P3, P4, P5]
    
+   # Split BiFPN outputs for separate detection heads
+   [59, 1, Split, [0]],  # 60-P3 from BiFPN
+   [59, 1, Split, [1]],  # 61-P4 from BiFPN
+   [59, 1, Split, [2]],  # 62-P5 from BiFPN
+   
    # Detection heads with SimAM
    # P3 detection
-   [59, 1, SimAM, []],  # 60-SimAM before P3 head
-   [-1, 1, Conv, [256, 3, 1]],
-   [-1, 1, nn.Conv2d, [na * (nc + 5), 1, 1]],  # 62-P3 detect
+   [60, 1, SimAM, []],  # 63-SimAM before P3 head
+   [-1, 1, Conv, [256, 3, 1]],  # 64-P3 conv
    
    # P4 detection
-   [59, 1, SimAM, []],  # 63-SimAM before P4 head
-   [-1, 1, Conv, [512, 3, 1]],
-   [-1, 1, nn.Conv2d, [na * (nc + 5), 1, 1]],  # 65-P4 detect
+   [61, 1, SimAM, []],  # 65-SimAM before P4 head
+   [-1, 1, Conv, [512, 3, 1]],  # 66-P4 conv
    
    # P5 detection
-   [59, 1, SimAM, []],  # 66-SimAM before P5 head
-   [-1, 1, Conv, [1024, 3, 1]],
-   [-1, 1, nn.Conv2d, [na * (nc + 5), 1, 1]],  # 68-P5 detect
+   [62, 1, SimAM, []],  # 67-SimAM before P5 head
+   [-1, 1, Conv, [1024, 3, 1]],  # 68-P5 conv
    
    # Combine detections
-   [[62, 65, 68], 1, Detect, [nc, anchors]],  # 69-Detect(P3, P4, P5)
+   [[64, 66, 68], 1, Detect, [nc, anchors]],  # 69-Detect(P3, P4, P5)
   ]

@@ -69,7 +69,13 @@ class CBAM(nn.Module):
         # Channel attention
         x = x * self.channel_attention(x)
         # Spatial attention
-        x = x * self.spatial_attention(x)
+        spatial_att = self.spatial_attention(x)
+        # Ensure spatial attention map has same size as x
+        if spatial_att.shape[2:] != x.shape[2:]:
+            spatial_att = torch.nn.functional.interpolate(
+                spatial_att, size=x.shape[2:], mode='bilinear', align_corners=False
+            )
+        x = x * spatial_att
         return x
 
 
@@ -251,12 +257,12 @@ class BiFPNLayer(nn.Module):
         w2 = F.relu(self.w2)
         w2 = w2 / (torch.sum(w2, dim=0) + self.epsilon)
         p4_out = self.conv_out[1](
-            w2[0] * p4 + w2[1] * p4_td + w2[2] * F.interpolate(p3_td, scale_factor=0.5, mode='nearest')
+            w2[0] * p4 + w2[1] * p4_td + w2[2] * F.interpolate(p3_td, size=p4.shape[-2:], mode='nearest')
         )
         
         # P5_out = Conv(w2_0 * P5 + w2_1 * Resize(P4_out))
         p5_out = self.conv_out[2](
-            w2[0] * p5 + w2[1] * F.interpolate(p4_out, scale_factor=0.5, mode='nearest')
+            w2[0] * p5 + w2[1] * F.interpolate(p4_out, size=p5.shape[-2:], mode='nearest')
         )
         
         # P3_out

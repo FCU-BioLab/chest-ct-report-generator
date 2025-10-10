@@ -18,26 +18,70 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Any
 import logging
 import numpy as np
+import copy
+import os
 
 LOGGER = logging.getLogger(__name__)
 
 
 # ==================== Loss Functions ====================
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance
+    FL(p_t) = -α_t * (1 - p_t)^γ * log(p_t)
+    """
+    
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+    
+    def forward(self, inputs, targets):
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-bce_loss)  # p_t
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
 class ComputeLoss:
     """
-    YOLOv7 Loss Computation
+    YOLOv7 Loss Computation with Medical Image Enhancements
     
     Combines:
     - Box regression loss (CIoU)
-    - Objectness loss (BCE)
-    - Classification loss (BCE)
+    - Objectness loss (BCE or Focal Loss)
+    - Classification loss (BCE or Focal Loss)
+    
+    Enhancements for medical images:
+    - Adjustable cls_loss_gain for negative samples
+    - Optional focal loss for class imbalance
+    - Small object detection enhancement
     """
     
-    def __init__(self, model, autobalance=False):
+    def __init__(
+        self,
+        model,
+        autobalance=False,
+        cls_loss_gain: float = 1.5,
+        use_focal_loss: bool = True,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0
+    ):
         """
         Args:
             model: YOLOv7 model
             autobalance: Auto-balance loss weights
+            cls_loss_gain: Classification loss gain (higher for negative samples with small lesions)
+            use_focal_loss: Use focal loss instead of BCE
+            focal_alpha: Focal loss alpha
+            focal_gamma: Focal loss gamma
         """
         device = next(model.parameters()).device
         h = model.yaml
@@ -50,18 +94,24 @@ class ComputeLoss:
         self.anchors = det.anchors
         self.device = device
         
-        # Loss weights
+        # Loss weights (enhanced for medical images)
         self.balance = [4.0, 1.0, 0.4]
         self.box = h.get('box', 0.05)
         self.obj = h.get('obj', 1.0)
-        self.cls = h.get('cls', 0.5)
+        self.cls = h.get('cls', 0.5) * cls_loss_gain  # Enhanced for small lesions
         
         # Class label smoothing
         self.cp, self.cn = 1.0, 0.0
         
-        # Focal loss
-        self.BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0], device=device))
-        self.BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0], device=device))
+        # Loss functions
+        if use_focal_loss:
+            self.BCEcls = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, reduction='mean')
+            self.BCEobj = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, reduction='mean')
+            LOGGER.info(f"Using Focal Loss (alpha={focal_alpha}, gamma={focal_gamma})")
+        else:
+            self.BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0], device=device))
+            self.BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.0], device=device))
+            LOGGER.info("Using BCE Loss")
         
         self.autobalance = autobalance
         self.ssi = 0  # stride 16 index
@@ -69,6 +119,8 @@ class ComputeLoss:
         # Anchors
         for k in 'na', 'nc', 'nl', 'anchors':
             setattr(self, k, getattr(det, k))
+        
+        LOGGER.info(f"Loss weights: box={self.box}, obj={self.obj}, cls={self.cls}, cls_gain={cls_loss_gain}")
     
     def __call__(self, p, targets):
         """
@@ -165,7 +217,10 @@ class ComputeLoss:
             
             # Append
             a = t[:, 6].long()  # anchor indices
-            indices.append((b, a, gj.clamp_(0, gain[3] - 1), gi.clamp_(0, gain[2] - 1)))
+            # Ensure indices are long integers and properly clamped
+            gj_clamped = gj.clamp(0, int(gain[3]) - 1).long()
+            gi_clamped = gi.clamp(0, int(gain[2]) - 1).long()
+            indices.append((b, a, gj_clamped, gi_clamped))
             tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
             anch.append(anchors[a])  # anchors
             tcls.append(c)  # class
@@ -244,12 +299,12 @@ class ModelEMA:
             decay: EMA decay rate
             updates: Number of updates
         """
-        self.ema = model.module if hasattr(model, 'module') else model
-        self.ema = type(self.ema)(self.ema.yaml, ch=3, nc=self.ema.nc)
-        self.ema.eval()
+        # Create a deep copy of the model for EMA
+        self.ema = copy.deepcopy(model.module if hasattr(model, 'module') else model).eval()
         self.updates = updates
         self.decay = lambda x: decay * (1 - math.exp(-x / 2000))
         
+        # Disable gradients for EMA model
         for p in self.ema.parameters():
             p.requires_grad_(False)
     
