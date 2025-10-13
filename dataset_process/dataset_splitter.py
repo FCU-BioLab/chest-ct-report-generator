@@ -3,6 +3,7 @@
 """
 資料集劃分工具 (K-Fold交叉驗證版本)
 將胸部CT資料集按照訓練/測試比例進行劃分，適用於K-Fold交叉驗證
+支援預處理後的 YOLO 格式資料 (images/ 和 labels/ 結構)
 
 作者: GitHub Copilot
 日期: 2025-07-28
@@ -78,11 +79,11 @@ class DatasetSplitter:
             patient_id = patient_dir.name
             series = patient_id[0]  # A, B, E, G
             
-            # 檢查必要文件夾
-            dicom_dir = patient_dir / "dicom_files"
-            xml_dir = patient_dir / "xml_annotations"
+            # 檢查必要文件夾 (YOLO 格式: images/ 和 labels/)
+            images_dir = patient_dir / "images"
+            labels_dir = patient_dir / "labels"
             
-            if dicom_dir.exists() and xml_dir.exists():
+            if images_dir.exists() and labels_dir.exists():
                 patients_info[patient_id] = {
                     'series': series,
                     'path': str(patient_dir)
@@ -208,6 +209,7 @@ class DatasetSplitter:
     def split_dataset(self) -> None:
         """執行資料集劃分的主要函數"""
         print("🚀 開始資料集劃分 (K-Fold版本)...")
+        print("📋 資料格式: YOLO 格式 (每個患者包含 images/ 和 labels/ 目錄)")
         print(f"源目錄: {self.source_dir}")
         print(f"輸出目錄: {self.output_dir}")
         print(f"劃分比例: 訓練={self.train_ratio:.1%}, 測試={self.test_ratio:.1%}")
@@ -246,9 +248,9 @@ class DatasetSplitter:
 
 def main():
     """主函數"""
-    parser = argparse.ArgumentParser(description="胸部CT資料集劃分工具 (K-Fold版本)")
+    parser = argparse.ArgumentParser(description="胸部CT資料集劃分工具 (K-Fold版本) - 支援 YOLO 格式")
     parser.add_argument("--source_dir", type=str, default=None,
-                       help="源資料目錄路徑")
+                       help="源資料目錄路徑 (預處理後的 YOLO 格式資料)")
     parser.add_argument("--output_dir", type=str, default=None,
                        help="輸出目錄路徑")
     parser.add_argument("--train_ratio", type=float, default=0.9,
