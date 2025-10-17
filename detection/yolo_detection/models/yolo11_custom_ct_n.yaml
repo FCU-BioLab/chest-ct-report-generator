@@ -1,0 +1,45 @@
+# yolo11_custom_ct_n.yaml
+# ✅ Nano 規模，CT專用，含 AAF_CT + RRBBlock + SATModule
+
+import:
+  - ultralytics.nn.modules.custom_blocks
+
+nc: 1
+
+backbone:
+  - [-1, 1, Conv, [16, 3, 2]]       # 0
+  - [-1, 1, Conv, [32, 3, 2]]       # 1
+  - [-1, 1, AAF_CT, [32]]          # 2
+  - [-1, 1, RRBBlock, [32]]        # 3
+  - [-1, 1, Conv, [64, 3, 2]]      # 4
+  - [-1, 1, RRBBlock, [64]]       # 5
+  - [-1, 1, Conv, [128, 3, 2]]     # 6
+  - [-1, 1, RRBBlock, [128]]      # 7
+  - [-1, 1, Conv, [256, 3, 2]]     # 8
+  - [-1, 1, RRBBlock, [256]]      # 9
+  - [-1, 1, SPPF, [256, 5]]       # 10
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 11
+  - [[-1, 7], 1, Concat, [1]]                   # 12
+  - [-1, 1, RRBBlock, [128]]                    # 13
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 14
+  - [[-1, 5], 1, Concat, [1]]                   # 15
+  - [-1, 1, RRBBlock, [64]]                     # 16
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 17
+  - [[-1, 1], 1, Concat, [1]]                   # 18
+  - [-1, 1, RRBBlock, [64]]                     # 19
+
+  - [-1, 1, Conv, [64, 3, 2]]                   # 20
+  - [[-1, 16], 1, Concat, [1]]                  # 21
+  - [-1, 1, RRBBlock, [128]]                    # 22
+
+  - [-1, 1, Conv, [128, 3, 2]]                  # 23
+  - [[-1, 13], 1, Concat, [1]]                  # 24
+  - [-1, 1, RRBBlock, [256]]                    # 25
+
+  - [-1, 1, SATModule, [256]]                   # 26
+
+  - [[19, 16, 22, 26], 1, Detect, [nc]]         # 27  
