@@ -26,7 +26,7 @@
 
 **CMD 命令：**
 ```cmd
-python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --epochs 200 --batch_size 16 --model_size m --val_ratio 0.2
+python train_custom_yolo.py --data_dir ..\..\datasets\splited_dataset\train --model models\yolo11_custom_ct_s_optimize.yaml  --epochs 200 --batch_size 16 --val_ratio 0.2
 ```
 
 **特點：**
@@ -62,17 +62,17 @@ Errors: 0
 
 **基本訓練（推薦）⭐**
 ```cmd
-python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --epochs 200 --batch_size 16 --model_size m --val_ratio 0.2
+python train_custom_yolo.py --data_dir ..\..\datasets\splited_dataset\train --epochs 200 --batch_size 16 --model_size m --val_ratio 0.2
 ```
 
 **高精度訓練**
 ```cmd
-python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --epochs 300 --batch_size 8 --model_size l --imgsz 800 --val_ratio 0.2 --lr 0.0005 --mosaic 1.0 --mixup 0.15
+python train_custom_yolo.py --data_dir ..\..\datasets\splited_dataset\train --epochs 300 --batch_size 8 --model_size l --imgsz 800 --val_ratio 0.2 --lr 0.0005 --mosaic 1.0 --mixup 0.15
 ```
 
 **快速測試**
 ```cmd
-python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --epochs 50 --batch_size 32 --model_size n --val_ratio 0.3
+python train_custom_yolo.py --data_dir ..\..\datasets\splited_dataset\train --epochs 50 --batch_size 32 --model_size n --val_ratio 0.3
 ```
 
 ### 步驟 3: 查看結果
@@ -98,7 +98,7 @@ python -c "from ultralytics import YOLO; model = YOLO('weights/best.pt'); model.
 適合第一次訓練，建立性能基準：
 
 ```cmd
-python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --epochs 200 --batch_size 16 --model_size m --imgsz 640 --val_ratio 0.2 --lr 0.001 --optimizer AdamW --warmup_epochs 5 --mosaic 1.0 --fliplr 0.5
+python train_custom_yolo.py --data_dir ..\..\datasets\splited_dataset\train --epochs 200 --batch_size 16 --model_size m --imgsz 640 --val_ratio 0.2 --lr 0.001 --optimizer AdamW --warmup_epochs 5 --mosaic 1.0 --fliplr 0.5
 ```
 
 **預期結果：**
@@ -110,7 +110,7 @@ python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --ep
 適合小病灶檢測，追求最高精度：
 
 ```cmd
-python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --epochs 300 --batch_size 8 --model_size l --imgsz 800 --val_ratio 0.2 --lr 0.0005 --optimizer AdamW --warmup_epochs 5 --mosaic 1.0 --mixup 0.15 --scale 0.7
+python train_custom_yolo.py --data_dir ..\..\datasets\splited_dataset\train --epochs 300 --batch_size 8 --model_size l --imgsz 800 --val_ratio 0.2 --lr 0.0005 --optimizer AdamW --warmup_epochs 5 --mosaic 1.0 --mixup 0.15 --scale 0.7
 ```
 
 **預期結果：**
@@ -122,7 +122,7 @@ python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --ep
 適合參數測試和快速驗證：
 
 ```cmd
-python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --epochs 50 --batch_size 32 --model_size n --val_ratio 0.3
+python train_custom_yolo.py --data_dir ..\..\datasets\splited_dataset\train --epochs 50 --batch_size 32 --model_size n --val_ratio 0.3
 ```
 
 **預期結果：**
@@ -137,7 +137,7 @@ python train_yolo_direct.py --data_dir ..\..\datasets\splited_dataset\train --ep
 
 | 文件 | 用途 | 行數 |
 |------|------|------|
-| `train_yolo_direct.py` | ⭐ 主訓練腳本（YOLO 格式） | 600+ |
+| `train_custom_yolo.py` | ⭐ 主訓練腳本（YOLO 格式） | 600+ |
 | `validate_dataset.py` | 數據集驗證工具 | 200+ |
 | `validate_annotations.py` | 標註驗證工具 | 500+ |
 | `test_environment.py` | 環境檢查工具 | 100+ |

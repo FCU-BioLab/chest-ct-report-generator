@@ -1,0 +1,59 @@
+# yolo11_custom_ct_s_optimize.yaml
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+# ✅ S 規模 + AAF_CT + RRB(前段保留) + SAT(Neck) + P4/P5 精簡化
+# 👉 輕量化版本，適合部署與快速實驗
+import:
+  - ultralytics.nn.modules.custom_blocks
+
+nc: 1   # 類別數量
+
+backbone:
+  - [-1, 1, Conv, [32, 3, 2]]        # 0
+  - [-1, 1, Conv, [64, 3, 2]]        # 1
+  - [-1, 1, AAF_CT, [64]]           # 2 ✅ 注意力模組
+  - [-1, 1, Conv, [128, 1, 1]]      # 3 升維
+  - [-1, 1, RRBBlock, [128]]        # 4 ✅ 保留
+  - [-1, 1, Conv, [128, 3, 2]]      # 5
+  - [-1, 1, RRBBlock, [128]]        # 6 ✅ 保留（P3）
+  - [-1, 1, Conv, [256, 3, 2]]      # 7 (P4)
+  - [-1, 1, Conv, [256, 3, 1]]      # 8 ⚡ P4 精簡（移除 RRB）
+  - [-1, 1, Conv, [512, 3, 2]]      # 9 (P5)
+  - [-1, 1, Conv, [512, 3, 1]]      # 10 ⚡ P5 精簡
+  - [-1, 1, SPPF, [512, 5]]        # 11
+
+head:
+  # P5 -> P4
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 12
+  - [[-1, 8], 1, Concat, [1]]                   # 13
+  - [-1, 1, Conv, [256, 1, 1]]                  # 14 降通道
+  - [-1, 1, RRBBlock, [256]]                    # 15 ✅ 保留一個 RRB（融合層）
+
+  # P4 -> P3
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 16
+  - [[-1, 6], 1, Concat, [1]]                   # 17
+  - [-1, 1, Conv, [128, 1, 1]]                  # 18
+  - [-1, 1, RRBBlock, [128]]                    # 19 ✅
+
+  # P3 -> P2
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 20
+  - [[-1, 1], 1, Concat, [1]]                   # 21
+  - [-1, 1, Conv, [64, 1, 1]]                   # 22
+  - [-1, 1, RRBBlock, [64]]                     # 23 ✅ 保留前端
+
+  # P2 -> P3
+  - [-1, 1, Conv, [128, 3, 2]]                  # 24
+  - [[-1, 19], 1, Concat, [1]]                  # 25
+  - [-1, 1, Conv, [256, 1, 1]]                  # 26
+  - [-1, 1, RRBBlock, [256]]                    # 27
+
+  # P3 -> P4
+  - [-1, 1, Conv, [256, 3, 2]]                  # 28
+  - [[-1, 15], 1, Concat, [1]]                  # 29
+  - [-1, 1, Conv, [512, 1, 1]]                  # 30
+  - [-1, 1, RRBBlock, [512]]                    # 31 ✅ 最終層保留
+
+  # Neck Transformer (輕量)
+  - [-1, 1, SATModule, [512]]                   # 32
+
+  # Detect (P2, P3, P4, P5)
+  - [[23, 19, 27, 32], 1, Detect, [nc]]         # 33

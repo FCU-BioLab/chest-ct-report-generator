@@ -57,7 +57,7 @@ class TrainingConfig:
     random_seed: int = 42
     
     # Class balancing
-    max_negative_ratio: float = 1.0         # Max ratio of negative samples (empty labels) to positive samples
+    max_negative_ratio: float = 1.5         # ✅ Max ratio of negative samples (empty labels) to positive samples
     
     # Optimizer settings
     optimizer: str = "AdamW"                # SGD/Adam/AdamW
@@ -257,12 +257,12 @@ def create_yolo_dataset(patient_data, train_patients, val_patients, output_dir, 
     val_count, val_pos, val_neg = link_files(val_patients, "val")
 
     yaml_content = f"""# YOLOv11 Dataset Configuration
-path: {output_dir.absolute().as_posix()}
-train: images/train
-val: images/val
-nc: 1
-names: ['lesion']
-"""
+    path: {output_dir.absolute().as_posix()}
+    train: images/train
+    val: images/val
+    nc: 1
+    names: ['lesion']
+    """
     yaml_path = output_dir / "dataset.yaml"
     yaml_path.write_text(yaml_content, encoding="utf-8")
     return yaml_path
@@ -270,12 +270,42 @@ names: ['lesion']
 
 # ========== Training ==========
 def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Dict[str, Any]:
+
+    # ========== NaN Debug (optional) ==========
+    # logging.info("🔍 Running 1-batch NaN detection check...")
+    # torch.autograd.set_detect_anomaly(True)
+
+    # debug_model = YOLO(config.model or "models/yolo11_custom_ct_s_optimize.yaml")
+    # debug_model.train(
+    #     data=str(dataset_yaml),
+    #     epochs=1,
+    #     batch=4,
+    #     imgsz=config.imgsz,
+    #     workers=0,
+    #     device=select_device(config.device),
+    #     amp=False,
+    #     val=False,
+    #     lr0=2e-4,
+    #     warmup_epochs=5,
+    #     mosaic=0.0,
+    #     mixup=0.0,
+    #     translate=0.05,
+    #     scale=0.0,
+    #     rect=True,
+    #     freeze=10,
+    #     cos_lr=False,
+    #     fraction=0.02,      # ✅ 只取 2% 的資料快速 smoke test
+    # )
+
+
+    # --- 正式訓練 ---
     logging.info("=" * 80)
     logging.info("Starting YOLOv11 Training")
     logging.info("=" * 80)
     model_name = config.model if config.model else f"yolo11{config.model_size}.pt"
     logging.info(f"Loading model: {model_name}")
     model = YOLO(model_name)
+
     train_args = {
         "data": str(dataset_yaml),
         "imgsz": config.imgsz,
@@ -283,29 +313,52 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "batch": config.batch_size,
         "device": select_device(config.device),
         "optimizer": config.optimizer,
-        "lr0": config.learning_rate,
-        "lrf": 0.01,
+        # �️ Conservative-but-Effective Strategy (避免NaN同時衝刺F1=0.9)
+        "lr0": 0.0008,          # ✅ 提升至0.0008（已知穩定且收斂快）
+        "lrf": 0.01,            # ✅ 強衰減（後期穩定）
         "momentum": config.momentum,
-        "weight_decay": config.weight_decay,
-        "warmup_epochs": config.warmup_epochs,
-        "cos_lr": config.cos_lr,
-        "degrees": config.degrees,
-        "translate": config.translate,
-        "scale": config.scale,
-        "fliplr": config.fliplr,
-        "mosaic": config.mosaic,
-        "mixup": config.mixup,
+        "weight_decay": 0.0003, # ✅ 輕度正則化
+        "warmup_epochs": 10,    # ✅ 縮短至10 epoch（無重度增強不需太長）
+        "warmup_momentum": 0.8, 
+        "warmup_bias_lr": 0.05, 
+        "cos_lr": True,         
+        # � Minimal Augmentation (關閉噪音來源，保留輕度增強)
+        "degrees": 3.0,         # ✅ 輕度旋轉（從5降至3）
+        "translate": 0.1,       # ✅ 輕度平移（從0.12降至0.1）
+        "scale": 0.5,           # ✅ 輕度尺度（從0.6降至0.5）
+        "fliplr": 0.5,
+        "flipud": 0.0,
+        "mosaic": 0.0,          # ✅ 關閉Mosaic（避免破壞病灶特徵）
+        "mixup": 0.0,           # ✅ 關閉MixUp（避免邊界模糊）
+        "copy_paste": 0.0,      # ✅ 關閉Copy-Paste
+        "hsv_h": 0.0,           
+        "hsv_s": 0.0,
+        "hsv_v": 0.2,           # ✅ 輕度亮度（從0.25降至0.2）
+        "auto_augment": "randaugment",  
+        "erasing": 0.15,        # ✅ 輕度擦除（從0.3降至0.15）
         "project": str(Path(config.save_dir) / "training"),
+        "amp": True,            
         "name": f"yolo11{config.model_size}_{timestamp}",
         "exist_ok": True,
         "save": True,
         "val": True,
-        "patience": config.patience,
+        "patience": 150,        # ✅ 提高耐心（長期訓練）
         "workers": config.workers,
         "verbose": True,
         "plots": True,
         "seed": config.random_seed,
+        "rect": False,
+        "freeze": 0,
+        "close_mosaic": 0,      # ✅ 無Mosaic不需close_mosaic
+        # 🎯 Maintain Effective Loss Weights
+        "box": 10.0,            # ✅ 維持box loss
+        "cls": 0.5,             # ✅ 維持cls懲罰
+        "dfl": 2.0,             # ✅ 降低DFL（2.5→2.0）
+        "nbs": 128,             # ✅ Gradient Accumulation
+        "dropout": 0.1,         # ✅ 輕度Dropout
     }
+
+
     results = model.train(**train_args)
     return {"success": True, "results": results}
 
@@ -315,23 +368,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="",help="Path to the custom YOLO model .yaml or .pt file")
     parser.add_argument("--data_dir", type=str, required=True)
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=300)  # ✅ 延長至300 epoch補償較低lr
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--model_size", type=str, default="m", choices=["n","s","m","l","x"])
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max_negative_ratio", type=float, default=1.0)
+    parser.add_argument("--max_negative_ratio", type=float, default=1.5)  # ✅ 增加負樣本比例
     parser.add_argument("--optimizer", type=str, default="AdamW")
     parser.add_argument("--weight_decay", type=float, default=0.0005)
     parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--no_cos_lr", action="store_true")
-    parser.add_argument("--mosaic", type=float, default=0.4)
-    parser.add_argument("--mixup", type=float, default=0.1)
+    parser.add_argument("--mosaic", type=float, default=0.0)
+    parser.add_argument("--mixup", type=float, default=0.0)
     parser.add_argument("--degrees", type=float, default=0.0)
-    parser.add_argument("--translate", type=float, default=0.1)
-    parser.add_argument("--scale", type=float, default=0.3)
+    parser.add_argument("--translate", type=float, default=0.05)
+    parser.add_argument("--scale", type=float, default=0.1)
     parser.add_argument("--fliplr", type=float, default=0.5)
     parser.add_argument("--save_dir", type=str, default="./yolo_runs")
     parser.add_argument("--workers", type=int, default=8)
