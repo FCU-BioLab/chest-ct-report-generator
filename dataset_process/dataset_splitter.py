@@ -5,8 +5,6 @@
 將胸部CT資料集按照訓練/測試比例進行劃分，適用於K-Fold交叉驗證
 支援預處理後的 YOLO 格式資料 (images/ 和 labels/ 結構)
 
-作者: GitHub Copilot
-日期: 2025-07-28
 """
 
 import json
@@ -72,25 +70,57 @@ class DatasetSplitter:
         patients_info = {}
         
         print("🔍 掃描患者資料...")
-        for patient_dir in self.source_dir.iterdir():
-            if not patient_dir.is_dir():
-                continue
-            
-            patient_id = patient_dir.name
-            series = patient_id[0]  # A, B, E, G
-            
-            # 檢查必要文件夾 (YOLO 格式: images/ 和 labels/)
-            images_dir = patient_dir / "images"
-            labels_dir = patient_dir / "labels"
-            
-            if images_dir.exists() and labels_dir.exists():
-                patients_info[patient_id] = {
-                    'series': series,
-                    'path': str(patient_dir)
-                }
+        
+        # 檢查資料集結構類型
+        images_png_dir = self.source_dir / "images_png"
+        labels_dir = self.source_dir / "labels"
+        
+        # 類型1: preprocessed_yolo_lesion 結構 (images_png/ 和 labels/ 在根目錄)
+        if images_png_dir.exists() and labels_dir.exists():
+            print("📁 檢測到 preprocessed_yolo_lesion 格式 (集中式 images_png/ 和 labels/)")
+            for patient_dir in images_png_dir.iterdir():
+                if not patient_dir.is_dir():
+                    continue
                 
-                self.stats['total_patients'] += 1
-                self.stats['series_distribution'][series] += 1
+                patient_id = patient_dir.name
+                series = patient_id[0]  # A, B, E, G
+                
+                # 檢查對應的 labels 目錄是否存在
+                patient_labels_dir = labels_dir / patient_id
+                if patient_labels_dir.exists():
+                    patients_info[patient_id] = {
+                        'series': series,
+                        'path': str(patient_dir),
+                        'labels_path': str(patient_labels_dir),
+                        'structure_type': 'centralized'
+                    }
+                    
+                    self.stats['total_patients'] += 1
+                    self.stats['series_distribution'][series] += 1
+        
+        # 類型2: all_patient_data 結構 (每個患者有自己的 images/ 和 labels/)
+        else:
+            print("📁 檢測到 all_patient_data 格式 (每患者獨立 images/ 和 labels/)")
+            for patient_dir in self.source_dir.iterdir():
+                if not patient_dir.is_dir():
+                    continue
+                
+                patient_id = patient_dir.name
+                series = patient_id[0]  # A, B, E, G
+                
+                # 檢查必要文件夾 (YOLO 格式: images/ 和 labels/)
+                patient_images_dir = patient_dir / "images"
+                patient_labels_dir = patient_dir / "labels"
+                
+                if patient_images_dir.exists() and patient_labels_dir.exists():
+                    patients_info[patient_id] = {
+                        'series': series,
+                        'path': str(patient_dir),
+                        'structure_type': 'distributed'
+                    }
+                    
+                    self.stats['total_patients'] += 1
+                    self.stats['series_distribution'][series] += 1
         
         print(f"✅ 掃描完成，共找到 {len(patients_info)} 個有效患者")
         return patients_info
@@ -123,21 +153,53 @@ class DatasetSplitter:
         
         return train_patients, test_patients
     
-    def copy_patient_data(self, patient_ids: List[str], split_name: str) -> None:
+    def copy_patient_data(self, patient_ids: List[str], patients_info: Dict[str, Dict], split_name: str) -> None:
         """複製患者資料到對應的劃分目錄"""
         split_dir = self.output_dir / split_name
         split_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"📂 複製 {split_name} 資料 ({len(patient_ids)} 個患者)...")
         
-        for i, patient_id in enumerate(patient_ids, 1):
-            source_path = self.source_dir / patient_id
-            target_path = split_dir / patient_id
+        # 檢查結構類型 (使用第一個患者的資訊)
+        if patient_ids and patients_info[patient_ids[0]].get('structure_type') == 'centralized':
+            # preprocessed_yolo_lesion 格式: 創建集中式目錄
+            images_dir = split_dir / "images_png"
+            labels_dir = split_dir / "labels"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            labels_dir.mkdir(parents=True, exist_ok=True)
             
-            if source_path.exists():
-                if target_path.exists():
-                    shutil.rmtree(target_path)
-                shutil.copytree(source_path, target_path)
+            for i, patient_id in enumerate(patient_ids, 1):
+                # 複製 images_png
+                source_images_path = Path(patients_info[patient_id]['path'])
+                target_images_path = images_dir / patient_id
+                
+                if source_images_path.exists():
+                    if target_images_path.exists():
+                        shutil.rmtree(target_images_path)
+                    shutil.copytree(source_images_path, target_images_path)
+                
+                # 複製 labels
+                source_labels_path = Path(patients_info[patient_id]['labels_path'])
+                target_labels_path = labels_dir / patient_id
+                
+                if source_labels_path.exists():
+                    if target_labels_path.exists():
+                        shutil.rmtree(target_labels_path)
+                    shutil.copytree(source_labels_path, target_labels_path)
+                
+                if i % 50 == 0 or i == len(patient_ids):
+                    print(f"  進度: {i}/{len(patient_ids)} ({i/len(patient_ids)*100:.1f}%)")
+        
+        else:
+            # all_patient_data 格式: 每個患者獨立目錄
+            for i, patient_id in enumerate(patient_ids, 1):
+                source_path = self.source_dir / patient_id
+                target_path = split_dir / patient_id
+                
+                if source_path.exists():
+                    if target_path.exists():
+                        shutil.rmtree(target_path)
+                    shutil.copytree(source_path, target_path)
                 
                 if i % 50 == 0 or i == len(patient_ids):
                     print(f"  進度: {i}/{len(patient_ids)} ({i/len(patient_ids)*100:.1f}%)")
@@ -231,8 +293,8 @@ class DatasetSplitter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # 複製資料
-        self.copy_patient_data(train_patients, "train")
-        self.copy_patient_data(test_patients, "test")
+        self.copy_patient_data(train_patients, patients_info, "train")
+        self.copy_patient_data(test_patients, patients_info, "test")
         
         # 保存患者列表
         self.save_patient_lists(train_patients, test_patients)

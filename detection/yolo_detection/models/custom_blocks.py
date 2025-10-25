@@ -9,6 +9,19 @@ __all__ = [
     "RRBBlock",
 ]
 
+# ============== 初始化工具函數 ==============
+def kaiming_init(module):
+    """
+    應用 Kaiming Normal 初始化以穩定訓練
+    """
+    if isinstance(module, (nn.Conv2d, nn.Linear)):
+        nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
+    elif isinstance(module, nn.BatchNorm2d):
+        nn.init.constant_(module.weight, 1)
+        nn.init.constant_(module.bias, 0)
+
 # ============== AAF_CT (Lazy) ==============
 class AAF_CT(nn.Module):
     """
@@ -26,14 +39,18 @@ class AAF_CT(nn.Module):
     def _build(self, c1: int):
         c2 = self.target_c or c1
         self.proj = nn.Identity() if c1 == c2 else nn.Conv2d(c1, c2, 1, bias=False)
+        hidden_dim = max(c2 // 4, 16)  # ✅ 提升最小值到 16，避免 SE 過度壓縮
         self.se = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(c2, max(c2 // 4, 1), 1),
+            nn.Conv2d(c2, hidden_dim, 1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(max(c2 // 4, 1), c2, 1),
+            nn.Conv2d(hidden_dim, c2, 1),
             nn.Sigmoid()
         )
-        self.spatial = nn.Conv2d(c2, c2, 1, groups=self.groups)
+        self.spatial = nn.Conv2d(c2, c2, 1, groups=min(self.groups, c2))  # ✅ 避免 groups > channels
+        
+        # ✅ Kaiming 初始化
+        self.apply(kaiming_init)
         self._built = True
 
     def forward(self, x):
@@ -62,10 +79,20 @@ class DeformableAttention(nn.Module):
         B, C, H, W = x.shape
         qkv = self.qkv(x).reshape(B, 3, self.num_heads, C // self.num_heads, H * W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        
+        # ✅ 輕量 Layer Norm（僅標準化，不過度削弱）
+        q = F.layer_norm(q, q.shape[-2:])
+        k = F.layer_norm(k, k.shape[-2:])
+        
         offset = self.offset(x).view(B, self.num_heads, 2, H * W)
-        k = k + offset[:, :, 0, :].unsqueeze(2)
-        v = v + offset[:, :, 1, :].unsqueeze(2)
+        # ✅ 適度 offset（降低到 2.0，防止梯度爆炸）
+        offset = torch.tanh(offset) * 2.0
+        k = k + offset[:, :, 0, :].unsqueeze(2) * 0.3  # ✅ 降低衰減到 0.3
+        v = v + offset[:, :, 1, :].unsqueeze(2) * 0.3
+        
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        # ✅ 添加梯度裁剪，防止注意力爆炸
+        attn = torch.clamp(attn, min=-10, max=10)
         out = (attn.softmax(dim=-1) @ v).reshape(B, C, H, W)
         return self.proj(out)
 
@@ -90,11 +117,12 @@ class SATModule(nn.Module):
             nn.SiLU(),
             nn.Conv2d(c2 * 2, c2, 1)
         )
+        hidden_dim = max(c2 // 4, 16)  # ✅ 提升最小值到 16
         self.channel_gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(c2, max(c2 // 4, 1), 1),
+            nn.Conv2d(c2, hidden_dim, 1),
             nn.ReLU(),
-            nn.Conv2d(max(c2 // 4, 1), c2, 1),
+            nn.Conv2d(hidden_dim, c2, 1),
             nn.Sigmoid()
         )
         self._built = True
@@ -102,10 +130,18 @@ class SATModule(nn.Module):
     def forward(self, x):
         if not self._built:
             self._build(x.shape[1])
-        x = self.proj(x)
-        x = self.attn(x)
-        gate = self.channel_gate(x)
-        return x * gate + self.mlp(x)
+        x_input = self.proj(x)
+        
+        # ✅ 注意力分支（標準 Transformer 權重）
+        attn_out = self.attn(x_input) + x_input  # ✅ 標準殘差
+        
+        # ✅ Channel gate（標準 SE 模塊）
+        gate = self.channel_gate(attn_out)
+        
+        # ✅ MLP 分支（標準 FFN）
+        mlp_out = self.mlp(attn_out)
+        
+        return attn_out * gate + mlp_out  # ✅ 標準結構
 
 
 # ============== RRBBlock (Lazy) ==============
@@ -128,24 +164,26 @@ class RRBBlock(nn.Module):
         if self.deploy:
             self.reparam_conv = nn.Conv2d(c2, c2, 3, padding=1, bias=True)
         else:
+            # ✅ 使用 PyTorch 默認 BN 參數（更穩定）
             self.branch_3x3 = nn.Sequential(
                 nn.Conv2d(c2, c2, 3, padding=1, bias=False),
-                nn.BatchNorm2d(c2)
+                nn.BatchNorm2d(c2, eps=1e-5, momentum=0.1)  # ✅ PyTorch 默認值
             )
             self.branch_1x1 = nn.Sequential(
                 nn.Conv2d(c2, c2, 1, bias=False),
-                nn.BatchNorm2d(c2)
+                nn.BatchNorm2d(c2, eps=1e-5, momentum=0.1)
             )
-            self.branch_identity = nn.BatchNorm2d(c2)
+            self.branch_identity = nn.BatchNorm2d(c2, eps=1e-5, momentum=0.1)
         self._built = True
 
     def forward(self, x):
         if not self._built:
             self._build(x.shape[1])
-        x = self.proj(x)
+        x_in = self.proj(x)
         if self.deploy:
-            return F.silu(self.reparam_conv(x) + x)
-        out = self.branch_3x3(x) + self.branch_1x1(x) + self.branch_identity(x)
-        return F.silu(out)
+            return F.silu(self.reparam_conv(x_in)) + x_in
+        # ✅ 標準 RepVGG 結構：重參數化分支 + 殘差連接
+        out = self.branch_3x3(x_in) + self.branch_1x1(x_in) + self.branch_identity(x_in)
+        return F.silu(out) + x_in  # ✅ 關鍵修復：添加殘差連接
 
     # 其餘 fuse 函式同你現有版本（不重貼）

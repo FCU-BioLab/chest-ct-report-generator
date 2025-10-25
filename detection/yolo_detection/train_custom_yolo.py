@@ -8,11 +8,29 @@ patient-based train/validation splitting to prevent data leakage.
 
 Usage:
     python train_yolo_direct.py --data_dir ./datasets/splited_dataset/train \\
-                                --epochs 200 --batch_size 16 --model_size m
+        "device": "cuda", 
+        "warmup_momentum": 0.8, 
+        "warmup_bias_lr": 0.05, 
+        "cos_lr": config.cos_lr,
+        # Augmentation settings - FROM CONFIG
+        "degrees": config.degrees,
+        "translate": config.translate,
+        "scale": config.scale,
+        "fliplr": config.fliplr,
+        "flipud": config.flipud,
+        "mosaic": config.mosaic,
+        "mixup": config.mixup,
+        "copy_paste": config.copy_paste,vice(config.device),
+        "optimizer": config.optimizer,
+        # Learning rate settings - FROM CONFIG
+        "lr0": config.learning_rate,
+        "lrf": 0.01,
+        "momentum": config.momentum,
+        "weight_decay": config.weight_decay,
+        "warmup_epochs": config.warmup_epochs, 200 --batch_size 16 --model_size m
 """
 
 import argparse
-from html import parser
 import json
 import logging
 import os
@@ -27,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 try:
@@ -34,6 +53,42 @@ try:
     ULTRALYTICS_AVAILABLE = True
 except ImportError:
     ULTRALYTICS_AVAILABLE = False
+
+
+# ========== Focal Loss Implementation ==========
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance by down-weighting easy examples.
+    Designed to improve detection of small lesions in CT scans.
+    
+    Args:
+        alpha (float): Weighting factor in range (0,1) to balance positive/negative examples
+        gamma (float): Focusing parameter for modulating loss. Higher gamma increases focus on hard examples
+    
+    Reference: https://arxiv.org/abs/1708.02002
+    
+    ⚠️ NOTE: This class is currently a PLACEHOLDER and NOT integrated with YOLO training.
+    Ultralytics YOLO does not support custom loss functions via model.train() API.
+    To use Focal Loss, you would need to:
+    1. Modify the YOLO source code to replace the default loss
+    2. Or use class weights and sample rebalancing (current approach)
+    
+    The current implementation achieves similar effects through:
+    - Positive sample oversampling (oversample_positive parameter)
+    - Negative sample ratio control (max_negative_ratio parameter)
+    - Adjusted loss weights (box, cls, dfl parameters)
+    """
+    def __init__(self, alpha=0.75, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        BCE = nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-BCE)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * BCE
+        return focal_loss.mean()
+
 
 # ========== Configuration ==========
 @dataclass
@@ -57,13 +112,19 @@ class TrainingConfig:
     random_seed: int = 42
     
     # Class balancing
-    max_negative_ratio: float = 1.5         # ✅ Max ratio of negative samples (empty labels) to positive samples
+    max_negative_ratio: float = 0.3         # ✅ Max ratio of negative samples (empty labels) to positive samples
+    oversample_positive: float = 2.0        # ✅ Positive sample oversampling multiplier (e.g., 2.0 = duplicate positive samples)
+    
+    # Focal Loss settings
+    use_focal_loss: bool = False            # ✅ Enable Focal Loss for class imbalance (experimental with YOLO)
+    focal_alpha: float = 0.75               # ✅ Focal Loss alpha parameter
+    focal_gamma: float = 2.0                # ✅ Focal Loss gamma parameter
     
     # Optimizer settings
     optimizer: str = "AdamW"                # SGD/Adam/AdamW
     weight_decay: float = 0.0005
-    momentum: float = 0.937                 # For SGD
-    warmup_epochs: int = 5
+    momentum: float = 0.937                 # For SGD only
+    warmup_epochs: int = 10                 # Increased from 5 for better stability
     cos_lr: bool = True                     # Cosine LR scheduler
     
     # Augmentation
@@ -151,13 +212,22 @@ def collect_patient_data(data_dir: Path) -> Dict[str, List[Tuple[Path, Path, boo
     
     logging.info(f"Scanning dataset directory: {data_dir}")
     
-    for patient_dir in sorted(data_dir.iterdir()):
+    # ✅ Fix: The structure is data_dir/images_png/PATIENT_ID/, not data_dir/PATIENT_ID/images_png/
+    images_base_dir = data_dir / "images_png"
+    labels_base_dir = data_dir / "labels"
+    
+    if not images_base_dir.exists() or not labels_base_dir.exists():
+        logging.error(f"Missing images_png or labels directory in {data_dir}")
+        return patient_data
+    
+    for patient_dir in sorted(images_base_dir.iterdir()):
         if not patient_dir.is_dir():
             continue
         patient_id = patient_dir.name
-        images_dir = patient_dir / "images"
-        labels_dir = patient_dir / "labels"
-        if not images_dir.exists() or not labels_dir.exists():
+        images_dir = patient_dir
+        labels_dir = labels_base_dir / patient_id
+        if not labels_dir.exists():
+            logging.warning(f"Labels directory missing for patient {patient_id}")
             continue
         
         pairs = []
@@ -214,7 +284,7 @@ def ensure_val_has_positive_samples(patient_data: Dict[str, List[Tuple[Path, Pat
     return train_patients, val_patients
 
 
-def create_yolo_dataset(patient_data, train_patients, val_patients, output_dir, max_negative_ratio=1.0, random_seed=42):
+def create_yolo_dataset(patient_data, train_patients, val_patients, output_dir, max_negative_ratio=0.3, oversample_positive=1.0, random_seed=42):
     logging.info(f"Creating YOLO dataset at {output_dir}")
     for split in ["train", "val"]:
         (output_dir / "images" / split).mkdir(parents=True, exist_ok=True)
@@ -229,10 +299,35 @@ def create_yolo_dataset(patient_data, train_patients, val_patients, output_dir, 
                     negative_samples.append((patient_id, img_path, label_path))
                 else:
                     positive_samples.append((patient_id, img_path, label_path))
-        max_negatives = int(len(positive_samples) * max_negative_ratio)
-        if len(negative_samples) > max_negatives and max_negative_ratio < float('inf'):
-            random.seed(random_seed)
-            negative_samples = random.sample(negative_samples, max_negatives)
+        
+        # ✅ Apply rebalancing ONLY to training split
+        original_positive_count = len(positive_samples)
+        original_negative_count = len(negative_samples)
+        
+        if split == "train":
+            # Oversample positive samples for training split only
+            if oversample_positive > 1.0:
+                target_count = int(original_positive_count * oversample_positive)
+                # Repeat full copies
+                full_copies = int(oversample_positive)
+                positive_samples = positive_samples * full_copies
+                # Add random samples to reach target count
+                remaining = target_count - len(positive_samples)
+                if remaining > 0:
+                    random.seed(random_seed)
+                    positive_samples.extend(random.choices(positive_samples[:original_positive_count], k=remaining))
+                logging.info(f"  [Train] Oversampling positive samples: {original_positive_count} × {oversample_positive} = {len(positive_samples)}")
+            
+            # Control negative sample ratio for training split only
+            max_negatives = int(len(positive_samples) * max_negative_ratio)
+            if len(negative_samples) > max_negatives and max_negative_ratio < float('inf'):
+                random.seed(random_seed)
+                negative_samples = random.sample(negative_samples, max_negatives)
+                logging.info(f"  [Train] Limiting negative samples: {original_negative_count} → {len(negative_samples)} (ratio={max_negative_ratio})")
+        else:
+            # ⚠️ CRITICAL: Validation split keeps ORIGINAL distribution
+            logging.info(f"  [Val] Keeping original distribution: {original_positive_count} positive, {original_negative_count} negative")
+        
         all_samples = positive_samples + negative_samples
         
         img_count = pos_count = neg_count = 0
@@ -257,12 +352,12 @@ def create_yolo_dataset(patient_data, train_patients, val_patients, output_dir, 
     val_count, val_pos, val_neg = link_files(val_patients, "val")
 
     yaml_content = f"""# YOLOv11 Dataset Configuration
-    path: {output_dir.absolute().as_posix()}
-    train: images/train
-    val: images/val
-    nc: 1
-    names: ['lesion']
-    """
+path: {output_dir.absolute().as_posix()}
+train: images/train
+val: images/val
+nc: 1
+names: ['lesion']
+"""
     yaml_path = output_dir / "dataset.yaml"
     yaml_path.write_text(yaml_content, encoding="utf-8")
     return yaml_path
@@ -298,10 +393,29 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
     # )
 
 
+    # --- 預先下載 AMP 檢查所需的 yolo11n.pt（避免訓練中途下載）---
+    try:
+        logging.info("Ensuring yolo11n.pt is available for AMP checks...")
+        _ = YOLO("yolo11n.pt")  # 觸發自動下載
+        logging.info("✅ yolo11n.pt ready")
+    except Exception as e:
+        logging.warning(f"Failed to pre-download yolo11n.pt: {e}")
+
     # --- 正式訓練 ---
     logging.info("=" * 80)
     logging.info("Starting YOLOv11 Training")
     logging.info("=" * 80)
+    
+    # Log rebalancing strategy
+    logging.info(f"📊 Dataset Rebalancing Configuration:")
+    logging.info(f"  - Max Negative Ratio: {config.max_negative_ratio}")
+    logging.info(f"  - Positive Oversampling: {config.oversample_positive}x")
+    logging.info(f"  - Focal Loss: {'Enabled' if config.use_focal_loss else 'Disabled'}")
+    if config.use_focal_loss:
+        logging.warning("⚠️  Focal Loss flag is set but NOT actively integrated with Ultralytics YOLO API.")
+        logging.warning("    YOLO uses its own loss function. Current implementation uses sample rebalancing instead.")
+        logging.info(f"    → Alpha: {config.focal_alpha}, Gamma: {config.focal_gamma}")
+    
     model_name = config.model if config.model else f"yolo11{config.model_size}.pt"
     logging.info(f"Loading model: {model_name}")
     model = YOLO(model_name)
@@ -313,36 +427,36 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "batch": config.batch_size,
         "device": select_device(config.device),
         "optimizer": config.optimizer,
-        # �️ Conservative-but-Effective Strategy (避免NaN同時衝刺F1=0.9)
-        "lr0": 0.0008,          # ✅ 提升至0.0008（已知穩定且收斂快）
-        "lrf": 0.01,            # ✅ 強衰減（後期穩定）
-        "momentum": config.momentum,
-        "weight_decay": 0.0003, # ✅ 輕度正則化
-        "warmup_epochs": 10,    # ✅ 縮短至10 epoch（無重度增強不需太長）
+        # Learning rate and optimizer settings - FROM CONFIG
+        "lr0": config.learning_rate,
+        "lrf": 0.01,
+        "momentum": config.momentum,  # Note: Only effective for SGD optimizer
+        "weight_decay": config.weight_decay,
+        "warmup_epochs": config.warmup_epochs,
         "warmup_momentum": 0.8, 
         "warmup_bias_lr": 0.05, 
-        "cos_lr": True,         
-        # � Minimal Augmentation (關閉噪音來源，保留輕度增強)
-        "degrees": 3.0,         # ✅ 輕度旋轉（從5降至3）
-        "translate": 0.1,       # ✅ 輕度平移（從0.12降至0.1）
-        "scale": 0.5,           # ✅ 輕度尺度（從0.6降至0.5）
-        "fliplr": 0.5,
-        "flipud": 0.0,
-        "mosaic": 0.0,          # ✅ 關閉Mosaic（避免破壞病灶特徵）
-        "mixup": 0.0,           # ✅ 關閉MixUp（避免邊界模糊）
-        "copy_paste": 0.0,      # ✅ 關閉Copy-Paste
+        "cos_lr": config.cos_lr,
+        # Augmentation settings - FROM CONFIG
+        "degrees": config.degrees,
+        "translate": config.translate,
+        "scale": config.scale,
+        "fliplr": config.fliplr,
+        "flipud": config.flipud,
+        "mosaic": config.mosaic,
+        "mixup": config.mixup,
+        "copy_paste": config.copy_paste,
         "hsv_h": 0.0,           
         "hsv_s": 0.0,
-        "hsv_v": 0.2,           # ✅ 輕度亮度（從0.25降至0.2）
-        "auto_augment": "randaugment",  
-        "erasing": 0.15,        # ✅ 輕度擦除（從0.3降至0.15）
+        "hsv_v": 0.0,
+        "auto_augment": "none",  
+        "erasing": 0.0,
         "project": str(Path(config.save_dir) / "training"),
         "amp": True,            
         "name": f"yolo11{config.model_size}_{timestamp}",
         "exist_ok": True,
         "save": True,
         "val": True,
-        "patience": 150,        # ✅ 提高耐心（長期訓練）
+        "patience": config.patience,
         "workers": config.workers,
         "verbose": True,
         "plots": True,
@@ -350,10 +464,11 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "rect": False,
         "freeze": 0,
         "close_mosaic": 0,      # ✅ 無Mosaic不需close_mosaic
-        # 🎯 Maintain Effective Loss Weights
-        "box": 10.0,            # ✅ 維持box loss
-        "cls": 0.5,             # ✅ 維持cls懲罰
-        "dfl": 2.0,             # ✅ 降低DFL（2.5→2.0）
+        # 🎯 Optimized Loss Weights for Medical CT Detection
+        "box": 7.0,             # ✅ Increased box loss weight (10.0→7.0) to emphasize localization
+        "cls": 1.0,             # ✅ Increased cls loss weight (0.5→1.0) for better classification
+        "dfl": 1.5,             # ✅ Adjusted DFL loss weight (2.0→1.5) for distribution focal loss
+        # Note: pos_weight is handled via Focal Loss or class weights in custom training
         "nbs": 128,             # ✅ Gradient Accumulation
         "dropout": 0.1,         # ✅ 輕度Dropout
     }
@@ -371,21 +486,25 @@ def main():
     parser.add_argument("--epochs", type=int, default=300)  # ✅ 延長至300 epoch補償較低lr
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--model_size", type=str, default="m", choices=["n","s","m","l","x"])
+    parser.add_argument("--model_size", type=str, default="s", choices=["n","s","m","l","x"])
     parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--val_ratio", type=float, default=0.2)
+    parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max_negative_ratio", type=float, default=1.5)  # ✅ 增加負樣本比例
+    parser.add_argument("--max_negative_ratio", type=float, default=0.3)  # ✅ Updated default to 0.3
+    parser.add_argument("--oversample_positive", type=float, default=2.0, help="Positive sample oversampling multiplier")
+    parser.add_argument("--use_focal_loss", action="store_true", help="Enable Focal Loss (experimental)")
+    parser.add_argument("--focal_alpha", type=float, default=0.75, help="Focal Loss alpha parameter")
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal Loss gamma parameter")
     parser.add_argument("--optimizer", type=str, default="AdamW")
     parser.add_argument("--weight_decay", type=float, default=0.0005)
-    parser.add_argument("--warmup_epochs", type=int, default=5)
+    parser.add_argument("--warmup_epochs", type=int, default=10)
     parser.add_argument("--no_cos_lr", action="store_true")
     parser.add_argument("--mosaic", type=float, default=0.0)
     parser.add_argument("--mixup", type=float, default=0.0)
     parser.add_argument("--degrees", type=float, default=0.0)
-    parser.add_argument("--translate", type=float, default=0.05)
-    parser.add_argument("--scale", type=float, default=0.1)
-    parser.add_argument("--fliplr", type=float, default=0.5)
+    parser.add_argument("--translate", type=float, default=0.0)
+    parser.add_argument("--scale", type=float, default=0.0)
+    parser.add_argument("--fliplr", type=float, default=0.0)
     parser.add_argument("--save_dir", type=str, default="./yolo_runs")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--device", type=str, default="auto")
@@ -407,6 +526,10 @@ def main():
         val_ratio=args.val_ratio,
         random_seed=args.seed,
         max_negative_ratio=args.max_negative_ratio,
+        oversample_positive=args.oversample_positive,
+        use_focal_loss=args.use_focal_loss,
+        focal_alpha=args.focal_alpha,
+        focal_gamma=args.focal_gamma,
         optimizer=args.optimizer,
         weight_decay=args.weight_decay,
         warmup_epochs=args.warmup_epochs,
@@ -432,10 +555,10 @@ def main():
     patient_data = collect_patient_data(data_dir)
     patient_ids = list(patient_data.keys())
     train_patients, val_patients = split_patients(patient_ids, config.val_ratio, config.random_seed)
-    train_patients, val_patients = ensure_val_has_positive_samples(patient_data, val_patients, train_patients)
+    train_patients, val_patients = ensure_val_has_positive_samples(patient_data, train_patients, val_patients)
 
     dataset_dir = save_dir / f"dataset_{timestamp}"
-    dataset_yaml = create_yolo_dataset(patient_data, train_patients, val_patients, dataset_dir, config.max_negative_ratio, config.random_seed)
+    dataset_yaml = create_yolo_dataset(patient_data, train_patients, val_patients, dataset_dir, config.max_negative_ratio, config.oversample_positive, config.random_seed)
 
     train_results = train_yolo(config, dataset_yaml, timestamp)
     if not train_results["success"]:
