@@ -555,7 +555,7 @@ def main():
     patient_data = collect_patient_data(data_dir)
     patient_ids = list(patient_data.keys())
     train_patients, val_patients = split_patients(patient_ids, config.val_ratio, config.random_seed)
-    train_patients, val_patients = ensure_val_has_positive_samples(patient_data, train_patients, val_patients)
+    train_patients, val_patients = ensure_val_has_positive_samples(patient_data, val_patients, train_patients)
 
     dataset_dir = save_dir / f"dataset_{timestamp}"
     dataset_yaml = create_yolo_dataset(patient_data, train_patients, val_patients, dataset_dir, config.max_negative_ratio, config.oversample_positive, config.random_seed)
