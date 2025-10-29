@@ -54,8 +54,8 @@ head:
   - [-1, 1, Conv, [512, 1, 1]]                  # 32
   - [-1, 1, RRBBlock, [512]]                    # 33 ✅ 最終層保留
 
-  # Neck Transformer (增強版，heads=8)
-  - [-1, 1, SATModule, [512, 8]]                # 34 ✅ heads=8
+  # Neck Transformer (穩定版，heads=4)
+  - [-1, 1, SATModule, [512, 4]]                # 34 ✅ heads=4（從8降至4以穩定訓練）
 
   # Detect (P2, P3, P4, P5) - 四層特徵輸出
   - [[25, 21, 29, 34], 1, Detect, [nc]]         # 35 ✅ P2/P3/P4/P5

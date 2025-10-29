@@ -163,13 +163,13 @@ class DatasetSplitter:
         # 檢查結構類型 (使用第一個患者的資訊)
         if patient_ids and patients_info[patient_ids[0]].get('structure_type') == 'centralized':
             # preprocessed_yolo_lesion 格式: 創建集中式目錄
-            images_dir = split_dir / "images_png"
+            images_dir = split_dir / "images"
             labels_dir = split_dir / "labels"
             images_dir.mkdir(parents=True, exist_ok=True)
             labels_dir.mkdir(parents=True, exist_ok=True)
             
             for i, patient_id in enumerate(patient_ids, 1):
-                # 複製 images_png
+                # 複製 images
                 source_images_path = Path(patients_info[patient_id]['path'])
                 target_images_path = images_dir / patient_id
                 

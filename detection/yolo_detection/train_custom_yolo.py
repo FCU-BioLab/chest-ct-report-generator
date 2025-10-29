@@ -7,27 +7,22 @@ This script trains YOLOv11 on already-formatted YOLO datasets with automatic
 patient-based train/validation splitting to prevent data leakage.
 
 Usage:
-    python train_yolo_direct.py --data_dir ./datasets/splited_dataset/train \\
-        "device": "cuda", 
-        "warmup_momentum": 0.8, 
-        "warmup_bias_lr": 0.05, 
-        "cos_lr": config.cos_lr,
-        # Augmentation settings - FROM CONFIG
-        "degrees": config.degrees,
-        "translate": config.translate,
-        "scale": config.scale,
-        "fliplr": config.fliplr,
-        "flipud": config.flipud,
-        "mosaic": config.mosaic,
-        "mixup": config.mixup,
-        "copy_paste": config.copy_paste,vice(config.device),
-        "optimizer": config.optimizer,
-        # Learning rate settings - FROM CONFIG
-        "lr0": config.learning_rate,
-        "lrf": 0.01,
-        "momentum": config.momentum,
-        "weight_decay": config.weight_decay,
-        "warmup_epochs": config.warmup_epochs, 200 --batch_size 16 --model_size m
+    python train_custom_yolo.py ^
+        --model models/yolo11_custom_ct_s_optimize.yaml ^
+        --data_dir ../../datasets/splits_yolo_lesion/train ^
+        --epochs 300 ^
+        --batch_size 16 ^
+        --imgsz 640 ^
+        --lr 0.0007 ^
+        --max_negative_ratio 0.3 ^
+        --oversample_positive 2.0 ^
+        --warmup_epochs 15 ^
+        --fliplr 0.5 ^
+        --scale 0.3 ^
+        --translate 0.15 ^
+        --degrees 3.0 ^
+        --workers 8 ^
+        --optimizer AdamW
 """
 
 import argparse
@@ -138,7 +133,7 @@ class TrainingConfig:
     flipud: float = 0.0
     
     # Advanced settings
-    patience: int = 100
+    patience: int = 50
     save_period: int = 10
     workers: int = 8
     device: str = "auto"
@@ -212,12 +207,21 @@ def collect_patient_data(data_dir: Path) -> Dict[str, List[Tuple[Path, Path, boo
     
     logging.info(f"Scanning dataset directory: {data_dir}")
     
-    # ✅ Fix: The structure is data_dir/images_png/PATIENT_ID/, not data_dir/PATIENT_ID/images_png/
-    images_base_dir = data_dir / "images_png"
+    # ✅ Auto-detect folder structure (supports both "images" and "images_png")
+    images_base_dir = None
+    for possible_name in ["images", "images_png"]:
+        candidate = data_dir / possible_name
+        if candidate.exists():
+            images_base_dir = candidate
+            logging.info(f"  Found images directory: {possible_name}/")
+            break
+    
     labels_base_dir = data_dir / "labels"
     
-    if not images_base_dir.exists() or not labels_base_dir.exists():
-        logging.error(f"Missing images_png or labels directory in {data_dir}")
+    if images_base_dir is None or not labels_base_dir.exists():
+        logging.error(f"Missing images (or images_png) or labels directory in {data_dir}")
+        logging.error(f"  Expected structure: {data_dir}/[images|images_png]/PATIENT_ID/*.png")
+        logging.error(f"                      {data_dir}/labels/PATIENT_ID/*.txt")
         return patient_data
     
     for patient_dir in sorted(images_base_dir.iterdir()):
@@ -403,22 +407,31 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
 
     # --- 正式訓練 ---
     logging.info("=" * 80)
-    logging.info("Starting YOLOv11 Training")
+    logging.info("🚀 Starting YOLOv11 Custom CT Model Training")
     logging.info("=" * 80)
-    
-    # Log rebalancing strategy
-    logging.info(f"📊 Dataset Rebalancing Configuration:")
-    logging.info(f"  - Max Negative Ratio: {config.max_negative_ratio}")
-    logging.info(f"  - Positive Oversampling: {config.oversample_positive}x")
-    logging.info(f"  - Focal Loss: {'Enabled' if config.use_focal_loss else 'Disabled'}")
-    if config.use_focal_loss:
-        logging.warning("⚠️  Focal Loss flag is set but NOT actively integrated with Ultralytics YOLO API.")
-        logging.warning("    YOLO uses its own loss function. Current implementation uses sample rebalancing instead.")
-        logging.info(f"    → Alpha: {config.focal_alpha}, Gamma: {config.focal_gamma}")
+    logging.info("")
     
     model_name = config.model if config.model else f"yolo11{config.model_size}.pt"
-    logging.info(f"Loading model: {model_name}")
+    
+    # ✅ Log ONLY custom configurations NOT in args.yaml
+    logging.info("📊 Custom Dataset Rebalancing (Pre-processing):")
+    logging.info(f"  - Max Negative Ratio: {config.max_negative_ratio} (limits negative samples in training split)")
+    logging.info(f"  - Positive Oversampling: {config.oversample_positive}x (duplicates positive samples)")
+    logging.info(f"  ⚠️  Note: Validation split keeps original distribution for fair evaluation")
+    if config.use_focal_loss:
+        logging.warning(f"  - Focal Loss Flag: Enabled (alpha={config.focal_alpha}, gamma={config.focal_gamma})")
+        logging.warning(f"    ⚠️  NOT integrated with YOLO API - using sample rebalancing instead")
+    logging.info("")
+    
+    logging.info(f"📁 Dataset Path:")
+    logging.info(f"  - YAML: {dataset_yaml}")
+    logging.info(f"  ℹ️  All other training hyperparameters will be saved in: runs/.../args.yaml")
+    logging.info("")
+    
+    logging.info(f"🔧 Loading model: {model_name}...")
     model = YOLO(model_name)
+    logging.info(f"✅ Model loaded successfully")
+    logging.info(f"")
 
     train_args = {
         "data": str(dataset_yaml),
@@ -429,7 +442,7 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "optimizer": config.optimizer,
         # Learning rate and optimizer settings - FROM CONFIG
         "lr0": config.learning_rate,
-        "lrf": 0.01,
+        "lrf": 0.08,
         "momentum": config.momentum,  # Note: Only effective for SGD optimizer
         "weight_decay": config.weight_decay,
         "warmup_epochs": config.warmup_epochs,
@@ -464,18 +477,109 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "rect": False,
         "freeze": 0,
         "close_mosaic": 0,      # ✅ 無Mosaic不需close_mosaic
-        # 🎯 Optimized Loss Weights for Medical CT Detection
-        "box": 7.0,             # ✅ Increased box loss weight (10.0→7.0) to emphasize localization
-        "cls": 1.0,             # ✅ Increased cls loss weight (0.5→1.0) for better classification
-        "dfl": 1.5,             # ✅ Adjusted DFL loss weight (2.0→1.5) for distribution focal loss
-        # Note: pos_weight is handled via Focal Loss or class weights in custom training
+        # 🎯 Optimized Loss Weights for Gradient Stability
+        "box": 5.0,             # ✅ Reduced from 7.0 to prevent gradient explosion
+        "cls": 1.0,             # ✅ Reduced from 1.0 (cls_loss was abnormally high)
+        "dfl": 1.2,             # ✅ Slightly reduced from 1.5
+        # Note: Gradient clipping is handled internally by Ultralytics YOLO
+        # max_grad_norm is NOT a valid YOLO argument, removed to prevent SyntaxError
         "nbs": 128,             # ✅ Gradient Accumulation
         "dropout": 0.1,         # ✅ 輕度Dropout
     }
 
+    logging.info("=" * 80)
+    logging.info("🎯 Initiating Training Process...")
+    logging.info("=" * 80)
+    logging.info("")
 
-    results = model.train(**train_args)
-    return {"success": True, "results": results}
+    # Start timing
+    import time
+    start_time = time.time()
+    start_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
+    logging.info(f"⏱️  Training Start Time: {start_time_str}")
+    logging.info("")
+
+    try:
+        results = model.train(**train_args)
+        
+        # End timing and calculate metrics
+        end_time = time.time()
+        end_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time))
+        total_time_seconds = end_time - start_time
+        
+        # Format time
+        hours = int(total_time_seconds // 3600)
+        minutes = int((total_time_seconds % 3600) // 60)
+        seconds = int(total_time_seconds % 60)
+        
+        # Calculate average time per epoch
+        epochs_trained = results.epochs if hasattr(results, 'epochs') else config.num_epochs
+        avg_time_per_epoch = total_time_seconds / epochs_trained if epochs_trained > 0 else 0
+        avg_minutes = int(avg_time_per_epoch // 60)
+        avg_seconds = int(avg_time_per_epoch % 60)
+        
+        # Calculate throughput (images per second)
+        # Assuming train_dataset_size is available from config or results
+        train_images = len(model.trainer.train_loader.dataset) if hasattr(model, 'trainer') and hasattr(model.trainer, 'train_loader') else 0
+        images_per_epoch = train_images if train_images > 0 else 0
+        total_images_processed = images_per_epoch * epochs_trained
+        throughput = total_images_processed / total_time_seconds if total_time_seconds > 0 else 0
+        
+        logging.info("")
+        logging.info("=" * 80)
+        logging.info("✅ Training Completed Successfully!")
+        logging.info("=" * 80)
+        logging.info("")
+        
+        logging.info("⏱️  Training Time Metrics:")
+        logging.info(f"  - Start Time: {start_time_str}")
+        logging.info(f"  - End Time: {end_time_str}")
+        logging.info(f"  - Total Training Time: {hours}h {minutes}m {seconds}s ({total_time_seconds:.2f} seconds)")
+        logging.info(f"  - Average Time per Epoch: {avg_minutes}m {avg_seconds}s ({avg_time_per_epoch:.2f} seconds)")
+        logging.info("")
+        
+        logging.info("📊 Training Performance:")
+        logging.info(f"  - Total Epochs Trained: {epochs_trained}")
+        if images_per_epoch > 0:
+            logging.info(f"  - Images per Epoch: {images_per_epoch:,}")
+            logging.info(f"  - Total Images Processed: {total_images_processed:,}")
+            logging.info(f"  - Throughput: {throughput:.2f} images/second")
+            logging.info(f"  - Average Batch Processing Time: {(avg_time_per_epoch / (images_per_epoch / config.batch_size)):.3f}s per batch")
+        logging.info("")
+        
+        logging.info("💾 Model Checkpoints:")
+        logging.info(f"  - Best Model: best.pt (saved at best mAP epoch)")
+        logging.info(f"  - Last Model: last.pt (final epoch weights)")
+        logging.info("")
+        
+        # Training efficiency metrics
+        if hasattr(results, 'results_dict'):
+            results_dict = results.results_dict
+            if 'metrics/mAP50(B)' in results_dict:
+                best_map50 = results_dict['metrics/mAP50(B)']
+                logging.info("🎯 Best Performance Metrics:")
+                logging.info(f"  - mAP@50: {best_map50:.4f}")
+                if 'metrics/mAP50-95(B)' in results_dict:
+                    logging.info(f"  - mAP@50-95: {results_dict['metrics/mAP50-95(B)']:.4f}")
+                if 'metrics/precision(B)' in results_dict:
+                    logging.info(f"  - Precision: {results_dict['metrics/precision(B)']:.4f}")
+                if 'metrics/recall(B)' in results_dict:
+                    logging.info(f"  - Recall: {results_dict['metrics/recall(B)']:.4f}")
+                logging.info("")
+        
+        return {"success": True, "results": results, "training_time": total_time_seconds}
+        
+    except Exception as e:
+        logging.error("")
+        logging.error("=" * 80)
+        logging.error("❌ Training Failed!")
+        logging.error("=" * 80)
+        logging.error(f"Error: {str(e)}")
+        logging.error("")
+        import traceback
+        logging.error("Full traceback:")
+        logging.error(traceback.format_exc())
+        return {"success": False, "error": str(e)}
 
 
 # ========== Main Pipeline ==========
@@ -487,7 +591,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--model_size", type=str, default="s", choices=["n","s","m","l","x"])
-    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--lr", type=float, default=0.0008)  # ✅ 降低默認學習率（從 0.001 → 0.0008）
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_negative_ratio", type=float, default=0.3)  # ✅ Updated default to 0.3

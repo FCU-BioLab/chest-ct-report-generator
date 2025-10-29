@@ -85,14 +85,14 @@ class DeformableAttention(nn.Module):
         k = F.layer_norm(k, k.shape[-2:])
         
         offset = self.offset(x).view(B, self.num_heads, 2, H * W)
-        # ✅ 適度 offset（降低到 2.0，防止梯度爆炸）
-        offset = torch.tanh(offset) * 2.0
-        k = k + offset[:, :, 0, :].unsqueeze(2) * 0.3  # ✅ 降低衰減到 0.3
-        v = v + offset[:, :, 1, :].unsqueeze(2) * 0.3
+        # ✅ 激進降低 offset（1.5，強化穩定性）
+        offset = torch.tanh(offset) * 1.5
+        k = k + offset[:, :, 0, :].unsqueeze(2) * 0.2  # ✅ 進一步降低到 0.2
+        v = v + offset[:, :, 1, :].unsqueeze(2) * 0.2
         
         attn = (q @ k.transpose(-2, -1)) * self.scale
-        # ✅ 添加梯度裁剪，防止注意力爆炸
-        attn = torch.clamp(attn, min=-10, max=10)
+        # ✅ 更激進的梯度裁剪（±5 而非 ±10）
+        attn = torch.clamp(attn, min=-5, max=5)
         out = (attn.softmax(dim=-1) @ v).reshape(B, C, H, W)
         return self.proj(out)
 
@@ -102,10 +102,11 @@ class SATModule(nn.Module):
       - [-1, 1, SATModule, []]        # 通道不變
       - [-1, 1, SATModule, [1024]]    # 需要時才變更通道
     """
-    def __init__(self, c2: int | None = None, heads: int = 4):
+    def __init__(self, c2: int | None = None, heads: int = 4, use_checkpoint: bool = False):
         super().__init__()
         self.target_c = c2
         self.heads = heads
+        self.use_checkpoint = use_checkpoint  # ✅ Gradient Checkpointing 開關
         self._built = False
 
     def _build(self, c1: int):
@@ -127,11 +128,8 @@ class SATModule(nn.Module):
         )
         self._built = True
 
-    def forward(self, x):
-        if not self._built:
-            self._build(x.shape[1])
-        x_input = self.proj(x)
-        
+    def _forward_impl(self, x_input):
+        """實際的前向傳播邏輯（用於 Checkpointing）"""
         # ✅ 注意力分支（標準 Transformer 權重）
         attn_out = self.attn(x_input) + x_input  # ✅ 標準殘差
         
@@ -142,6 +140,18 @@ class SATModule(nn.Module):
         mlp_out = self.mlp(attn_out)
         
         return attn_out * gate + mlp_out  # ✅ 標準結構
+
+    def forward(self, x):
+        if not self._built:
+            self._build(x.shape[1])
+        x_input = self.proj(x)
+        
+        # ✅ 使用 Gradient Checkpointing（僅在訓練時啟用）
+        if self.use_checkpoint and self.training:
+            from torch.utils.checkpoint import checkpoint
+            return checkpoint(self._forward_impl, x_input, use_reentrant=False)
+        else:
+            return self._forward_impl(x_input)
 
 
 # ============== RRBBlock (Lazy) ==============

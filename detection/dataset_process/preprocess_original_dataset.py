@@ -6,7 +6,7 @@
   DICOM → NIfTI (for 3D)
 
 功能：
- - 僅處理 CT 影像，自動跳過 PET/NM/MR
+ - 僅處理 CT 且原始為灰階的影像，自動跳過 PET/NM/MR 及彩色影像
  - 跳過的模態不生成影像與標註
  - 動態亮度補正（自動窗位 / CLAHE）
  - 自動型態修正（防止 OpenCV CLAHE 錯誤）
@@ -99,6 +99,10 @@ def read_dicom_to_array(dicom_path: str) -> Tuple[Optional[np.ndarray], Optional
     try:
         dcm = pydicom.dcmread(dicom_path)
         pixel_array = dcm.pixel_array.astype(float)
+        
+        # 檢查是否為灰階影像 (2D)
+        is_grayscale = (pixel_array.ndim == 2)
+        
         intercept = getattr(dcm, "RescaleIntercept", 0)
         slope = getattr(dcm, "RescaleSlope", 1)
         hu_array = pixel_array * slope + intercept
@@ -109,6 +113,7 @@ def read_dicom_to_array(dicom_path: str) -> Tuple[Optional[np.ndarray], Optional
             "PixelSpacing": getattr(dcm, "PixelSpacing", [1.0, 1.0]),
             "SliceThickness": getattr(dcm, "SliceThickness", 1.0),
             "Modality": modality,
+            "IsGrayscale": is_grayscale,
         }
         return hu_array, metadata
     except Exception as e:
@@ -163,7 +168,7 @@ def save_single_nifti(hu_array: np.ndarray, output_path: Path, voxel_spacing: Li
 
 
 # ==============================================================
-# 單一病患處理 (跳過非 CT 並略過標註)
+# 單一病患處理 (跳過非 CT、非灰階並略過標註)
 # ==============================================================
 def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root: Path,
                     window_center=-600.0, window_width=1500.0) -> Dict:
@@ -181,7 +186,7 @@ def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root:
     for d in [yolo_img_dir, yolo_lbl_dir, nii_img_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    processed_ct, skipped_non_ct = 0, 0
+    processed_ct, skipped_non_ct, skipped_color = 0, 0, 0
     details = []
 
     for dicom_path in dicom_files:
@@ -190,6 +195,9 @@ def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root:
             continue
 
         modality = meta.get("Modality", "").upper()
+        is_grayscale = meta.get("IsGrayscale", False)
+        
+        # 檢查是否為 CT 且為灰階
         if modality != "CT":
             skipped_non_ct += 1
             details.append({
@@ -198,6 +206,16 @@ def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root:
                 "status": "skipped_non_ct"
             })
             continue  # 完全略過該影像及其標記
+        
+        if not is_grayscale:
+            skipped_color += 1
+            details.append({
+                "file": dicom_path.name,
+                "modality": modality,
+                "image_shape": str(hu_array.shape),
+                "status": "skipped_color_image"
+            })
+            continue  # 完全略過彩色影像
 
         # --------- 動態亮度補正 ----------
         img = apply_hu_windowing(hu_array, window_center, window_width)
@@ -247,6 +265,7 @@ def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root:
         "patient_id": patient_id,
         "processed_ct": processed_ct,
         "skipped_non_ct": skipped_non_ct,
+        "skipped_color": skipped_color,
         "details": details
     }
 
@@ -269,14 +288,16 @@ def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.
 
     total_ct = sum(s["processed_ct"] for s in all_stats)
     total_non_ct = sum(s["skipped_non_ct"] for s in all_stats)
-    total_images = total_ct + total_non_ct
+    total_color = sum(s.get("skipped_color", 0) for s in all_stats)
+    total_images = total_ct + total_non_ct + total_color
 
     report = {
         "summary": {
             "patients": len(patients),
             "total_images": total_images,
-            "processed_ct": total_ct,
-            "skipped_non_ct": total_non_ct
+            "processed_ct_grayscale": total_ct,
+            "skipped_non_ct": total_non_ct,
+            "skipped_color": total_color
         },
         "details": all_stats
     }
@@ -289,8 +310,9 @@ def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.
     print("\n✅ 完成！")
     print(f"📊 統計資訊：")
     print(f"   總影像數: {total_images}")
-    print(f"   CT 影像: {total_ct}")
-    print(f"   非 CT 影像: {total_non_ct}")
+    print(f"   處理的 CT 灰階影像: {total_ct}")
+    print(f"   跳過的非 CT 影像: {total_non_ct}")
+    print(f"   跳過的彩色影像: {total_color}")
     print(f"📁 YOLO 輸出: {yolo_root}")
     print(f"📁 NIfTI 輸出: {nii_root}")
 
@@ -299,7 +321,7 @@ def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.
 # 入口
 # ==============================================================
 def main():
-    parser = argparse.ArgumentParser(description="DICOM → PNG + NIfTI 動態亮度補正版 (CT only, skip non-CT & labels)")
+    parser = argparse.ArgumentParser(description="DICOM → PNG + NIfTI 動態亮度補正版 (CT grayscale only, skip non-CT & color images)")
     parser.add_argument("--data_root", type=str, required=True, help="原始 DICOM 資料夾")
     parser.add_argument("--yolo_dir", type=str, default="../../datasets/preprocessed_yolo_lesion", help="YOLO 輸出資料夾")
     parser.add_argument("--nii_dir", type=str, default="../../datasets/preprocessed_nii_lesion", help="NIfTI 輸出資料夾")
