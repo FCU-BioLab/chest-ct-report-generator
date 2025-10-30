@@ -8,7 +8,7 @@ patient-based train/validation splitting to prevent data leakage.
 
 Usage:
     python train_custom_yolo.py ^
-        --model models/yolo11_custom_ct_s_optimize.yaml ^
+        --model models/path_to_model(.pt or .yaml) ^
         --data_dir ../../datasets/splits_yolo_lesion/train ^
         --epochs 300 ^
         --batch_size 16 ^
