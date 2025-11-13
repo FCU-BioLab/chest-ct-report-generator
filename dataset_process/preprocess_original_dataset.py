@@ -6,13 +6,14 @@
   DICOM → NIfTI (for 3D)
 
 功能：
- - 僅處理 CT 且原始為灰階的影像，自動跳過 PET/NM/MR 及彩色影像
- - 跳過的模態不生成影像與標註
- - 動態亮度補正（自動窗位 / CLAHE）
+ - 僅處理 CT 影像，自動跳過 PET/NM/MR
+ - 支援兩種模式：
+   * 預設：只處理灰階影像，跳過彩色影像
+   * --rgb：只處理 RGB 彩色影像，跳過灰階影像
+ - 動態亮度補正（自動窗位 / CLAHE，僅適用於灰階模式）
  - 自動型態修正（防止 OpenCV CLAHE 錯誤）
  - PNG 輸出到 preprocessed_yolo_lesion/
  - NIfTI 輸出到 preprocessed_nii_lesion/
- - 不再複製 YOLO 標註到 NIfTI
  - 輸出 processing_report.json
 """
 
@@ -171,7 +172,7 @@ def save_single_nifti(hu_array: np.ndarray, output_path: Path, voxel_spacing: Li
 # 單一病患處理 (跳過非 CT、非灰階並略過標註)
 # ==============================================================
 def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root: Path,
-                    window_center=-600.0, window_width=1500.0) -> Dict:
+                    window_center=-600.0, window_width=1500.0, rgb_only=False) -> Dict:
     patient_dir = data_root / patient_id
     dicom_dir = patient_dir / "dicom_files"
     xml_dir = patient_dir / "xml_annotations"
@@ -197,7 +198,7 @@ def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root:
         modality = meta.get("Modality", "").upper()
         is_grayscale = meta.get("IsGrayscale", False)
         
-        # 檢查是否為 CT 且為灰階
+        # 檢查是否為 CT
         if modality != "CT":
             skipped_non_ct += 1
             details.append({
@@ -207,26 +208,51 @@ def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root:
             })
             continue  # 完全略過該影像及其標記
         
-        if not is_grayscale:
-            skipped_color += 1
-            details.append({
-                "file": dicom_path.name,
-                "modality": modality,
-                "image_shape": str(hu_array.shape),
-                "status": "skipped_color_image"
-            })
-            continue  # 完全略過彩色影像
+        # 根據 rgb_only 參數決定處理邏輯
+        if rgb_only:
+            # RGB 模式：只處理彩色影像，跳過灰階
+            if is_grayscale:
+                skipped_color += 1
+                details.append({
+                    "file": dicom_path.name,
+                    "modality": modality,
+                    "image_shape": str(hu_array.shape),
+                    "status": "skipped_grayscale_image"
+                })
+                continue
+        else:
+            # 灰階模式（預設）：只處理灰階影像，跳過彩色
+            if not is_grayscale:
+                skipped_color += 1
+                details.append({
+                    "file": dicom_path.name,
+                    "modality": modality,
+                    "image_shape": str(hu_array.shape),
+                    "status": "skipped_color_image"
+                })
+                continue
 
         # --------- 動態亮度補正 ----------
-        img = apply_hu_windowing(hu_array, window_center, window_width)
-        if img.dtype != np.uint8:
-            img = np.clip(img, 0, 255).astype(np.uint8)
+        if rgb_only:
+            # RGB 模式：處理彩色影像（hu_array.shape 為 3D，包含通道）
+            if hu_array.ndim == 3:
+                # 已經是 RGB，直接使用
+                img = np.clip(hu_array, 0, 255).astype(np.uint8)
+            else:
+                # 理論上不應該到這裡，因為已經過濾了灰階影像
+                img = np.clip(hu_array, 0, 255).astype(np.uint8)
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB) if HAS_CV2 else np.stack([img]*3, axis=-1)
+        else:
+            # 灰階模式（原邏輯）
+            img = apply_hu_windowing(hu_array, window_center, window_width)
+            if img.dtype != np.uint8:
+                img = np.clip(img, 0, 255).astype(np.uint8)
 
-        mean_val = np.mean(img)
-        if mean_val > 200 or mean_val < 30:
-            img = auto_window_ct(hu_array)
-            if np.mean(img) > 200 or np.mean(img) < 30:
-                img = auto_contrast(img)
+            mean_val = np.mean(img)
+            if mean_val > 200 or mean_val < 30:
+                img = auto_window_ct(hu_array)
+                if np.mean(img) > 200 or np.mean(img) < 30:
+                    img = auto_contrast(img)
         # ---------------------------------
 
         dicom_name = dicom_path.stem
@@ -273,7 +299,7 @@ def process_patient(patient_id: str, data_root: Path, yolo_root: Path, nii_root:
 # ==============================================================
 # 主流程
 # ==============================================================
-def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.0, window_width=1500.0):
+def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.0, window_width=1500.0, rgb_only=False):
     data_root, yolo_root, nii_root = Path(data_root), Path(yolo_dir), Path(nii_dir)
     yolo_root.mkdir(parents=True, exist_ok=True)
     nii_root.mkdir(parents=True, exist_ok=True)
@@ -281,9 +307,10 @@ def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.
     patients = sorted([d for d in data_root.iterdir() if d.is_dir()])
     all_stats = []
 
-    print(f"📋 找到 {len(patients)} 位患者\n")
+    mode_str = "RGB 彩色" if rgb_only else "灰階"
+    print(f"📋 找到 {len(patients)} 位患者 (處理模式: {mode_str})\n")
     for patient in tqdm(patients, desc="處理患者"):
-        stats = process_patient(patient.name, data_root, yolo_root, nii_root, window_center, window_width)
+        stats = process_patient(patient.name, data_root, yolo_root, nii_root, window_center, window_width, rgb_only)
         all_stats.append(stats)
 
     total_ct = sum(s["processed_ct"] for s in all_stats)
@@ -291,13 +318,16 @@ def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.
     total_color = sum(s.get("skipped_color", 0) for s in all_stats)
     total_images = total_ct + total_non_ct + total_color
 
+    mode_str = "RGB 彩色影像" if rgb_only else "灰階影像"
     report = {
+        "processing_mode": "rgb" if rgb_only else "grayscale",
         "summary": {
             "patients": len(patients),
             "total_images": total_images,
-            "processed_ct_grayscale": total_ct,
+            "processed_ct": total_ct,
+            "processed_mode": mode_str,
             "skipped_non_ct": total_non_ct,
-            "skipped_color": total_color
+            "skipped_color_or_grayscale": total_color
         },
         "details": all_stats
     }
@@ -309,10 +339,14 @@ def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.
 
     print("\n✅ 完成！")
     print(f"📊 統計資訊：")
+    print(f"   處理模式: {mode_str}")
     print(f"   總影像數: {total_images}")
-    print(f"   處理的 CT 灰階影像: {total_ct}")
+    print(f"   處理的 CT {mode_str}: {total_ct}")
     print(f"   跳過的非 CT 影像: {total_non_ct}")
-    print(f"   跳過的彩色影像: {total_color}")
+    if rgb_only:
+        print(f"   跳過的灰階影像: {total_color}")
+    else:
+        print(f"   跳過的彩色影像: {total_color}")
     print(f"📁 YOLO 輸出: {yolo_root}")
     print(f"📁 NIfTI 輸出: {nii_root}")
 
@@ -321,15 +355,16 @@ def process_all(data_root: str, yolo_dir: str, nii_dir: str, window_center=-600.
 # 入口
 # ==============================================================
 def main():
-    parser = argparse.ArgumentParser(description="DICOM → PNG + NIfTI 動態亮度補正版 (CT grayscale only, skip non-CT & color images)")
+    parser = argparse.ArgumentParser(description="DICOM → PNG + NIfTI 動態亮度補正版 (支援灰階/RGB 模式)")
     parser.add_argument("--data_root", type=str, required=True, help="原始 DICOM 資料夾")
-    parser.add_argument("--yolo_dir", type=str, default="../../datasets/preprocessed_yolo_lesion", help="YOLO 輸出資料夾")
-    parser.add_argument("--nii_dir", type=str, default="../../datasets/preprocessed_nii_lesion", help="NIfTI 輸出資料夾")
+    parser.add_argument("--yolo_dir", type=str, default="../../datasets/preprocessed_yolo_lesion_rgb", help="YOLO 輸出資料夾")
+    parser.add_argument("--nii_dir", type=str, default="../../datasets/preprocessed_nii_lesion_rgb", help="NIfTI 輸出資料夾")
     parser.add_argument("--window_center", type=float, default=-600.0)
     parser.add_argument("--window_width", type=float, default=1500.0)
+    parser.add_argument("--rgb", action="store_true", help="只處理 RGB 彩色影像（預設處理灰階影像）")
     args = parser.parse_args()
 
-    process_all(args.data_root, args.yolo_dir, args.nii_dir, args.window_center, args.window_width)
+    process_all(args.data_root, args.yolo_dir, args.nii_dir, args.window_center, args.window_width, args.rgb)
 
 
 if __name__ == "__main__":

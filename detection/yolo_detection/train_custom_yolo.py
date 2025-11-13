@@ -97,6 +97,7 @@ class TrainingConfig:
     
     # Training parameters
     num_epochs: int = 200
+    patience: int = 100                     # ✅ Early stopping patience
     batch_size: int = 16
     imgsz: int = 640
     model_size: str = "m"                   # n/s/m/l/x
@@ -122,18 +123,17 @@ class TrainingConfig:
     warmup_epochs: int = 10                 # Increased from 5 for better stability
     cos_lr: bool = True                     # Cosine LR scheduler
     
-    # Augmentation
-    mosaic: float = 1.0
+    # Augmentation (All disabled)
+    mosaic: float = 0.0
     mixup: float = 0.0
     copy_paste: float = 0.0
     degrees: float = 0.0
-    translate: float = 0.1
-    scale: float = 0.5
-    fliplr: float = 0.5
+    translate: float = 0.0
+    scale: float = 0.0
+    fliplr: float = 0.0
     flipud: float = 0.0
     
     # Advanced settings
-    patience: int = 50
     save_period: int = 10
     workers: int = 8
     device: str = "auto"
@@ -440,6 +440,7 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "batch": config.batch_size,
         "device": select_device(config.device),
         "optimizer": config.optimizer,
+        "iou": 0.5,             # 🔥 降低 NMS IoU 阈值（0.7 → 0.5）提升 Recall
         # Learning rate and optimizer settings - FROM CONFIG
         "lr0": config.learning_rate,
         "lrf": 0.08,
@@ -458,11 +459,11 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "mosaic": config.mosaic,
         "mixup": config.mixup,
         "copy_paste": config.copy_paste,
-        "hsv_h": 0.0,           
+        "hsv_h": 0.0,           # Color jitter disabled
         "hsv_s": 0.0,
         "hsv_v": 0.0,
-        "auto_augment": "none",  
-        "erasing": 0.0,
+        "auto_augment": "none",  # No auto augmentation
+        "erasing": 0.0,          # Random erasing disabled
         "project": str(Path(config.save_dir) / "training"),
         "amp": True,            
         "name": f"yolo11{config.model_size}_{timestamp}",
@@ -477,14 +478,15 @@ def train_yolo(config: TrainingConfig, dataset_yaml: Path, timestamp: str) -> Di
         "rect": False,
         "freeze": 0,
         "close_mosaic": 0,      # ✅ 無Mosaic不需close_mosaic
-        # 🎯 Optimized Loss Weights for Gradient Stability
-        "box": 5.0,             # ✅ Reduced from 7.0 to prevent gradient explosion
-        "cls": 1.0,             # ✅ Reduced from 1.0 (cls_loss was abnormally high)
-        "dfl": 1.2,             # ✅ Slightly reduced from 1.5
+        # 🎯 Optimized Loss Weights for Medical CT Detection (v3 - Anti-Overfitting)
+        "box": 7.0,             # 🔥 进一步提高定位权重（6.0 → 7.0）
+        "cls": 0.5,             # 🔥 大幅降低分类权重（1.0 → 0.5）对抗过拟合
+        "dfl": 1.8,             # 🔥 提高DFL权重（1.5 → 1.8）改善边界框质量
         # Note: Gradient clipping is handled internally by Ultralytics YOLO
         # max_grad_norm is NOT a valid YOLO argument, removed to prevent SyntaxError
-        "nbs": 128,             # ✅ Gradient Accumulation
-        "dropout": 0.1,         # ✅ 輕度Dropout
+        "nbs": 64,              # ✅ 保持累积步数 64
+        "dropout": 0.4,         # 🔥 进一步增加 dropout（0.3 → 0.4）
+        "label_smoothing": 0.1, # 🔥 增强标签平滑（0.05 → 0.1）
     }
 
     logging.info("=" * 80)
@@ -591,27 +593,28 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--model_size", type=str, default="s", choices=["n","s","m","l","x"])
-    parser.add_argument("--lr", type=float, default=0.0008)  # ✅ 降低默認學習率（從 0.001 → 0.0008）
+    parser.add_argument("--lr", type=float, default=0.0002)  # 🔥 再次降低（0.0003 → 0.0002）
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max_negative_ratio", type=float, default=0.3)  # ✅ Updated default to 0.3
-    parser.add_argument("--oversample_positive", type=float, default=2.0, help="Positive sample oversampling multiplier")
+    parser.add_argument("--max_negative_ratio", type=float, default=0.15)  # 🔥 更激进减少负样本（0.3 → 0.15）
+    parser.add_argument("--oversample_positive", type=float, default=4.0, help="Positive sample oversampling multiplier")  # 🔥 增加正样本（2.0 → 4.0）
     parser.add_argument("--use_focal_loss", action="store_true", help="Enable Focal Loss (experimental)")
     parser.add_argument("--focal_alpha", type=float, default=0.75, help="Focal Loss alpha parameter")
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal Loss gamma parameter")
     parser.add_argument("--optimizer", type=str, default="AdamW")
-    parser.add_argument("--weight_decay", type=float, default=0.0005)
-    parser.add_argument("--warmup_epochs", type=int, default=10)
+    parser.add_argument("--weight_decay", type=float, default=0.003)  # 🔥 更强正则化（0.002 → 0.003）
+    parser.add_argument("--warmup_epochs", type=int, default=25)  # 🔥 增加预热（20 → 25）
     parser.add_argument("--no_cos_lr", action="store_true")
-    parser.add_argument("--mosaic", type=float, default=0.0)
-    parser.add_argument("--mixup", type=float, default=0.0)
-    parser.add_argument("--degrees", type=float, default=0.0)
-    parser.add_argument("--translate", type=float, default=0.0)
-    parser.add_argument("--scale", type=float, default=0.0)
-    parser.add_argument("--fliplr", type=float, default=0.0)
+    parser.add_argument("--mosaic", type=float, default=0.5)  # 🔥 启用Mosaic（0.0 → 0.5）
+    parser.add_argument("--mixup", type=float, default=0.1)  # 🔥 启用Mixup（0.0 → 0.1）
+    parser.add_argument("--degrees", type=float, default=5.0)  # 🔥 增加旋转（0.0 → 5.0）
+    parser.add_argument("--translate", type=float, default=0.1)  # 🔥 增加平移（0.0 → 0.1）
+    parser.add_argument("--scale", type=float, default=0.3)  # 🔥 增加缩放（0.0 → 0.3）
+    parser.add_argument("--fliplr", type=float, default=0.5)  # 🔥 增加翻转（0.0 → 0.5）
     parser.add_argument("--save_dir", type=str, default="./yolo_runs")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--patience", type=int, default=100, help="Early stopping patience (epochs)")
     args = parser.parse_args()
 
     if not ULTRALYTICS_AVAILABLE:
@@ -646,6 +649,7 @@ def main():
         fliplr=args.fliplr,
         workers=args.workers,
         device=args.device,
+        patience=args.patience,  # ✅ 新增 patience 參數
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

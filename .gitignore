@@ -14,6 +14,7 @@ detection/test_results*
 detection/yolo_detection/yolov11_*
 detection/yolo_detection/yolo_runs
 detection/yolo_detection/yolov11_models/dataset_exports
+detection/yolo_detection/docs/temp
 *.pt
 temp
 **/*pycache*/

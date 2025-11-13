@@ -73,18 +73,29 @@ class DatasetSplitter:
         
         # 檢查資料集結構類型
         images_png_dir = self.source_dir / "images_png"
+        images_dir = self.source_dir / "images"
         labels_dir = self.source_dir / "labels"
         
         # 類型1: preprocessed_yolo_lesion 結構 (images_png/ 和 labels/ 在根目錄)
-        if images_png_dir.exists() and labels_dir.exists():
-            print("📁 檢測到 preprocessed_yolo_lesion 格式 (集中式 images_png/ 和 labels/)")
-            for patient_dir in images_png_dir.iterdir():
+        # 支援兩種集中式 images 根目錄名稱: images_png/ OR images/
+        if (images_png_dir.exists() or images_dir.exists()) and labels_dir.exists():
+            detected_images_root = images_png_dir if images_png_dir.exists() else images_dir
+            print(f"📁 檢測到 preprocessed_yolo_lesion 格式 (集中式 {detected_images_root.name}/ 和 labels/)")
+            
+            skipped_empty = 0
+            for patient_dir in detected_images_root.iterdir():
                 if not patient_dir.is_dir():
                     continue
-                
+
                 patient_id = patient_dir.name
                 series = patient_id[0]  # A, B, E, G
-                
+
+                # 檢查患者圖像目錄是否包含實際檔案
+                image_files = list(patient_dir.glob("*.png")) + list(patient_dir.glob("*.jpg"))
+                if not image_files:
+                    skipped_empty += 1
+                    continue
+
                 # 檢查對應的 labels 目錄是否存在
                 patient_labels_dir = labels_dir / patient_id
                 if patient_labels_dir.exists():
@@ -94,13 +105,18 @@ class DatasetSplitter:
                         'labels_path': str(patient_labels_dir),
                         'structure_type': 'centralized'
                     }
-                    
+
                     self.stats['total_patients'] += 1
                     self.stats['series_distribution'][series] += 1
+            
+            if skipped_empty > 0:
+                print(f"⚠️  跳過 {skipped_empty} 個空目錄（無影像檔案）")
         
         # 類型2: all_patient_data 結構 (每個患者有自己的 images/ 和 labels/)
         else:
             print("📁 檢測到 all_patient_data 格式 (每患者獨立 images/ 和 labels/)")
+            
+            skipped_empty = 0
             for patient_dir in self.source_dir.iterdir():
                 if not patient_dir.is_dir():
                     continue
@@ -113,6 +129,12 @@ class DatasetSplitter:
                 patient_labels_dir = patient_dir / "labels"
                 
                 if patient_images_dir.exists() and patient_labels_dir.exists():
+                    # 檢查圖像目錄是否包含實際檔案
+                    image_files = list(patient_images_dir.glob("*.png")) + list(patient_images_dir.glob("*.jpg"))
+                    if not image_files:
+                        skipped_empty += 1
+                        continue
+                    
                     patients_info[patient_id] = {
                         'series': series,
                         'path': str(patient_dir),
@@ -121,6 +143,9 @@ class DatasetSplitter:
                     
                     self.stats['total_patients'] += 1
                     self.stats['series_distribution'][series] += 1
+            
+            if skipped_empty > 0:
+                print(f"⚠️  跳過 {skipped_empty} 個空目錄（無影像檔案）")
         
         print(f"✅ 掃描完成，共找到 {len(patients_info)} 個有效患者")
         return patients_info
