@@ -104,14 +104,14 @@ def train_yolo_with_eapiou(
     model_path: str,
     data_dir: str,
     output_dir: str = "yolo_runs/training",
-    epochs: int = 300,  # 🛡️ 保守版300 epochs（先驗證穩定性）
+    epochs: int = 300,  # 🛡️ 超保守版300 epochs（防止檢測失效）
     batch_size: int = 8,
     imgsz: int = 640,
-    lr: float = 0.005,  # 🛡️ 穩定學習率（避免梯度爆炸）
-    lrf: float = 0.05,  # 🛡️ 適中最終學習率
+    lr: float = 0.003,  # 🛡️ 極低學習率（防止過快收斂）
+    lrf: float = 0.1,  # 🛡️ 更高最終學習率（保持學習能力）
     val_ratio: float = 0.15,
-    max_negative_ratio: float = 0.05,  # 🛡️ 增加負樣本（避免過度不平衡）
-    oversample_positive: float = 3.0,  # 🛡️ 適度過採樣（減少重複擬合）
+    max_negative_ratio: float = 0.1,  # 🛡️ 進一步增加負樣本（平衡類別）
+    oversample_positive: float = 2.0,  # 🛡️ 降低過採樣（避免過擬合重複樣本）
     warmup_epochs: int = 40,  # 🛡️ 適中預熱
     optimizer: str = "AdamW",
     weight_decay: float = 0.0005,  # 🛡️ 標準正則化
@@ -135,14 +135,14 @@ def train_yolo_with_eapiou(
     deep_supervision: bool = True,
     # 損失權重（平衡版）
     box: float = 7.5,
-    cls: float = 0.5,  # 保持穩定的分類權重
+    cls: float = 0.8,  # 🛡️ 提高cls權重（防止cls_loss過低）
     dfl: float = 1.5,
     # 正則化參數
-    dropout: float = 0.2,  # 🛡️ 標準dropout
-    label_smoothing: float = 0.05,  # 🛡️ 輕微標籤平滑
+    dropout: float = 0.1,  # 🛡️ 降低dropout（避免欠擬合）
+    label_smoothing: float = 0.0,  # 🛡️ 移除label smoothing（避免預測抑制）
     # NMS 和推理阈值
     iou: float = 0.5,
-    conf: float = 0.05,  # 🛡️ 安全的conf閾值（避免極端過濾）
+    conf: float = 0.1,  # 🛡️ 提高conf閾值（防止sigmoid飽和）
     # 多尺度訓練
     multi_scale: bool = False,
     # 學習率調度
@@ -276,7 +276,7 @@ def train_yolo_with_eapiou(
     log_file = setup_logging(save_dir / "logs", timestamp)
     
     logging.info("=" * 80)
-    logging.info("�️ YOLO11-SSE-EAPIoU 訓練啟動 (穩定版 - 避免NaN崩潰)")
+    logging.info("🛡️ YOLO11-SSE-EAPIoU 訓練啟動 (超保守版 - 防止檢測失效)")
     logging.info("=" * 80)
     logging.info(f"📂 模型：{model_path}")
     logging.info(f"📂 資料：{data_dir}")
@@ -284,9 +284,9 @@ def train_yolo_with_eapiou(
     logging.info("")
     logging.info(f"🎯 性能目標：mAP@0.5≥0.60, Recall≥0.55, Precision≥0.60")
     logging.info(f"📊 訓練配置：Epochs={epochs}, Batch={batch_size}, LR={lr}→{lr*lrf}, Patience={patience}")
-    logging.info(f"🛡️ 穩定策略：負樣本{max_negative_ratio}(保守), 正樣本×{oversample_positive}(適度), Warmup={warmup_epochs}")
+    logging.info(f"🛡️ 超保守策略：負樣本{max_negative_ratio}(大幅增加), 正樣本×{oversample_positive}(降低), Warmup={warmup_epochs}")
     logging.info(f"🫁 CT增強：rotation=±{degrees}°, fliplr={fliplr}, hsv_v={hsv_v}")
-    logging.info(f"🔧 EAPIoU：beta={eapiou_beta}(已驗證), DeepSupervision={deep_supervision}, conf={conf}")
+    logging.info(f"🔧 EAPIoU：beta={eapiou_beta}, cls={cls}(提高), conf={conf}(提高), dropout={dropout}(降低)")
     logging.info("=" * 80)
     logging.info("")
     
@@ -541,11 +541,11 @@ def main():
     parser.add_argument('--output_dir', type=str, default='yolo_runs', help='輸出目錄')
     
     # 訓練參數
-    parser.add_argument('--epochs', type=int, default=300, help='訓練輪數（穩定版300）')
+    parser.add_argument('--epochs', type=int, default=300, help='訓練輪數（超保守版300）')
     parser.add_argument('--batch_size', type=int, default=8, help='批次大小（適用8GB顯存）')
     parser.add_argument('--imgsz', type=int, default=640, help='輸入影像大小')
-    parser.add_argument('--lr', type=float, default=0.005, help='初始學習率（穩定版）')
-    parser.add_argument('--lrf', type=float, default=0.05, help='最終學習率倍數（穩定版）')
+    parser.add_argument('--lr', type=float, default=0.003, help='初始學習率（超保守版）')
+    parser.add_argument('--lrf', type=float, default=0.1, help='最終學習率倍數（超保守版）')
     parser.add_argument('--patience', type=int, default=75, help='早停耐心值（適中）')
     parser.add_argument('--workers', type=int, default=8, help='資料載入執行緒數')
     parser.add_argument('--seed', type=int, default=42, help='隨機種子')
@@ -556,12 +556,12 @@ def main():
     
     # 損失權重
     parser.add_argument('--box', type=float, default=7.5, help='邊界框損失權重')
-    parser.add_argument('--cls', type=float, default=0.5, help='分類損失權重（穩定值）')
+    parser.add_argument('--cls', type=float, default=0.8, help='分類損失權重（提高）')
     parser.add_argument('--dfl', type=float, default=1.5, help='DFL 損失權重')
     
     # 正則化
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout 機率（標準）')
-    parser.add_argument('--label_smoothing', type=float, default=0.05, help='標籤平滑值（輕微）')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout 機率（降低）')
+    parser.add_argument('--label_smoothing', type=float, default=0.0, help='標籤平滑值（移除）')
     parser.add_argument('--weight_decay', type=float, default=0.0005, help='權重衰減（標準）')
     parser.add_argument('--warmup_epochs', type=int, default=40, help='預熱輪數（適中）')
     
@@ -580,12 +580,12 @@ def main():
     
     # 樣本平衡
     parser.add_argument('--val_ratio', type=float, default=0.15, help='驗證集比例')
-    parser.add_argument('--max_negative_ratio', type=float, default=0.05, help='最大負樣本比例（穩定版）')
-    parser.add_argument('--oversample_positive', type=float, default=3.0, help='正樣本過採樣倍數（穩定×3）')
+    parser.add_argument('--max_negative_ratio', type=float, default=0.1, help='最大負樣本比例（超保守版）')
+    parser.add_argument('--oversample_positive', type=float, default=2.0, help='正樣本過採樣倍數（降低×2）')
     
     # NMS 和推理閾值
     parser.add_argument('--iou', type=float, default=0.5, help='NMS IoU 閾值（保持0.5）')
-    parser.add_argument('--conf', type=float, default=0.05, help='推理置信度閾值（穩定版）')
+    parser.add_argument('--conf', type=float, default=0.1, help='推理置信度閾值（提高防止飽和）')
     
     # 訓練策略
     parser.add_argument('--multi_scale', type=bool, default=False, help='多尺度訓練（禁用節省顯存）')
