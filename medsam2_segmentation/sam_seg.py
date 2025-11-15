@@ -24,7 +24,8 @@ import nibabel as nib
 import pydicom
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from matplotlib.colors import ListedColormap
+import json
+from skimage import measure
 
 # Model availability check
 try:
@@ -45,16 +46,24 @@ except ImportError as e:
     MEDSAM2_AVAILABLE = False
 
 
-def setup_logging(log_dir: str = "segmentation_result") -> logging.Logger:
+def setup_logging(log_dir: str = "segmentation_result", append_mode: bool = True) -> logging.Logger:
     """Setup logging configuration"""
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
+    
+    # Use timestamp in log filename to avoid overwriting
+    timestamp = datetime.now().strftime("%Y%m%d")
+    log_filename = f"medsam_seg_{timestamp}.log"
+    
+    # Clear any existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
     
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(str(log_path / "medsam_seg.log"), encoding='utf-8'),
+            logging.FileHandler(str(log_path / log_filename), mode='a' if append_mode else 'w', encoding='utf-8'),
             logging.StreamHandler(sys.stdout)
         ]
     )
@@ -67,20 +76,34 @@ logger = setup_logging()
 class MedSAMSegmentator:
     """Simplified MedSAM2 segmentation"""
     
-    def __init__(self, data_dir: str = "../datasets/all_patient_data", config_file: str = "sam2.1_hiera_t512.yaml"):
+    def __init__(self, data_dir: str = "../datasets/all_patient_data", config_file: str = "sam2.1_hiera_t512.yaml", 
+                 use_timestamp: bool = True, list_only: bool = False):
         self.data_dir = Path(data_dir)
-        self.segmentation_result_base = Path("segmentation_result")
+        
+        # Create timestamped result directory (skip if just listing patients)
+        if list_only:
+            self.segmentation_result_base = Path("segmentation_result")
+        elif use_timestamp:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.segmentation_result_base = Path("segmentation_result") / timestamp
+        else:
+            self.segmentation_result_base = Path("segmentation_result")
+        
         self.config_file = config_file
         self.model = None
         self.predictor = None
         self.device = "cuda" if MEDSAM2_AVAILABLE and torch.cuda.is_available() else "cpu" if MEDSAM2_AVAILABLE else None
         
-        if MEDSAM2_AVAILABLE:
-            self._load_medsam2()
-        else:
-            logger.warning("MedSAM2 unavailable. Running in mock mode.")
-        
-        logger.info(f"MedSAM2 initialized - Device: {self.device}")
+        # Skip model loading if just listing patients
+        if not list_only:
+            if MEDSAM2_AVAILABLE:
+                self._load_medsam2()
+            else:
+                logger.warning("MedSAM2 unavailable. Running in mock mode.")
+            
+            # Log the result directory being used
+            logger.info(f"Results will be saved to: {self.segmentation_result_base}")
+            logger.info(f"MedSAM2 initialized - Device: {self.device}")
     
     def _load_medsam2(self):
         """Load MedSAM2 model"""
@@ -238,7 +261,7 @@ class MedSAMSegmentator:
             return self._generate_mock_masks(image, bounding_boxes)
     
     def _generate_mock_masks(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
-        """Generate mock segmentation masks"""
+        """Generate mock segmentation masks from bounding boxes"""
         h, w = image.shape[:2]
         masks = []
         
@@ -251,6 +274,53 @@ class MedSAMSegmentator:
         
         return masks
     
+    def _prepare_display_image(self, image: np.ndarray) -> np.ndarray:
+        """Convert and normalize image for display"""
+        # Convert to grayscale if needed
+        if len(image.shape) == 3:
+            display_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            display_image = image.copy()
+        
+        # Normalize for display
+        return ((display_image - display_image.min()) / 
+               (display_image.max() - display_image.min()) * 255).astype(np.uint8)
+    
+    def _draw_bounding_boxes(self, ax, annotations: List[Dict], color: str = 'red', 
+                            linewidth: int = 2, show_labels: bool = True) -> None:
+        """Draw bounding boxes on matplotlib axis"""
+        for i, ann in enumerate(annotations):
+            bbox = ann['bbox']  # [xmin, ymin, xmax, ymax]
+            x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+            
+            rect = patches.Rectangle((x, y), w, h, linewidth=linewidth, 
+                                   edgecolor=color, facecolor='none', alpha=0.8)
+            ax.add_patch(rect)
+            
+            if show_labels:
+                label = ann.get('name', f'lesion_{i+1}')
+                ax.text(x, y-5, label, color=color, fontsize=10, 
+                       bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
+    
+    def _create_mask_overlay(self, display_image: np.ndarray, masks: List[np.ndarray], 
+                            color: List[float] = [1, 0, 0, 0.5]) -> np.ndarray:
+        """Create mask overlay for visualization"""
+        combined_mask = np.zeros_like(display_image, dtype=np.uint8)
+        
+        for mask in masks:
+            if mask.shape[:2] == display_image.shape[:2]:
+                combined_mask = np.logical_or(combined_mask, mask > 0)
+            else:
+                # Resize mask if dimensions don't match
+                resized_mask = cv2.resize(mask.astype(np.uint8), 
+                                        (display_image.shape[1], display_image.shape[0]))
+                combined_mask = np.logical_or(combined_mask, resized_mask > 0)
+        
+        # Create overlay
+        overlay = np.zeros((*display_image.shape, 4))
+        overlay[combined_mask, :] = color
+        return overlay
+    
     def save_visualization_images(self, patient_id: str, image: np.ndarray, annotations: List[Dict], 
                                  masks: List[np.ndarray], dicom_filename: str, slice_index: int) -> None:
         """Save visualization images with bounding boxes and segmentation overlay"""
@@ -259,15 +329,8 @@ class MedSAMSegmentator:
             vis_dir = self.segmentation_result_base / patient_id / "visualizations"
             vis_dir.mkdir(parents=True, exist_ok=True)
             
-            # Convert image to display format
-            if len(image.shape) == 3:
-                display_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            else:
-                display_image = image.copy()
-            
-            # Normalize for display
-            display_image = ((display_image - display_image.min()) / 
-                           (display_image.max() - display_image.min()) * 255).astype(np.uint8)
+            # Prepare display image
+            display_image = self._prepare_display_image(image)
             
             # Create figure with subplots
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
@@ -276,51 +339,18 @@ class MedSAMSegmentator:
             ax1.imshow(display_image, cmap='gray')
             ax1.set_title(f'Original with Bounding Boxes\n{dicom_filename}', fontsize=12)
             ax1.axis('off')
-            
-            # Draw bounding boxes
-            for i, ann in enumerate(annotations):
-                bbox = ann['bbox']  # [xmin, ymin, xmax, ymax]
-                x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
-                
-                # Create rectangle patch
-                rect = patches.Rectangle((x, y), w, h, linewidth=2, 
-                                       edgecolor='red', facecolor='none', alpha=0.8)
-                ax1.add_patch(rect)
-                
-                # Add label
-                label = ann.get('name', f'lesion_{i+1}')
-                ax1.text(x, y-5, label, color='red', fontsize=10, 
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
+            self._draw_bounding_boxes(ax1, annotations, color='red', linewidth=2)
             
             # Image with segmentation overlay
             ax2.imshow(display_image, cmap='gray')
             ax2.set_title(f'Segmentation Overlay\n{dicom_filename}', fontsize=12)
             ax2.axis('off')
             
-            # Create combined mask
             if masks:
-                combined_mask = np.zeros_like(display_image, dtype=np.uint8)
-                for mask in masks:
-                    if mask.shape[:2] == display_image.shape[:2]:
-                        combined_mask = np.logical_or(combined_mask, mask > 0)
-                    else:
-                        # Resize mask if dimensions don't match
-                        resized_mask = cv2.resize(mask.astype(np.uint8), 
-                                                (display_image.shape[1], display_image.shape[0]))
-                        combined_mask = np.logical_or(combined_mask, resized_mask > 0)
-                
-                # Create overlay
-                overlay = np.zeros((*display_image.shape, 4))
-                overlay[combined_mask, :] = [1, 0, 0, 0.5]  # Red with alpha
+                overlay = self._create_mask_overlay(display_image, masks)
                 ax2.imshow(overlay)
-                
-                # Also draw bounding boxes for reference
-                for i, ann in enumerate(annotations):
-                    bbox = ann['bbox']
-                    x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
-                    rect = patches.Rectangle((x, y), w, h, linewidth=1, 
-                                           edgecolor='yellow', facecolor='none', alpha=0.6)
-                    ax2.add_patch(rect)
+                self._draw_bounding_boxes(ax2, annotations, color='yellow', 
+                                         linewidth=1, show_labels=False)
             
             plt.tight_layout()
             
@@ -346,15 +376,8 @@ class MedSAMSegmentator:
             img_dir = self.segmentation_result_base / patient_id / "individual_images"
             img_dir.mkdir(parents=True, exist_ok=True)
             
-            # Convert image to display format
-            if len(image.shape) == 3:
-                display_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            else:
-                display_image = image.copy()
-            
-            # Normalize for display
-            display_image = ((display_image - display_image.min()) / 
-                           (display_image.max() - display_image.min()) * 255).astype(np.uint8)
+            # Prepare display image
+            display_image = self._prepare_display_image(image)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base_filename = f"slice_{slice_index:03d}_{timestamp}"
@@ -364,19 +387,7 @@ class MedSAMSegmentator:
             ax.imshow(display_image, cmap='gray')
             ax.set_title(f'Original Image with Annotations\n{dicom_filename}', fontsize=14)
             ax.axis('off')
-            
-            # Draw bounding boxes
-            for i, ann in enumerate(annotations):
-                bbox = ann['bbox']
-                x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
-                
-                rect = patches.Rectangle((x, y), w, h, linewidth=3, 
-                                       edgecolor='red', facecolor='none', alpha=0.9)
-                ax.add_patch(rect)
-                
-                label = ann.get('name', f'lesion_{i+1}')
-                ax.text(x, y-8, label, color='red', fontsize=12, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9))
+            self._draw_bounding_boxes(ax, annotations, color='red', linewidth=3)
             
             original_path = img_dir / f"{base_filename}_original.png"
             plt.savefig(str(original_path), dpi=200, bbox_inches='tight', 
@@ -389,8 +400,12 @@ class MedSAMSegmentator:
             ax.set_title(f'Segmentation Result\n{dicom_filename}', fontsize=14)
             ax.axis('off')
             
-            # Create and apply mask overlay
             if masks:
+                # Create overlay
+                overlay = self._create_mask_overlay(display_image, masks, [1, 0.2, 0.2, 0.6])
+                ax.imshow(overlay)
+                
+                # Add mask contours
                 combined_mask = np.zeros_like(display_image, dtype=np.uint8)
                 for mask in masks:
                     if mask.shape[:2] == display_image.shape[:2]:
@@ -400,12 +415,6 @@ class MedSAMSegmentator:
                                                 (display_image.shape[1], display_image.shape[0]))
                         combined_mask = np.logical_or(combined_mask, resized_mask > 0)
                 
-                # Create colored overlay
-                overlay = np.zeros((*display_image.shape, 4))
-                overlay[combined_mask, :] = [1, 0.2, 0.2, 0.6]  # Semi-transparent red
-                ax.imshow(overlay)
-                
-                # Add mask contours for better visibility
                 contours, _ = cv2.findContours(combined_mask.astype(np.uint8), 
                                              cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 for contour in contours:
@@ -413,8 +422,8 @@ class MedSAMSegmentator:
                     if len(contour.shape) == 2 and contour.shape[0] > 2:
                         ax.plot(contour[:, 0], contour[:, 1], 'yellow', linewidth=2, alpha=0.8)
                 
-                # Also show original bounding boxes for comparison
-                for i, ann in enumerate(annotations):
+                # Draw bounding boxes
+                for ann in annotations:
                     bbox = ann['bbox']
                     x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
                     rect = patches.Rectangle((x, y), w, h, linewidth=2, 
@@ -455,39 +464,25 @@ class MedSAMSegmentator:
             elif cols == 1:
                 axes = [[ax] for ax in axes]
             
+            patient_data = self.load_patient_data(patient_id)
+            
             for idx, result in enumerate(display_slices):
                 row, col = idx // cols, idx % cols
                 ax = axes[row][col] if rows > 1 else axes[col]
                 
-                # Load the corresponding DICOM image
-                patient_data = self.load_patient_data(patient_id)
+                # Load and display the DICOM image
                 dicom_path = next((f for f in patient_data['dicom_files'] 
                                  if f.name == result['dicom_file']), None)
                 
                 if dicom_path:
                     image, _ = self.load_dicom_image(dicom_path)
                     if image is not None:
-                        # Convert to grayscale if needed
-                        if len(image.shape) == 3:
-                            display_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-                        else:
-                            display_image = image.copy()
-                        
-                        # Normalize
-                        display_image = ((display_image - display_image.min()) / 
-                                       (display_image.max() - display_image.min()) * 255).astype(np.uint8)
-                        
+                        display_image = self._prepare_display_image(image)
                         ax.imshow(display_image, cmap='gray')
                         
                         # Add segmentation overlay
                         if result['masks']:
-                            combined_mask = np.zeros_like(display_image, dtype=np.uint8)
-                            for mask in result['masks']:
-                                if mask.shape[:2] == display_image.shape[:2]:
-                                    combined_mask = np.logical_or(combined_mask, mask > 0)
-                            
-                            overlay = np.zeros((*display_image.shape, 4))
-                            overlay[combined_mask, :] = [1, 0, 0, 0.5]
+                            overlay = self._create_mask_overlay(display_image, result['masks'])
                             ax.imshow(overlay)
                         
                         # Add bounding boxes
@@ -522,19 +517,312 @@ class MedSAMSegmentator:
         except Exception as e:
             logger.error(f"Failed to create summary visualization: {e}")
     
-    def _generate_mock_masks(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
-        """Generate mock segmentation masks from bounding boxes for demonstration purposes"""
-        masks = []
-        h, w = image.shape[:2]
+    def extract_lesion_features(self, image: np.ndarray, mask: np.ndarray, 
+                               metadata: Dict, annotation: Dict) -> Dict:
+        """Extract comprehensive features from a lesion for LLM analysis"""
+        try:
+            # Convert to grayscale if needed
+            if len(image.shape) == 3:
+                gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            else:
+                gray_image = image.copy()
+            
+            # Get masked region
+            masked_region = gray_image * mask
+            lesion_pixels = gray_image[mask > 0]
+            
+            if len(lesion_pixels) == 0:
+                return {}
+            
+            # 1. Morphological features
+            labeled_mask = measure.label(mask)
+            props = measure.regionprops(labeled_mask, intensity_image=gray_image)[0]
+            
+            # Area and volume features
+            pixel_spacing = metadata.get('pixel_spacing', [1.0, 1.0])
+            pixel_area_mm2 = float(pixel_spacing[0]) * float(pixel_spacing[1])
+            area_pixels = props.area
+            area_mm2 = area_pixels * pixel_area_mm2
+            
+            # Shape features
+            perimeter = props.perimeter
+            circularity = (4 * np.pi * area_pixels) / (perimeter ** 2) if perimeter > 0 else 0
+            solidity = props.solidity
+            eccentricity = props.eccentricity
+            
+            # Bounding box features
+            bbox = annotation.get('bbox', [0, 0, 0, 0])
+            bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            compactness = area_pixels / bbox_area if bbox_area > 0 else 0
+            
+            # 2. Intensity features
+            mean_intensity = float(np.mean(lesion_pixels))
+            std_intensity = float(np.std(lesion_pixels))
+            min_intensity = float(np.min(lesion_pixels))
+            max_intensity = float(np.max(lesion_pixels))
+            median_intensity = float(np.median(lesion_pixels))
+            
+            # Background intensity (region outside lesion but inside bbox)
+            bbox_mask = np.zeros_like(mask)
+            bbox_mask[bbox[1]:bbox[3], bbox[0]:bbox[2]] = 1
+            background_mask = (bbox_mask - mask) > 0
+            if np.any(background_mask):
+                background_pixels = gray_image[background_mask]
+                background_mean = float(np.mean(background_pixels))
+                contrast_to_background = mean_intensity - background_mean
+            else:
+                background_mean = 0
+                contrast_to_background = 0
+            
+            # 3. Texture features (using GLCM approximation)
+            # Calculate histogram features
+            hist, _ = np.histogram(lesion_pixels, bins=32, range=(0, 256))
+            hist = hist / np.sum(hist)  # Normalize
+            entropy = -np.sum(hist * np.log2(hist + 1e-10))
+            
+            # Gradient features (edge strength)
+            gradient_x = cv2.Sobel(masked_region, cv2.CV_64F, 1, 0, ksize=3)
+            gradient_y = cv2.Sobel(masked_region, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_magnitude = np.sqrt(gradient_x**2 + gradient_y**2)
+            edge_strength = float(np.mean(gradient_magnitude[mask > 0]))
+            
+            # 4. Position features
+            centroid = props.centroid
+            image_center = (gray_image.shape[0] / 2, gray_image.shape[1] / 2)
+            distance_from_center = np.sqrt(
+                (centroid[0] - image_center[0])**2 + 
+                (centroid[1] - image_center[1])**2
+            )
+            
+            # Relative position
+            relative_x = centroid[1] / gray_image.shape[1]  # 0=left, 1=right
+            relative_y = centroid[0] / gray_image.shape[0]  # 0=top, 1=bottom
+            
+            # 5. Spatial metadata
+            slice_location = metadata.get('slice_location', 0)
+            slice_thickness = metadata.get('slice_thickness', 1.0)
+            
+            # Compile all features
+            features = {
+                # Identification
+                'lesion_name': annotation.get('name', 'unknown'),
+                
+                # Morphological features
+                'area_pixels': int(area_pixels),
+                'area_mm2': float(area_mm2),
+                'perimeter_pixels': float(perimeter),
+                'circularity': float(circularity),
+                'solidity': float(solidity),
+                'eccentricity': float(eccentricity),
+                'compactness': float(compactness),
+                'equivalent_diameter_mm': float(props.equivalent_diameter * pixel_spacing[0]),
+                'major_axis_length_mm': float(props.major_axis_length * pixel_spacing[0]),
+                'minor_axis_length_mm': float(props.minor_axis_length * pixel_spacing[0]),
+                
+                # Intensity features
+                'mean_intensity': float(mean_intensity),
+                'std_intensity': float(std_intensity),
+                'min_intensity': float(min_intensity),
+                'max_intensity': float(max_intensity),
+                'median_intensity': float(median_intensity),
+                'intensity_range': float(max_intensity - min_intensity),
+                'background_mean_intensity': float(background_mean),
+                'contrast_to_background': float(contrast_to_background),
+                
+                # Texture features
+                'entropy': float(entropy),
+                'edge_strength': float(edge_strength),
+                
+                # Position features
+                'centroid_x': float(centroid[1]),
+                'centroid_y': float(centroid[0]),
+                'distance_from_center_pixels': float(distance_from_center),
+                'relative_position_x': float(relative_x),
+                'relative_position_y': float(relative_y),
+                
+                # Spatial metadata
+                'slice_location': float(slice_location) if slice_location is not None else 0.0,
+                'slice_thickness': float(slice_thickness),
+                'pixel_spacing_x': float(pixel_spacing[0]),
+                'pixel_spacing_y': float(pixel_spacing[1]),
+                
+                # Bounding box
+                'bbox': bbox,
+            }
+            
+            return features
+            
+        except Exception as e:
+            logger.error(f"Failed to extract features: {e}")
+            return {}
+    
+    def generate_llm_description(self, features: Dict) -> str:
+        """Generate human-readable description for LLM"""
+        if not features:
+            return "No features available."
         
-        for x1, y1, x2, y2 in bounding_boxes:
-            mask = np.zeros((h, w), dtype=np.uint8)
-            center = ((x1 + x2) // 2, (y1 + y2) // 2)
-            radius = ((x2 - x1) // 2, (y2 - y1) // 2)
-            cv2.ellipse(mask, center, radius, 0, 0, 360, 1, -1)
-            masks.append(mask)
+        description_parts = []
         
-        return masks
+        # Lesion identification
+        description_parts.append(f"Lesion: {features.get('lesion_name', 'Unknown')}")
+        
+        # Size description
+        area_mm2 = features.get('area_mm2', 0)
+        diameter_mm = features.get('equivalent_diameter_mm', 0)
+        description_parts.append(
+            f"Size: {area_mm2:.1f} mm² (equivalent diameter: {diameter_mm:.1f} mm)"
+        )
+        
+        # Shape description
+        circularity = features.get('circularity', 0)
+        eccentricity = features.get('eccentricity', 0)
+        solidity = features.get('solidity', 0)
+        
+        if circularity > 0.8:
+            shape_desc = "nearly circular"
+        elif circularity > 0.6:
+            shape_desc = "moderately circular"
+        else:
+            shape_desc = "irregular"
+        
+        if eccentricity > 0.9:
+            elongation_desc = ", highly elongated"
+        elif eccentricity > 0.7:
+            elongation_desc = ", somewhat elongated"
+        else:
+            elongation_desc = ""
+        
+        description_parts.append(f"Shape: {shape_desc}{elongation_desc} (circularity: {circularity:.2f})")
+        
+        # Intensity description
+        mean_int = features.get('mean_intensity', 0)
+        contrast = features.get('contrast_to_background', 0)
+        
+        if contrast > 50:
+            intensity_desc = "high contrast"
+        elif contrast > 20:
+            intensity_desc = "moderate contrast"
+        elif contrast > -20:
+            intensity_desc = "similar intensity"
+        else:
+            intensity_desc = "lower intensity"
+        
+        description_parts.append(
+            f"Intensity: mean {mean_int:.1f}, {intensity_desc} compared to background"
+        )
+        
+        # Texture description
+        entropy = features.get('entropy', 0)
+        edge_strength = features.get('edge_strength', 0)
+        
+        if entropy > 4.0:
+            texture_desc = "heterogeneous"
+        elif entropy > 3.0:
+            texture_desc = "moderately heterogeneous"
+        else:
+            texture_desc = "relatively homogeneous"
+        
+        if edge_strength > 30:
+            edge_desc = "well-defined margins"
+        elif edge_strength > 15:
+            edge_desc = "moderately defined margins"
+        else:
+            edge_desc = "poorly defined margins"
+        
+        description_parts.append(f"Texture: {texture_desc}, {edge_desc}")
+        
+        # Position description
+        rel_x = features.get('relative_position_x', 0.5)
+        rel_y = features.get('relative_position_y', 0.5)
+        
+        if rel_x < 0.33:
+            horizontal_pos = "left"
+        elif rel_x > 0.67:
+            horizontal_pos = "right"
+        else:
+            horizontal_pos = "central"
+        
+        if rel_y < 0.33:
+            vertical_pos = "upper"
+        elif rel_y > 0.67:
+            vertical_pos = "lower"
+        else:
+            vertical_pos = "middle"
+        
+        slice_loc = features.get('slice_location', 0)
+        description_parts.append(
+            f"Location: {vertical_pos}-{horizontal_pos} region (slice location: {slice_loc:.1f} mm)"
+        )
+        
+        return "\n".join(description_parts)
+    
+    def save_features_for_llm(self, patient_id: str, slice_results: List[Dict]) -> None:
+        """Save extracted features in JSON format for LLM consumption"""
+        try:
+            output_dir = self.segmentation_result_base / patient_id / "llm_features"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            all_features = {
+                'patient_id': patient_id,
+                'total_slices': len(slice_results),
+                'slices': []
+            }
+            
+            for slice_result in slice_results:
+                slice_features = {
+                    'dicom_file': slice_result['dicom_file'],
+                    'xml_file': slice_result['xml_file'],
+                    'lesions': []
+                }
+                
+                # Extract features for each lesion in this slice
+                for i, (annotation, mask) in enumerate(zip(slice_result['annotations'], slice_result['masks'])):
+                    # Need to reload image for feature extraction
+                    patient_data = self.load_patient_data(patient_id)
+                    dicom_path = next((f for f in patient_data['dicom_files'] 
+                                     if f.name == slice_result['dicom_file']), None)
+                    
+                    if dicom_path:
+                        image, _ = self.load_dicom_image(dicom_path)
+                        if image is not None:
+                            features = self.extract_lesion_features(
+                                image, mask, slice_result['metadata'], annotation
+                            )
+                            if features:
+                                features['description'] = self.generate_llm_description(features)
+                                slice_features['lesions'].append(features)
+                
+                if slice_features['lesions']:
+                    all_features['slices'].append(slice_features)
+            
+            # Save as JSON
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            json_path = output_dir / f"features_{timestamp}.json"
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(all_features, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"LLM features saved: {json_path.name}")
+            
+            # Also save a summary text file
+            summary_path = output_dir / f"features_summary_{timestamp}.txt"
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                f.write(f"Patient ID: {patient_id}\n")
+                f.write(f"Total Slices Analyzed: {len(all_features['slices'])}\n")
+                f.write(f"{'='*80}\n\n")
+                
+                for slice_data in all_features['slices']:
+                    f.write(f"Slice: {slice_data['dicom_file']}\n")
+                    f.write(f"{'-'*80}\n")
+                    
+                    for lesion in slice_data['lesions']:
+                        f.write(f"\n{lesion['description']}\n\n")
+                    
+                    f.write(f"{'='*80}\n\n")
+            
+            logger.info(f"LLM features summary saved: {summary_path.name}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save LLM features: {e}")
     
     def create_dicom_to_nifti_affine(self, metadata: Dict) -> np.ndarray:
         """Create affine transformation matrix for NIfTI"""
@@ -592,14 +880,10 @@ class MedSAMSegmentator:
         except Exception as e:
             logger.error(f"Failed to save NIfTI {output_path}: {e}")
     
-    def create_3d_mask_volume(self, slice_results: List[Dict]) -> Tuple[np.ndarray, Dict]:
-        """Create 3D volume from slice masks"""
-        if not slice_results:
-            return np.array([]), {}
-        
-        # Sort slices by spatial position
-        def sort_key(result):
-            metadata = result['metadata']
+    def _sort_slices_by_position(self, slice_data: List[Dict], key_name: str = 'metadata') -> List[Dict]:
+        """Sort slices by spatial position"""
+        def sort_key(item):
+            metadata = item[key_name]
             if metadata.get('slice_location') is not None:
                 return float(metadata['slice_location'])
             elif metadata.get('image_position') and len(metadata['image_position']) >= 3:
@@ -607,7 +891,21 @@ class MedSAMSegmentator:
             else:
                 return float(metadata.get('instance_number', 0))
         
-        sorted_results = sorted(slice_results, key=sort_key)
+        return sorted(slice_data, key=sort_key)
+    
+    def _resize_image_if_needed(self, image: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+        """Resize image to target shape if dimensions don't match"""
+        if image.shape[:2] != target_shape:
+            return cv2.resize(image, (target_shape[1], target_shape[0]))
+        return image
+    
+    def create_3d_mask_volume(self, slice_results: List[Dict]) -> Tuple[np.ndarray, Dict]:
+        """Create 3D volume from slice masks"""
+        if not slice_results:
+            return np.array([]), {}
+        
+        # Sort slices by spatial position
+        sorted_results = self._sort_slices_by_position(slice_results, 'metadata')
         
         # Check if all masks have the same dimensions
         first_mask = None
@@ -628,10 +926,10 @@ class MedSAMSegmentator:
             if result['masks']:
                 combined_mask = np.logical_or.reduce(result['masks']) if len(result['masks']) > 1 else result['masks'][0]
                 
-                # Check if mask dimensions match
+                # Resize if needed
                 if combined_mask.shape != (height, width):
                     logger.warning(f"Mask dimension mismatch at slice {i}: expected {height}x{width}, got {combined_mask.shape}")
-                    combined_mask = cv2.resize(combined_mask.astype(np.uint8), (width, height))
+                    combined_mask = self._resize_image_if_needed(combined_mask.astype(np.uint8), (height, width))
                 
                 volume_3d[i] = combined_mask.astype(np.uint8)
         
@@ -672,35 +970,18 @@ class MedSAMSegmentator:
                 slice_data.append({'image': image, 'metadata': metadata})
         
         # Sort by spatial position
-        def sort_key(slice_info):
-            metadata = slice_info['metadata']
-            if metadata.get('slice_location') is not None:
-                return float(metadata['slice_location'])
-            elif metadata.get('image_position') and len(metadata['image_position']) >= 3:
-                return float(metadata['image_position'][2])
-            else:
-                return float(metadata.get('instance_number', 0))
+        sorted_slices = self._sort_slices_by_position(slice_data, 'metadata')
         
-        sorted_slices = sorted(slice_data, key=sort_key)
-        
-        # Check if all images have the same dimensions
+        # Check and resize images if needed
         first_image = sorted_slices[0]['image']
         height, width = first_image.shape[:2]
         
-        # Verify all images have consistent dimensions
         for i, slice_info in enumerate(sorted_slices):
             img_h, img_w = slice_info['image'].shape[:2]
             if img_h != height or img_w != width:
-                logger.warning(f"Inconsistent image dimensions detected:")
-                logger.warning(f"  Expected: {height}x{width}, Got: {img_h}x{img_w} at slice {i}")
+                logger.warning(f"Inconsistent image dimensions at slice {i}: expected {height}x{width}, got {img_h}x{img_w}")
                 logger.warning(f"  Resizing slice {i} to match first slice dimensions")
-                
-                # Resize the image to match the first slice
-                if len(slice_info['image'].shape) == 3:
-                    resized_image = cv2.resize(slice_info['image'], (width, height))
-                else:
-                    resized_image = cv2.resize(slice_info['image'], (width, height))
-                slice_info['image'] = resized_image
+                slice_info['image'] = self._resize_image_if_needed(slice_info['image'], (height, width))
         
         # Create 3D volume
         depth = len(sorted_slices)
@@ -708,6 +989,7 @@ class MedSAMSegmentator:
         
         for i, slice_info in enumerate(sorted_slices):
             image = slice_info['image']
+            # Convert to grayscale
             if len(image.shape) == 3:
                 gray_image = np.dot(image[...,:3], [0.2989, 0.5870, 0.1140])
             else:
@@ -825,6 +1107,13 @@ class MedSAMSegmentator:
                 self.create_summary_visualization(patient_id, slice_results)
             except Exception as e:
                 logger.warning(f"Failed to create summary visualization: {e}")
+        
+        # Extract and save features for LLM
+        if save_results:
+            try:
+                self.save_features_for_llm(patient_id, slice_results)
+            except Exception as e:
+                logger.warning(f"Failed to save LLM features: {e}")
 
         # Create and save 3D volume
         volume_3d, volume_metadata = self.create_3d_mask_volume(slice_results)
@@ -889,10 +1178,15 @@ def main():
     parser.add_argument("--list_patients", action="store_true", help="List available patients")
     parser.add_argument("--create_reference_only", action="store_true", help="Only create reference NIfTI from DICOM (no segmentation)")
     parser.add_argument("--no_reference", action="store_true", help="Skip creating reference NIfTI")
+    parser.add_argument("--no_timestamp", action="store_true", help="Don't use timestamp in result directory")
     
     args = parser.parse_args()
     
-    segmentator = MedSAMSegmentator(data_dir=args.data_dir, config_file=args.config)
+    # Determine if we're just listing patients
+    list_only = args.list_patients
+    
+    segmentator = MedSAMSegmentator(data_dir=args.data_dir, config_file=args.config, 
+                                   use_timestamp=not args.no_timestamp, list_only=list_only)
     
     if args.list_patients:
         patients = segmentator.get_patient_list()
