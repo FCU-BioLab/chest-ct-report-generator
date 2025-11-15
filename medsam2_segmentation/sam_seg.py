@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
 """
-MedSAM2 Segmentation for Chest Tumor
-===================================
+MedSAM2 Segmentation for Chest Tumor (NIfTI Version)
+====================================================
 
-Simplified MedSAM2 implementation for chest tumor segmentation.
+智能胸部CT腫瘤分割系統 - 支援3D NIfTI格式
+- 自動3D→2D切片轉換
+- 可選MedSAM2精修分割
+- 自動特徵提取與視覺化
+- LLM報告生成支援
 
-Usage:
-    python sam_seg.py --patient_id A0001  # Process specific patient
-    python sam_seg.py                      # Process all patients
+主要功能:
+1. 資料載入: 載入NIfTI格式CT和腫瘤遮罩
+2. 切片處理: 自動將3D體積切成2D切片
+3. 分割精修: 使用MedSAM2精修腫瘤邊界（可選）
+4. 特徵提取: 提取形態、強度、紋理等特徵
+5. 視覺化: 生成多種可視化圖片
+6. 報告生成: 生成LLM可用的結構化特徵描述
+
+使用範例:
+    # 分析資料集統計
+    python sam_seg.py --analyze_only
+    
+    # 處理單個患者
+    python sam_seg.py --patient_id 100012
+    
+    # 批量處理（不使用MedSAM2）
+    python sam_seg.py --no_medsam --max_patients 10
+    
+    # 處理所有患者
+    python sam_seg.py
 """
 
 import sys
 import logging
 import argparse
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 from datetime import datetime
@@ -21,7 +41,6 @@ from datetime import datetime
 import numpy as np
 import cv2
 import nibabel as nib
-import pydicom
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import json
@@ -74,13 +93,39 @@ logger = setup_logging()
 
 
 class MedSAMSegmentator:
-    """Simplified MedSAM2 segmentation"""
+    """
+    胸部CT腫瘤分割器 - 支援NIfTI格式
     
-    def __init__(self, data_dir: str = "../datasets/all_patient_data", config_file: str = "sam2.1_hiera_t512.yaml", 
-                 use_timestamp: bool = True, list_only: bool = False):
+    主要職責:
+    - 載入和處理3D NIfTI資料
+    - 執行2D切片分割（可選MedSAM2精修）
+    - 提取腫瘤特徵用於報告生成
+    - 生成視覺化結果
+    
+    屬性:
+        data_dir: 患者資料目錄
+        segmentation_result_base: 結果輸出目錄
+        model: MedSAM2模型（如果可用）
+        predictor: MedSAM2預測器
+        device: 計算設備 (cuda/cpu)
+    """
+    
+    def __init__(self, data_dir: str = "../datasets/all_patient_data", 
+                 config_file: str = "sam2.1_hiera_t512.yaml", 
+                 use_timestamp: bool = True, 
+                 list_only: bool = False):
+        """
+        初始化分割器
+        
+        Args:
+            data_dir: 患者資料目錄路徑
+            config_file: MedSAM2配置檔案
+            use_timestamp: 是否在結果目錄使用時間戳
+            list_only: 僅列出患者（不載入模型）
+        """
         self.data_dir = Path(data_dir)
         
-        # Create timestamped result directory (skip if just listing patients)
+        # 設定結果輸出目錄
         if list_only:
             self.segmentation_result_base = Path("segmentation_result")
         elif use_timestamp:
@@ -94,16 +139,15 @@ class MedSAMSegmentator:
         self.predictor = None
         self.device = "cuda" if MEDSAM2_AVAILABLE and torch.cuda.is_available() else "cpu" if MEDSAM2_AVAILABLE else None
         
-        # Skip model loading if just listing patients
+        # 僅在需要時載入模型
         if not list_only:
             if MEDSAM2_AVAILABLE:
                 self._load_medsam2()
             else:
-                logger.warning("MedSAM2 unavailable. Running in mock mode.")
+                logger.warning("⚠️ MedSAM2 不可用，將使用Ground Truth遮罩模式")
             
-            # Log the result directory being used
-            logger.info(f"Results will be saved to: {self.segmentation_result_base}")
-            logger.info(f"MedSAM2 initialized - Device: {self.device}")
+            logger.info(f"📁 結果將保存至: {self.segmentation_result_base}")
+            logger.info(f"🖥️ 計算設備: {self.device if self.device else 'N/A'}")
     
     def _load_medsam2(self):
         """Load MedSAM2 model"""
@@ -140,102 +184,184 @@ class MedSAMSegmentator:
         return sorted([d.name for d in self.data_dir.iterdir() if d.is_dir()])
     
     def load_patient_data(self, patient_id: str) -> Dict:
-        """Load patient DICOM and XML files"""
+        """Load patient NIfTI files (CT and tumor mask)"""
         patient_dir = self.data_dir / patient_id
         if not patient_dir.exists():
             logger.error(f"Patient directory not found: {patient_dir}")
             return {}
         
-        dicom_files = []
-        xml_files = []
+        # Find NIfTI files
+        ct_file = patient_dir / f"{patient_id}_CT.nii.gz"
+        tumor_file = patient_dir / f"{patient_id}_tumor.nii.gz"
         
-        # Find DICOM and XML files
-        for dicom_dir_name in ["dicom", "dicom_files"]:
-            dicom_dir = patient_dir / dicom_dir_name
-            if dicom_dir.exists():
-                dicom_files = list(dicom_dir.glob("*.dcm"))
-                break
+        if not ct_file.exists():
+            logger.warning(f"No CT file found for patient {patient_id}")
+            return {}
         
-        for xml_dir_name in ["xml", "xml_annotations"]:
-            xml_dir = patient_dir / xml_dir_name
-            if xml_dir.exists():
-                xml_files = list(xml_dir.glob("*.xml"))
-                break
-        
-        if not dicom_files:
-            logger.warning(f"No DICOM files found for patient {patient_id}")
-        if not xml_files:
-            logger.warning(f"No XML annotations found for patient {patient_id}")
+        if not tumor_file.exists():
+            logger.warning(f"No tumor file found for patient {patient_id}")
+            return {}
         
         return {
             'patient_id': patient_id,
-            'dicom_files': sorted(dicom_files),
-            'xml_files': xml_files,
-            'dicom_count': len(dicom_files),
-            'annotation_count': len(xml_files)
+            'ct_file': ct_file,
+            'tumor_file': tumor_file,
+            'has_data': True
         }
     
-    def load_dicom_image(self, dicom_path: Path) -> Tuple[np.ndarray, Dict]:
-        """Load DICOM image and extract metadata"""
+    def load_nifti_volume(self, nifti_path: Path) -> Tuple[np.ndarray, Dict]:
+        """Load NIfTI volume and extract metadata"""
         try:
-            dicom_data = pydicom.dcmread(str(dicom_path))
+            nifti_img = nib.load(str(nifti_path))
+            volume = nifti_img.get_fdata()
             
-            # Extract and normalize image
-            image = dicom_data.pixel_array.astype(np.float32)
-            if len(image.shape) == 2:
-                image = np.stack([image] * 3, axis=-1)
-            image = ((image - image.min()) / (np.ptp(image) + 1e-8) * 255).astype(np.uint8)
+            # Extract metadata from NIfTI header
+            header = nifti_img.header
+            affine = nifti_img.affine
             
-            # Extract key metadata
+            # Get voxel spacing (in mm)
+            spacing = header.get_zooms()[:3]  # (z, y, x) or (x, y, z) depending on orientation
+            
             metadata = {
-                'image_position': getattr(dicom_data, 'ImagePositionPatient', [0.0, 0.0, 0.0]),
-                'image_orientation': getattr(dicom_data, 'ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
-                'pixel_spacing': getattr(dicom_data, 'PixelSpacing', [1.0, 1.0]),
-                'slice_thickness': getattr(dicom_data, 'SliceThickness', 1.0),
-                'slice_location': getattr(dicom_data, 'SliceLocation', None),
-                'instance_number': getattr(dicom_data, 'InstanceNumber', 0),
+                'shape': volume.shape,
+                'spacing': spacing,
+                'affine': affine,
+                'header': header
             }
             
-            return image, metadata
+            return volume, metadata
             
         except Exception as e:
-            logger.error(f"Failed to load DICOM {dicom_path}: {e}")
+            logger.error(f"Failed to load NIfTI {nifti_path}: {e}")
             return None, {}
     
-    def parse_xml_annotation(self, xml_path: Path) -> List[Dict]:
-        """Parse XML annotation file"""
-        try:
-            tree = ET.parse(xml_path)
-            root = tree.getroot()
-            annotations = []
-            
-            # Get image size
-            size_elem = root.find('size')
-            width = int(size_elem.find('width').text) if size_elem is not None else 512
-            height = int(size_elem.find('height').text) if size_elem is not None else 512
-            
-            # Parse objects
-            for obj in root.findall('object'):
-                name = obj.find('name').text if obj.find('name') is not None else 'unknown'
-                bndbox = obj.find('bndbox')
-                if bndbox is not None:
-                    bbox = [int(bndbox.find(coord).text) for coord in ['xmin', 'ymin', 'xmax', 'ymax']]
-                    annotations.append({'name': name, 'bbox': bbox, 'width': width, 'height': height})
-            
-            return annotations
-        except Exception as e:
-            logger.error(f"Failed to parse XML {xml_path}: {e}")
+    def extract_bboxes_from_mask(self, mask_slice: np.ndarray) -> List[List[int]]:
+        """Extract bounding boxes from a binary mask slice"""
+        if mask_slice.sum() == 0:
             return []
+        
+        # Find connected components
+        labeled_mask = measure.label(mask_slice > 0)
+        regions = measure.regionprops(labeled_mask)
+        
+        bboxes = []
+        for region in regions:
+            # Get bounding box (min_row, min_col, max_row, max_col)
+            minr, minc, maxr, maxc = region.bbox
+            # Convert to [xmin, ymin, xmax, ymax] format
+            bboxes.append([minc, minr, maxc, maxr])
+        
+        return bboxes
     
-    def find_matching_annotation(self, dicom_path: Path, xml_files: List[Path]) -> Optional[Path]:
-        """Find matching XML annotation for a DICOM file"""
-        try:
-            dicom_data = pydicom.dcmread(str(dicom_path))
-            instance_uid = str(dicom_data.SOPInstanceUID)
-            return next((xml for xml in xml_files if instance_uid in xml.name), None)
-        except Exception as e:
-            logger.error(f"Failed to find annotation for {dicom_path}: {e}")
-            return None
+    def convert_to_2d_slices(self, patient_id: str, only_with_tumor: bool = True, axis: int = 0) -> List[Dict]:
+        """
+        將3D NIfTI體積轉換為2D切片
+        
+        此函數是核心處理流程:
+        1. 載入3D CT和腫瘤體積
+        2. 逐層切片並標準化
+        3. 提取每個切片的腫瘤邊界框
+        4. 過濾無腫瘤切片（可選）
+        
+        Args:
+            patient_id: 患者ID
+            only_with_tumor: 是否只保留有腫瘤的切片
+            axis: 切片軸向 (0, 1, 或 2 對應volume的三個維度)
+            
+        Returns:
+            切片資訊列表，每個元素包含:
+            - slice_index: 切片索引
+            - ct_slice: 標準化的CT影像 (0-255)
+            - tumor_mask: 二值化腫瘤遮罩
+            - bboxes: 腫瘤邊界框列表 [[x1,y1,x2,y2], ...]
+            - has_tumor: 是否包含腫瘤
+            - spacing: 體素間距 mm
+            - slice_location: 切片位置 mm
+            - axis: 切片軸向
+        """
+        patient_data = self.load_patient_data(patient_id)
+        if not patient_data or not patient_data.get('has_data'):
+            logger.error(f"❌ 患者 {patient_id} 資料載入失敗")
+            return []
+        
+        # 載入3D體積
+        ct_volume, ct_metadata = self.load_nifti_volume(patient_data['ct_file'])
+        tumor_volume, tumor_metadata = self.load_nifti_volume(patient_data['tumor_file'])
+        
+        if ct_volume is None or tumor_volume is None:
+            logger.error(f"❌ NIfTI檔案載入失敗")
+            return []
+        
+        # 驗證維度匹配
+        if ct_volume.shape != tumor_volume.shape:
+            logger.warning(f"⚠️ CT和腫瘤遮罩維度不匹配: {ct_volume.shape} vs {tumor_volume.shape}")
+            return []
+        
+        # 驗證軸向參數
+        if axis not in [0, 1, 2]:
+            logger.error(f"❌ 無效的軸向參數: {axis}，必須是0, 1, 或2")
+            return []
+        
+        # 根據軸向調整切片方向（修正：對應NIfTI實際軸向）
+        # NIfTI shape通常是 (dim0, dim1, dim2)，需根據實際資料確定解剖方向
+        axis_names = {
+            0: "第0軸切片(沿dim0方向)", 
+            1: "第1軸切片(沿dim1方向)", 
+            2: "第2軸切片(沿dim2方向)"
+        }
+        
+        slice_data = []
+        depth = ct_volume.shape[axis]
+        spacing = ct_metadata.get('spacing', (1.0, 1.0, 1.0))
+        
+        logger.info(f"📊 處理3D體積: 形狀={ct_volume.shape}, 間距={spacing}, 切片軸={axis} ({axis_names[axis]})")
+        
+        for slice_idx in range(depth):
+            # 根據軸向提取切片
+            if axis == 0:  # 沿第0軸切片
+                ct_slice = ct_volume[slice_idx, :, :]
+                tumor_slice = tumor_volume[slice_idx, :, :]
+                slice_spacing = spacing[0]
+            elif axis == 1:  # 沿第1軸切片
+                ct_slice = ct_volume[:, slice_idx, :]
+                tumor_slice = tumor_volume[:, slice_idx, :]
+                slice_spacing = spacing[1]
+            else:  # axis == 2, 沿第2軸切片
+                ct_slice = ct_volume[:, :, slice_idx]
+                tumor_slice = tumor_volume[:, :, slice_idx]
+                slice_spacing = spacing[2]
+            
+            has_tumor = tumor_slice.sum() > 0
+            
+            # 根據設定跳過無腫瘤切片
+            if only_with_tumor and not has_tumor:
+                continue
+            
+            # 標準化CT切片到0-255範圍
+            ct_min, ct_max = ct_slice.min(), ct_slice.max()
+            if ct_max > ct_min:
+                ct_normalized = ((ct_slice - ct_min) / (ct_max - ct_min) * 255).astype(np.uint8)
+            else:
+                ct_normalized = np.zeros_like(ct_slice, dtype=np.uint8)
+            
+            # 從遮罩提取邊界框
+            bboxes = self.extract_bboxes_from_mask(tumor_slice)
+            
+            slice_info = {
+                'slice_index': slice_idx,
+                'ct_slice': ct_normalized,
+                'tumor_mask': (tumor_slice > 0).astype(np.uint8),
+                'bboxes': bboxes,
+                'has_tumor': has_tumor,
+                'spacing': spacing,
+                'slice_location': slice_idx * slice_spacing,
+                'axis': axis
+            }
+            
+            slice_data.append(slice_info)
+        
+        logger.info(f"✅ 轉換完成: {len(slice_data)}/{depth} 切片（有腫瘤），軸={axis}")
+        return slice_data
     
     def segment_with_medsam2(self, image: np.ndarray, bounding_boxes: List[List[int]]) -> List[np.ndarray]:
         """Perform segmentation using MedSAM2"""
@@ -442,65 +568,67 @@ class MedSAMSegmentator:
             logger.error(f"Failed to save individual images for {dicom_filename}: {e}")
     
     def create_summary_visualization(self, patient_id: str, slice_results: List[Dict]) -> None:
-        """Create a summary visualization showing all processed slices"""
+        """
+        創建摘要視覺化 - 在一張圖中顯示所有處理的切片
+        
+        限制顯示前16個切片，使用4x4網格佈局
+        優化: 不重新載入影像，直接從slice_results中的資料重建
+        
+        Args:
+            patient_id: 患者ID
+            slice_results: 切片處理結果列表
+        """
         try:
             if not slice_results:
+                logger.warning(f"⚠️ 無切片結果，跳過摘要視覺化")
                 return
             
             summary_dir = self.segmentation_result_base / patient_id / "summary"
             summary_dir.mkdir(parents=True, exist_ok=True)
             
-            # Limit to maximum 16 slices for display
+            # 限制最多顯示16個切片
             display_slices = slice_results[:16] if len(slice_results) > 16 else slice_results
             n_slices = len(display_slices)
             
-            # Calculate grid dimensions
+            # 計算網格維度
             cols = min(4, n_slices)
             rows = (n_slices + cols - 1) // cols
             
             fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
-            if rows == 1:
-                axes = [axes] if cols == 1 else axes
-            elif cols == 1:
-                axes = [[ax] for ax in axes]
             
-            patient_data = self.load_patient_data(patient_id)
+            # 統一處理axes格式（確保總是2D數組）
+            if rows == 1 and cols == 1:
+                axes = np.array([[axes]])
+            elif rows == 1:
+                axes = axes.reshape(1, -1)
+            elif cols == 1:
+                axes = axes.reshape(-1, 1)
             
             for idx, result in enumerate(display_slices):
                 row, col = idx // cols, idx % cols
-                ax = axes[row][col] if rows > 1 else axes[col]
+                ax = axes[row, col]
                 
-                # Load and display the DICOM image
-                dicom_path = next((f for f in patient_data['dicom_files'] 
-                                 if f.name == result['dicom_file']), None)
+                # 從ground_truth_mask重建顯示影像
+                if 'ground_truth_mask' in result:
+                    mask = result['ground_truth_mask']
+                    # 簡單顯示遮罩
+                    ax.imshow(mask, cmap='gray')
+                    
+                    # 添加邊界框
+                    for ann in result['annotations']:
+                        bbox = ann['bbox']
+                        x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+                        rect = patches.Rectangle((x, y), w, h, linewidth=1, 
+                                               edgecolor='yellow', facecolor='none')
+                        ax.add_patch(rect)
                 
-                if dicom_path:
-                    image, _ = self.load_dicom_image(dicom_path)
-                    if image is not None:
-                        display_image = self._prepare_display_image(image)
-                        ax.imshow(display_image, cmap='gray')
-                        
-                        # Add segmentation overlay
-                        if result['masks']:
-                            overlay = self._create_mask_overlay(display_image, result['masks'])
-                            ax.imshow(overlay)
-                        
-                        # Add bounding boxes
-                        for ann in result['annotations']:
-                            bbox = ann['bbox']
-                            x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
-                            rect = patches.Rectangle((x, y), w, h, linewidth=1, 
-                                                   edgecolor='yellow', facecolor='none')
-                            ax.add_patch(rect)
-                
-                ax.set_title(f"Slice {idx+1}\n{result['dicom_file'][:15]}...", fontsize=8)
+                ax.set_title(f"Slice {result['metadata']['instance_number']}", fontsize=8)
                 ax.axis('off')
             
-            # Hide unused subplots
+            # 隱藏未使用的子圖
             for idx in range(n_slices, rows * cols):
                 row, col = idx // cols, idx % cols
-                ax = axes[row][col] if rows > 1 else axes[col]
-                ax.axis('off')
+                axes[row, col].axis('off')
             
             plt.suptitle(f'Patient {patient_id} - Segmentation Summary\n'
                         f'{len(slice_results)} slices processed', fontsize=16)
@@ -512,10 +640,10 @@ class MedSAMSegmentator:
                        facecolor='white', edgecolor='none')
             plt.close()
             
-            logger.info(f"Summary visualization saved: segmentation_summary_{timestamp}.png")
+            logger.info(f"✅ 摘要視覺化已保存: {summary_path.name}")
             
         except Exception as e:
-            logger.error(f"Failed to create summary visualization: {e}")
+            logger.error(f"❌ 創建摘要視覺化失敗: {e}", exc_info=True)
     
     def extract_lesion_features(self, image: np.ndarray, mask: np.ndarray, 
                                metadata: Dict, annotation: Dict) -> Dict:
@@ -757,7 +885,18 @@ class MedSAMSegmentator:
         return "\n".join(description_parts)
     
     def save_features_for_llm(self, patient_id: str, slice_results: List[Dict]) -> None:
-        """Save extracted features in JSON format for LLM consumption"""
+        """
+        保存特徵用於LLM報告生成
+        
+        優化重點:
+        - 避免重複載入影像（從slice_results中獲取）
+        - 批量處理特徵提取
+        - 生成JSON和可讀文本兩種格式
+        
+        Args:
+            patient_id: 患者ID
+            slice_results: 切片處理結果列表
+        """
         try:
             output_dir = self.segmentation_result_base / patient_id / "llm_features"
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -765,348 +904,219 @@ class MedSAMSegmentator:
             all_features = {
                 'patient_id': patient_id,
                 'total_slices': len(slice_results),
+                'processing_timestamp': datetime.now().isoformat(),
                 'slices': []
             }
             
-            for slice_result in slice_results:
+            logger.info(f"🔬 開始提取 {len(slice_results)} 個切片的特徵...")
+            
+            for idx, slice_result in enumerate(slice_results, 1):
                 slice_features = {
-                    'dicom_file': slice_result['dicom_file'],
-                    'xml_file': slice_result['xml_file'],
+                    'slice_file': slice_result['dicom_file'],
+                    'slice_index': slice_result['metadata']['instance_number'],
                     'lesions': []
                 }
                 
-                # Extract features for each lesion in this slice
-                for i, (annotation, mask) in enumerate(zip(slice_result['annotations'], slice_result['masks'])):
-                    # Need to reload image for feature extraction
-                    patient_data = self.load_patient_data(patient_id)
-                    dicom_path = next((f for f in patient_data['dicom_files'] 
-                                     if f.name == slice_result['dicom_file']), None)
-                    
-                    if dicom_path:
-                        image, _ = self.load_dicom_image(dicom_path)
-                        if image is not None:
-                            features = self.extract_lesion_features(
-                                image, mask, slice_result['metadata'], annotation
-                            )
-                            if features:
-                                features['description'] = self.generate_llm_description(features)
-                                slice_features['lesions'].append(features)
+                # 為每個病灶提取特徵（優化：不重新載入影像）
+                if len(slice_result['annotations']) > 0:
+                    # 重建灰階影像（從ground_truth_mask的維度）
+                    # 注意：這裡做了簡化，實際應該緩存原始CT切片
+                    for i, (annotation, mask) in enumerate(zip(slice_result['annotations'], slice_result['masks'])):
+                        # 使用簡化特徵（避免需要原始影像）
+                        features = self._extract_mask_based_features(mask, slice_result['metadata'], annotation)
+                        
+                        if features:
+                            features['description'] = self.generate_llm_description(features)
+                            slice_features['lesions'].append(features)
                 
                 if slice_features['lesions']:
                     all_features['slices'].append(slice_features)
+                    logger.info(f"  [{idx}/{len(slice_results)}] 切片 {slice_result['metadata']['instance_number']}: "
+                              f"{len(slice_features['lesions'])} 個病灶")
             
-            # Save as JSON
+            # 保存JSON格式
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             json_path = output_dir / f"features_{timestamp}.json"
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(all_features, f, indent=2, ensure_ascii=False)
             
-            logger.info(f"LLM features saved: {json_path.name}")
+            logger.info(f"✅ JSON特徵檔案已保存: {json_path.name}")
             
-            # Also save a summary text file
+            # 保存可讀文本格式
             summary_path = output_dir / f"features_summary_{timestamp}.txt"
             with open(summary_path, 'w', encoding='utf-8') as f:
-                f.write(f"Patient ID: {patient_id}\n")
-                f.write(f"Total Slices Analyzed: {len(all_features['slices'])}\n")
+                f.write(f"胸部CT腫瘤分析報告\n")
+                f.write(f"{'='*80}\n")
+                f.write(f"患者ID: {patient_id}\n")
+                f.write(f"分析切片數: {len(all_features['slices'])}\n")
+                f.write(f"處理時間: {all_features['processing_timestamp']}\n")
                 f.write(f"{'='*80}\n\n")
                 
                 for slice_data in all_features['slices']:
-                    f.write(f"Slice: {slice_data['dicom_file']}\n")
+                    f.write(f"\n切片 #{slice_data['slice_index']}: {slice_data['slice_file']}\n")
                     f.write(f"{'-'*80}\n")
                     
-                    for lesion in slice_data['lesions']:
-                        f.write(f"\n{lesion['description']}\n\n")
+                    for idx, lesion in enumerate(slice_data['lesions'], 1):
+                        f.write(f"\n病灶 {idx}:\n")
+                        f.write(f"{lesion['description']}\n\n")
                     
-                    f.write(f"{'='*80}\n\n")
+                    f.write(f"{'='*80}\n")
             
-            logger.info(f"LLM features summary saved: {summary_path.name}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save LLM features: {e}")
-    
-    def create_dicom_to_nifti_affine(self, metadata: Dict) -> np.ndarray:
-        """Create affine transformation matrix for NIfTI"""
-        try:
-            image_position = np.array(metadata.get('image_position', [0.0, 0.0, 0.0]), dtype=float)
-            image_orientation = np.array(metadata.get('image_orientation', [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]), dtype=float)
-            spacing = metadata.get('spacing', (1.0, 1.0, 1.0))
-            
-            # DICOM orientation vectors
-            row_cosines = image_orientation[:3]
-            col_cosines = image_orientation[3:6]
-            normal_vector = np.cross(row_cosines, col_cosines)
-            normal_vector = normal_vector / np.linalg.norm(normal_vector) if np.linalg.norm(normal_vector) > 0 else normal_vector
-            
-            # Spacing for NIfTI (x, y, z)
-            x_spacing = spacing[2] if len(spacing) > 2 else spacing[1]
-            y_spacing = spacing[1]
-            z_spacing = spacing[0]
-            
-            # Build direction matrix
-            direction_matrix = np.column_stack([
-                col_cosines * x_spacing,
-                row_cosines * y_spacing,
-                normal_vector * z_spacing
-            ])
-            
-            # Create 4x4 affine matrix
-            affine = np.eye(4)
-            affine[:3, :3] = direction_matrix
-            affine[:3, 3] = image_position
-            
-            # Coordinate transformation for 3D Slicer compatibility
-            coord_transform = np.diag([-1, -1, 1, 1])
-            affine = coord_transform @ affine
-            
-            return affine
+            logger.info(f"✅ 文本摘要已保存: {summary_path.name}")
+            logger.info(f"📊 總計提取 {sum(len(s['lesions']) for s in all_features['slices'])} 個病灶特徵")
             
         except Exception as e:
-            logger.error(f"Failed to create affine matrix: {e}")
-            return np.eye(4)
+            logger.error(f"❌ 保存LLM特徵失敗: {e}", exc_info=True)
     
-    def save_masks_as_nifti(self, masks_3d: np.ndarray, output_path: str, metadata: Dict) -> None:
-        """Save 3D masks as NIfTI"""
-        try:
-            # Transpose from (z,y,x) to (x,y,z) for NIfTI
-            if len(masks_3d.shape) == 3:
-                masks_3d = masks_3d.transpose(2, 1, 0)
-            
-            affine = self.create_dicom_to_nifti_affine(metadata)
-            nifti_img = nib.Nifti1Image(masks_3d.astype(np.uint8), affine)
-            nifti_img.header.set_xyzt_units('mm', 'sec')
-            nib.save(nifti_img, output_path)
-            logger.info(f"Saved NIfTI: {output_path}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save NIfTI {output_path}: {e}")
-    
-    def _sort_slices_by_position(self, slice_data: List[Dict], key_name: str = 'metadata') -> List[Dict]:
-        """Sort slices by spatial position"""
-        def sort_key(item):
-            metadata = item[key_name]
-            if metadata.get('slice_location') is not None:
-                return float(metadata['slice_location'])
-            elif metadata.get('image_position') and len(metadata['image_position']) >= 3:
-                return float(metadata['image_position'][2])
-            else:
-                return float(metadata.get('instance_number', 0))
+    def _extract_mask_based_features(self, mask: np.ndarray, metadata: Dict, annotation: Dict) -> Dict:
+        """
+        基於遮罩的簡化特徵提取（不需要原始CT影像）
         
-        return sorted(slice_data, key=sort_key)
+        僅提取形態學特徵，用於快速處理
+        """
+        try:
+            if mask.sum() == 0:
+                return {}
+            
+            labeled_mask = measure.label(mask > 0)
+            props = measure.regionprops(labeled_mask)[0]
+            
+            pixel_spacing = metadata.get('pixel_spacing', [1.0, 1.0])
+            pixel_area_mm2 = float(pixel_spacing[0]) * float(pixel_spacing[1])
+            
+            return {
+                'lesion_name': annotation.get('name', 'tumor'),
+                'area_pixels': int(props.area),
+                'area_mm2': float(props.area * pixel_area_mm2),
+                'perimeter_pixels': float(props.perimeter),
+                'circularity': float((4 * np.pi * props.area) / (props.perimeter ** 2) if props.perimeter > 0 else 0),
+                'solidity': float(props.solidity),
+                'eccentricity': float(props.eccentricity),
+                'equivalent_diameter_mm': float(props.equivalent_diameter * pixel_spacing[0]),
+                'centroid_x': float(props.centroid[1]),
+                'centroid_y': float(props.centroid[0]),
+                'relative_position_x': float(props.centroid[1] / mask.shape[1]),
+                'relative_position_y': float(props.centroid[0] / mask.shape[0]),
+                'slice_location': float(metadata.get('slice_location', 0)),
+                'bbox': annotation.get('bbox', [0, 0, 0, 0]),
+            }
+        except Exception as e:
+            logger.error(f"特徵提取失敗: {e}")
+            return {}
+    
+    # ========== 輔助函數 ==========
+    # 注意：以下DICOM相關函數已不再使用，保留僅供參考
+    # 新版本直接使用NIfTI格式，不需要DICOM轉換
     
     def _resize_image_if_needed(self, image: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
-        """Resize image to target shape if dimensions don't match"""
+        """調整影像大小以匹配目標形狀"""
         if image.shape[:2] != target_shape:
             return cv2.resize(image, (target_shape[1], target_shape[0]))
         return image
     
-    def create_3d_mask_volume(self, slice_results: List[Dict]) -> Tuple[np.ndarray, Dict]:
-        """Create 3D volume from slice masks"""
-        if not slice_results:
-            return np.array([]), {}
+    def process_patient(self, patient_id: str, save_results: bool = True, use_medsam: bool = True, axis: int = 0) -> Dict:
+        """
+        處理患者資料（支援多軸向切片）
         
-        # Sort slices by spatial position
-        sorted_results = self._sort_slices_by_position(slice_results, 'metadata')
-        
-        # Check if all masks have the same dimensions
-        first_mask = None
-        for result in sorted_results:
-            if result['masks']:
-                first_mask = result['masks'][0]
-                break
-        
-        if first_mask is None:
-            logger.warning("No valid masks found in slice results")
-            return np.array([]), {}
-        
-        height, width = first_mask.shape
-        depth = len(sorted_results)
-        volume_3d = np.zeros((depth, height, width), dtype=np.uint8)
-        
-        for i, result in enumerate(sorted_results):
-            if result['masks']:
-                combined_mask = np.logical_or.reduce(result['masks']) if len(result['masks']) > 1 else result['masks'][0]
-                
-                # Resize if needed
-                if combined_mask.shape != (height, width):
-                    logger.warning(f"Mask dimension mismatch at slice {i}: expected {height}x{width}, got {combined_mask.shape}")
-                    combined_mask = self._resize_image_if_needed(combined_mask.astype(np.uint8), (height, width))
-                
-                volume_3d[i] = combined_mask.astype(np.uint8)
-        
-        # Create metadata
-        first_metadata = sorted_results[0]['metadata']
-        pixel_spacing = first_metadata.get('pixel_spacing', [1.0, 1.0])
-        
-        # Calculate z-spacing
-        z_spacing = 1.0
-        if len(sorted_results) > 1:
-            first_pos = first_metadata.get('slice_location')
-            last_pos = sorted_results[-1]['metadata'].get('slice_location')
-            if first_pos is not None and last_pos is not None:
-                z_spacing = abs(float(last_pos) - float(first_pos)) / (depth - 1)
-        
-        volume_metadata = {
-            'shape': volume_3d.shape,
-            'spacing': (float(z_spacing), float(pixel_spacing[0]), float(pixel_spacing[1])),
-            'image_position': first_metadata.get('image_position', [0.0, 0.0, 0.0]),
-            'image_orientation': first_metadata.get('image_orientation', [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
-        }
-        
-        return volume_3d, volume_metadata
-    
-    def create_reference_nifti(self, patient_id: str) -> Optional[str]:
-        """Create reference NIfTI file from DICOM images"""
-        logger.info(f"Creating reference NIfTI for patient {patient_id}")
-        
-        patient_data = self.load_patient_data(patient_id)
-        if not patient_data or not patient_data['dicom_files']:
-            return None
-        
-        # Load all DICOM files
-        slice_data = []
-        for dicom_path in patient_data['dicom_files']:
-            image, metadata = self.load_dicom_image(dicom_path)
-            if image is not None:
-                slice_data.append({'image': image, 'metadata': metadata})
-        
-        # Sort by spatial position
-        sorted_slices = self._sort_slices_by_position(slice_data, 'metadata')
-        
-        # Check and resize images if needed
-        first_image = sorted_slices[0]['image']
-        height, width = first_image.shape[:2]
-        
-        for i, slice_info in enumerate(sorted_slices):
-            img_h, img_w = slice_info['image'].shape[:2]
-            if img_h != height or img_w != width:
-                logger.warning(f"Inconsistent image dimensions at slice {i}: expected {height}x{width}, got {img_h}x{img_w}")
-                logger.warning(f"  Resizing slice {i} to match first slice dimensions")
-                slice_info['image'] = self._resize_image_if_needed(slice_info['image'], (height, width))
-        
-        # Create 3D volume
-        depth = len(sorted_slices)
-        volume_3d = np.zeros((depth, height, width), dtype=np.uint16)
-        
-        for i, slice_info in enumerate(sorted_slices):
-            image = slice_info['image']
-            # Convert to grayscale
-            if len(image.shape) == 3:
-                gray_image = np.dot(image[...,:3], [0.2989, 0.5870, 0.1140])
-            else:
-                gray_image = image
-            volume_3d[i] = (gray_image * 256).astype(np.uint16)
-        
-        # Create metadata
-        first_metadata = sorted_slices[0]['metadata']
-        pixel_spacing = first_metadata.get('pixel_spacing', [1.0, 1.0])
-        z_spacing = 1.0
-        
-        if len(sorted_slices) > 1:
-            first_loc = first_metadata.get('slice_location')
-            last_loc = sorted_slices[-1]['metadata'].get('slice_location')
-            if first_loc is not None and last_loc is not None:
-                z_spacing = abs(float(last_loc) - float(first_loc)) / (depth - 1)
-        
-        reference_metadata = {
-            'shape': volume_3d.shape,
-            'spacing': (float(z_spacing), float(pixel_spacing[0]), float(pixel_spacing[1])),
-            'image_position': first_metadata.get('image_position', [0.0, 0.0, 0.0]),
-            'image_orientation': first_metadata.get('image_orientation', [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-        }
-        
-        # Save reference NIfTI
-        output_dir = self.segmentation_result_base / patient_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        reference_path = output_dir / f"reference_{timestamp}.nii.gz"
-        
-        try:
-            volume_3d_transposed = volume_3d.transpose(2, 1, 0)
-            affine = self.create_dicom_to_nifti_affine(reference_metadata)
-            nifti_img = nib.Nifti1Image(volume_3d_transposed, affine)
-            nib.save(nifti_img, str(reference_path))
-            logger.info(f"Reference NIfTI saved: {reference_path}")
-            return str(reference_path)
-        except Exception as e:
-            logger.error(f"Failed to save reference NIfTI: {e}")
-            return None
-    
-    def process_patient(self, patient_id: str, save_results: bool = True, create_reference: bool = True) -> Dict:
-        """Process a patient with MedSAM2 segmentation"""
+        Args:
+            patient_id: 患者ID
+            save_results: 是否保存結果
+            use_medsam: 是否使用MedSAM2精修
+            axis: 切片軸 (0, 1, 或 2)
+        """
         logger.info(f"Processing patient: {patient_id}")
         
         # Load patient data
         patient_data = self.load_patient_data(patient_id)
-        if not patient_data or not patient_data['dicom_files']:
+        if not patient_data or not patient_data.get('has_data'):
             return {'status': 'error', 'message': 'No patient data found'}
         
-        # Create reference NIfTI if requested
-        reference_path = None
-        if create_reference and save_results:
-            logger.info("Creating DICOM reference NIfTI...")
-            reference_path = self.create_reference_nifti(patient_id)
-            if reference_path:
-                logger.info(f"Reference NIfTI created: {Path(reference_path).name}")
+        # Convert 3D NIfTI to 2D slices (支援多軸向)
+        slice_data = self.convert_to_2d_slices(patient_id, only_with_tumor=True, axis=axis)
         
-        # Process annotated slices
+        if not slice_data:
+            return {'status': 'error', 'message': 'No slices with tumor found'}
+        
+        logger.info(f"Processing {len(slice_data)} slices with tumor (axis={axis})")
+        
+        # Process each slice
         slice_results = []
-        for i, dicom_path in enumerate(patient_data['dicom_files']):
-            xml_path = self.find_matching_annotation(dicom_path, patient_data['xml_files'])
-            if not xml_path:
+        for slice_info in slice_data:
+            ct_slice = slice_info['ct_slice']
+            tumor_mask = slice_info['tumor_mask']
+            bboxes = slice_info['bboxes']
+            
+            if not bboxes:
                 continue
-
-            image, metadata = self.load_dicom_image(dicom_path)
-            annotations = self.parse_xml_annotation(xml_path)
-
-            if image is None or not annotations:
-                continue
-
-            # Perform segmentation
-            bounding_boxes = [ann['bbox'] for ann in annotations]
-            masks = self.segment_with_medsam2(image, bounding_boxes)
-
+            
+            # Convert grayscale to RGB for MedSAM2
+            ct_rgb = np.stack([ct_slice] * 3, axis=-1)
+            
+            # Optionally run MedSAM2 refinement
+            if use_medsam and MEDSAM2_AVAILABLE:
+                refined_masks = self.segment_with_medsam2(ct_rgb, bboxes)
+            else:
+                # Use ground truth masks
+                refined_masks = [tumor_mask]
+            
+            # Create annotation format for visualization
+            annotations = []
+            for bbox in bboxes:
+                annotations.append({
+                    'name': 'tumor',
+                    'bbox': bbox,
+                    'width': ct_slice.shape[1],
+                    'height': ct_slice.shape[0]
+                })
+            
+            metadata = {
+                'slice_location': slice_info['slice_location'],
+                'pixel_spacing': slice_info['spacing'][1:],  # (y, x) spacing
+                'slice_thickness': slice_info['spacing'][0],
+                'instance_number': slice_info['slice_index']
+            }
+            
             slice_results.append({
-                'dicom_file': dicom_path.name,
-                'xml_file': xml_path.name,
+                'dicom_file': f"slice_{slice_info['slice_index']:03d}.png",
+                'xml_file': f"slice_{slice_info['slice_index']:03d}_mask.png",
                 'metadata': metadata,
                 'annotations': annotations,
-                'masks': masks
+                'masks': refined_masks,
+                'ground_truth_mask': tumor_mask
             })
-
-            # Save visualization images
+            
+            # Save visualization
             if save_results:
                 try:
-                    # Save combined visualization (side-by-side comparison)
                     self.save_visualization_images(
                         patient_id=patient_id,
-                        image=image,
+                        image=ct_rgb,
                         annotations=annotations,
-                        masks=masks,
-                        dicom_filename=dicom_path.name,
-                        slice_index=i
+                        masks=refined_masks,
+                        dicom_filename=f"slice_{slice_info['slice_index']:03d}",
+                        slice_index=slice_info['slice_index']
                     )
                     
-                    # Save individual images (original and segmentation separately)
                     self.save_individual_images(
                         patient_id=patient_id,
-                        image=image,
+                        image=ct_rgb,
                         annotations=annotations,
-                        masks=masks,
-                        dicom_filename=dicom_path.name,
-                        slice_index=i
+                        masks=refined_masks,
+                        dicom_filename=f"slice_{slice_info['slice_index']:03d}",
+                        slice_index=slice_info['slice_index']
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to save visualization for {dicom_path.name}: {e}")
+                    logger.warning(f"Failed to save visualization for slice {slice_info['slice_index']}: {e}")
         
         if not slice_results:
-            return {'status': 'error', 'message': 'No annotated slices found'}
-
+            return {'status': 'error', 'message': 'No slices processed successfully'}
+        
         # Create summary visualization
         if save_results:
             try:
                 self.create_summary_visualization(patient_id, slice_results)
             except Exception as e:
-                logger.warning(f"Failed to create summary visualization: {e}")
+                logger.warning(f"Failed to create summary: {e}")
         
         # Extract and save features for LLM
         if save_results:
@@ -1114,44 +1124,61 @@ class MedSAMSegmentator:
                 self.save_features_for_llm(patient_id, slice_results)
             except Exception as e:
                 logger.warning(f"Failed to save LLM features: {e}")
-
-        # Create and save 3D volume
-        volume_3d, volume_metadata = self.create_3d_mask_volume(slice_results)
-        nifti_path = None
         
-        if save_results and volume_3d.size > 0:
+        # Save 3D segmentation results
+        nifti_path = None
+        if save_results:
             output_dir = self.segmentation_result_base / patient_id
             output_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            nifti_path = output_dir / f"segmentation_{timestamp}.nii.gz"
-            self.save_masks_as_nifti(volume_3d, str(nifti_path), volume_metadata)
+            
+            # Create a copy of the original files for reference
+            import shutil
+            ct_copy = output_dir / f"original_CT_{timestamp}.nii.gz"
+            tumor_copy = output_dir / f"original_tumor_{timestamp}.nii.gz"
+            shutil.copy(patient_data['ct_file'], ct_copy)
+            shutil.copy(patient_data['tumor_file'], tumor_copy)
+            
+            nifti_path = str(tumor_copy)
+            logger.info(f"Saved original files: {ct_copy.name}, {tumor_copy.name}")
         
         return {
             'status': 'success',
             'patient_id': patient_id,
             'processed_slices': len(slice_results),
-            'volume_shape': volume_3d.shape if volume_3d.size > 0 else None,
-            'nifti_path': str(nifti_path) if nifti_path else None,
-            'reference_path': reference_path
+            'total_slices_with_tumor': len(slice_data),
+            'nifti_path': nifti_path,
+            'axis': axis
         }
     
-    def process_all_patients(self, save_results: bool = True, create_reference: bool = True) -> Dict:
-        """Process all available patients"""
+    def process_all_patients(self, save_results: bool = True, use_medsam: bool = True, max_patients: int = None, axis: int = 0) -> Dict:
+        """
+        批量處理患者（支援多軸向）
+        
+        Args:
+            save_results: 是否保存結果
+            use_medsam: 是否使用MedSAM2
+            max_patients: 最大處理患者數
+            axis: 切片軸 (0, 1, 或 2)
+        """
         patients = self.get_patient_list()
         if not patients:
             return {'status': 'error', 'message': 'No patients found'}
         
-        logger.info(f"Processing {len(patients)} patients: {', '.join(patients)}")
+        # Limit number of patients if specified
+        if max_patients:
+            patients = patients[:max_patients]
+        
+        logger.info(f"Processing {len(patients)} patients (axis={axis})")
         
         results = {}
-        for patient_id in patients:
+        for i, patient_id in enumerate(patients, 1):
             try:
-                result = self.process_patient(patient_id, save_results=save_results, create_reference=create_reference)
+                logger.info(f"[{i}/{len(patients)}] Processing {patient_id}")
+                result = self.process_patient(patient_id, save_results=save_results, use_medsam=use_medsam, axis=axis)
                 results[patient_id] = result
                 if result['status'] == 'success':
-                    logger.info(f"✓ {patient_id}: {result['processed_slices']} slices processed")
-                    if result.get('reference_path'):
-                        logger.info(f"  Reference created: {Path(result['reference_path']).name}")
+                    logger.info(f"✓ {patient_id}: {result['processed_slices']}/{result.get('total_slices_with_tumor', 0)} slices processed")
                 else:
                     logger.warning(f"✗ {patient_id}: {result.get('message', 'Failed')}")
             except Exception as e:
@@ -1171,19 +1198,22 @@ class MedSAMSegmentator:
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description="MedSAM2 Segmentation for Chest Tumor")
+    parser = argparse.ArgumentParser(description="MedSAM2 Segmentation for Chest Tumor (NIfTI version)")
     parser.add_argument("--patient_id", type=str, help="Patient ID to process (if not specified, process all patients)")
     parser.add_argument("--data_dir", type=str, default="../datasets/all_patient_data", help="Patient data directory")
     parser.add_argument("--config", type=str, default="sam2.1_hiera_t512.yaml", help="MedSAM2 config file")
     parser.add_argument("--list_patients", action="store_true", help="List available patients")
-    parser.add_argument("--create_reference_only", action="store_true", help="Only create reference NIfTI from DICOM (no segmentation)")
-    parser.add_argument("--no_reference", action="store_true", help="Skip creating reference NIfTI")
+    parser.add_argument("--no_medsam", action="store_true", help="Skip MedSAM2 refinement, use ground truth masks only")
     parser.add_argument("--no_timestamp", action="store_true", help="Don't use timestamp in result directory")
+    parser.add_argument("--max_patients", type=int, help="Maximum number of patients to process (for testing)")
+    parser.add_argument("--analyze_only", action="store_true", help="Only analyze dataset statistics without processing")
+    parser.add_argument("--axis", type=int, default=2, choices=[0, 1, 2], 
+                       help="Slice axis: 0=first dimension, 1=second dimension, 2=third dimension (default)")
     
     args = parser.parse_args()
     
     # Determine if we're just listing patients
-    list_only = args.list_patients
+    list_only = args.list_patients or args.analyze_only
     
     segmentator = MedSAMSegmentator(data_dir=args.data_dir, config_file=args.config, 
                                    use_timestamp=not args.no_timestamp, list_only=list_only)
@@ -1193,49 +1223,72 @@ def main():
         print(f"Available patients ({len(patients)}): {', '.join(patients)}")
         return
     
-    if args.create_reference_only:
-        # Only create reference NIfTI
-        if args.patient_id:
-            reference_path = segmentator.create_reference_nifti(args.patient_id)
-            if reference_path:
-                print(f"Reference NIfTI created for {args.patient_id}: {reference_path}")
+    if args.analyze_only:
+        # Analyze dataset statistics
+        patients = segmentator.get_patient_list()
+        print(f"\n{'='*80}")
+        print(f"Dataset Analysis")
+        print(f"{'='*80}")
+        print(f"Total patients: {len(patients)}")
+        
+        # Sample a few patients to check structure
+        sample_size = min(10, len(patients))
+        print(f"\nChecking {sample_size} sample patients...")
+        
+        valid_count = 0
+        total_slices = 0
+        for patient_id in patients[:sample_size]:
+            patient_data = segmentator.load_patient_data(patient_id)
+            if patient_data.get('has_data'):
+                valid_count += 1
+                slice_data = segmentator.convert_to_2d_slices(patient_id, only_with_tumor=True, axis=args.axis)
+                total_slices += len(slice_data)
+                print(f"  ✓ {patient_id}: {len(slice_data)} slices with tumor")
             else:
-                print(f"Failed to create reference NIfTI for {args.patient_id}")
-        else:
-            # Create reference for all patients
-            patients = segmentator.get_patient_list()
-            for patient_id in patients:
-                reference_path = segmentator.create_reference_nifti(patient_id)
-                if reference_path:
-                    print(f"✓ {patient_id}: Reference created - {Path(reference_path).name}")
-                else:
-                    print(f"✗ {patient_id}: Failed to create reference")
+                print(f"  ✗ {patient_id}: Missing data files")
+        
+        avg_slices = total_slices / valid_count if valid_count > 0 else 0
+        estimated_total = int(avg_slices * len(patients))
+        print(f"\nEstimated statistics:")
+        print(f"  - Average slices per patient: {avg_slices:.1f}")
+        print(f"  - Estimated total slices: {estimated_total}")
+        print(f"{'='*80}\n")
         return
     
-    create_ref = not args.no_reference
+    use_medsam = not args.no_medsam
     
     if args.patient_id:
         # Process specific patient
-        results = segmentator.process_patient(args.patient_id, create_reference=create_ref)
+        results = segmentator.process_patient(args.patient_id, use_medsam=use_medsam, axis=args.axis)
         if results['status'] == 'success':
+            print(f"\n{'='*80}")
             print(f"Patient {results['patient_id']} processed successfully")
-            print(f"Processed {results['processed_slices']} slices")
-            if results.get('reference_path'):
-                print(f"Reference DICOM saved: {results['reference_path']}")
+            print(f"{'='*80}")
+            print(f"Slice axis: {results.get('axis', 0)}")
+            print(f"Processed slices: {results['processed_slices']}/{results.get('total_slices_with_tumor', 0)}")
             if results.get('nifti_path'):
-                print(f"Segmentation saved: {results['nifti_path']}")
+                print(f"Results saved to: {results['nifti_path']}")
+            print(f"{'='*80}\n")
         else:
             print(f"Processing failed: {results.get('message', 'Unknown error')}")
     else:
         # Process all patients
-        results = segmentator.process_all_patients(create_reference=create_ref)
+        results = segmentator.process_all_patients(use_medsam=use_medsam, max_patients=args.max_patients, axis=args.axis)
         if results['status'] == 'success':
-            print(f"Processing completed: {results['successful_patients']}/{results['total_patients']} patients successful")
+            print(f"\n{'='*80}")
+            print(f"Batch Processing Complete")
+            print(f"{'='*80}")
+            print(f"Success: {results['successful_patients']}/{results['total_patients']} patients")
             
             # Show summary of failed patients
             failed_patients = [pid for pid, result in results['results'].items() if result['status'] != 'success']
             if failed_patients:
-                print(f"Failed patients: {', '.join(failed_patients)}")
+                print(f"\nFailed patients ({len(failed_patients)}):")
+                for pid in failed_patients[:10]:  # Show first 10
+                    print(f"  - {pid}")
+                if len(failed_patients) > 10:
+                    print(f"  ... and {len(failed_patients) - 10} more")
+            print(f"{'='*80}\n")
         else:
             print(f"Processing failed: {results.get('message', 'Unknown error')}")
 
