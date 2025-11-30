@@ -5,6 +5,7 @@ LLM/RAG/dist
 LLM/RAG/model
 medsam2_segmentation/MedSAM2
 medsam2_segmentation/segmentation_result
+medsam2_segmentation/result
 datasets
 detection/__pycache__
 detection/Faster_RCNN_Detection*

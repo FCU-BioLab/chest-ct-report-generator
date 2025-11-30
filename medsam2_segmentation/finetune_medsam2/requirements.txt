@@ -1,0 +1,22 @@
+# MedSAM2 Fine-tuning 依賴套件
+# Python >= 3.8
+
+# 深度學習框架
+torch>=1.13.0
+torchvision>=0.14.0
+
+# 醫學影像處理
+nibabel>=5.0.0
+SimpleITK>=2.0.0
+pandas>=1.0.0
+scikit-image>=0.19.0
+scipy>=1.9.0
+
+# 訓練工具
+tqdm>=4.65.0
+matplotlib>=3.5.0
+hydra-core>=1.2.0
+
+# MedSAM2 相關（需要另外安裝）
+# 請參考 MedSAM2 官方文件進行安裝
+# https://github.com/MedICL-VU/MedSAM2
