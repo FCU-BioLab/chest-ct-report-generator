@@ -238,8 +238,11 @@ def main():
         logger.info(f"🎲 未設定隨機種子，訓練過程將使用隨機初始化")
     
     # 檢查 CUDA
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"🖥️ 使用設備: {device}")
+    if device.type == "cuda":
+        logger.info(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"💾 GPU 記憶體: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # 獲取所有患者 ID
     data_dir = Path(args.data_dir)
@@ -462,6 +465,26 @@ def main():
     
     # ✅ 新增：建立測試集指標追蹤器
     test_metrics_tracker = PatientMetricsTracker()
+    
+    # 如果需要提取特徵，使用 test_and_extract_features
+    if args.extract_features:
+        logger.info("🔬 執行特徵提取與詳細評估...")
+        feature_output_dir = args.feature_output_dir
+        if feature_output_dir is None:
+            feature_output_dir = Path(args.output_dir) / "features"
+            
+        test_results = trainer.test_and_extract_features(
+            test_loader,
+            output_dir=str(feature_output_dir),
+            extract_deep_features=True,
+            save_predictions=True
+        )
+        
+        # 更新 metrics (test_and_extract_features 返回的是詳細字典，這裡我們主要需要 loss 和 metrics)
+        # 注意: test_and_extract_features 內部已經計算了 metrics，但格式可能不同
+        # 為了保持一致性，我們還是可以跑一次 validate，或者從 test_results 解析
+        # 簡單起見，我們讓 validate 繼續跑，雖然會多花一點時間，但確保指標計算一致
+        
     test_loss, test_metrics, test_time = trainer.validate(test_loader, metrics_tracker=test_metrics_tracker)
     
     # ✅ 新增：保存測試集詳細報告
