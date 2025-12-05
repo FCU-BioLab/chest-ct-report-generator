@@ -128,7 +128,7 @@ def main():
     parser.add_argument(
         "--early_stopping_patience", 
         type=int, 
-        default=7,
+        default=15,
         help="早停容忍 epoch 數"
     )
     parser.add_argument(
@@ -199,6 +199,17 @@ def main():
         help="提取深層特徵向量（需要更多記憶體）"
     )
     parser.add_argument(
+        "--save_visualizations",
+        action="store_true",
+        default=True,
+        help="保存可視化 PNG 圖片（GT mask、Pred mask、對比圖）"
+    )
+    parser.add_argument(
+        "--no_visualizations",
+        action="store_true",
+        help="禁用可視化輸出（預設為啟用）"
+    )
+    parser.add_argument(
         "--feature_output_dir", 
         type=str, 
         default=None,
@@ -216,7 +227,7 @@ def main():
     # ✅ 生成時間戳記輸出目錄
     if args.output_dir is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_result_dir = Path(r"E:\GitHub\chest-ct-report-generator\medsam2_segmentation\result")
+        base_result_dir = Path(r"C:\GitHub\chest-ct-report-generator\medsam2_segmentation\result")
         args.output_dir = str(base_result_dir / f"segmentation_{timestamp}")
     
     # 建立輸出目錄
@@ -374,6 +385,9 @@ def main():
         if feature_output_dir is None:
             feature_output_dir = Path(args.output_dir) / "features"
         
+        # 判斷是否啟用可視化
+        save_vis = not args.no_visualizations
+        
         # 在測試集上測試並提取特徵
         logger.info("\n📊 測試集評估與特徵提取:")
         test_results = trainer.test_and_extract_features(
@@ -381,6 +395,7 @@ def main():
             output_dir=str(feature_output_dir),
             extract_deep_features=args.extract_features,
             save_predictions=True,
+            save_visualizations=save_vis,
             spacing=(1.0, 1.0)  # 可以從 DICOM metadata 讀取
         )
         
@@ -416,11 +431,12 @@ def main():
         logger.info(f"\n{'='*80}")
         logger.info(f"✅ 驗證集結果:")
         logger.info(f"  Loss: {val_loss:.4f}")
-        logger.info(f"  Dice Score: {val_metrics['dice']:.4f}")
-        logger.info(f"  IoU/Jaccard: {val_metrics['iou']:.4f}")
-        logger.info(f"  Precision: {val_metrics['precision']:.4f}")
-        logger.info(f"  Recall/Sensitivity: {val_metrics['recall']:.4f}")
+        logger.info(f"  DSC (Dice Similarity Coefficient): {val_metrics['DSC']:.4f}")
+        logger.info(f"  IoU (Intersection over Union): {val_metrics['IoU']:.4f}")
+        logger.info(f"  SEN (Sensitivity): {val_metrics['SEN']:.4f}")
+        logger.info(f"  PPV (Positive Predictive Value): {val_metrics['PPV']:.4f}")
         logger.info(f"  Specificity: {val_metrics['specificity']:.4f}")
+        logger.info(f"  Accuracy: {val_metrics['accuracy']:.4f}")
         logger.info(f"  Hausdorff Distance (95%): {val_metrics['hausdorff_95']:.2f} pixels")
         logger.info(f"  Inference Time: {val_time:.1f}s")
         logger.info(f"{'='*80}\n")
@@ -431,11 +447,12 @@ def main():
         logger.info(f"\n{'='*80}")
         logger.info(f"✅ 測試集結果:")
         logger.info(f"  Loss: {test_loss:.4f}")
-        logger.info(f"  Dice Score: {test_metrics['dice']:.4f}")
-        logger.info(f"  IoU/Jaccard: {test_metrics['iou']:.4f}")
-        logger.info(f"  Precision: {test_metrics['precision']:.4f}")
-        logger.info(f"  Recall/Sensitivity: {test_metrics['recall']:.4f}")
+        logger.info(f"  DSC (Dice Similarity Coefficient): {test_metrics['DSC']:.4f}")
+        logger.info(f"  IoU (Intersection over Union): {test_metrics['IoU']:.4f}")
+        logger.info(f"  SEN (Sensitivity): {test_metrics['SEN']:.4f}")
+        logger.info(f"  PPV (Positive Predictive Value): {test_metrics['PPV']:.4f}")
         logger.info(f"  Specificity: {test_metrics['specificity']:.4f}")
+        logger.info(f"  Accuracy: {test_metrics['accuracy']:.4f}")
         logger.info(f"  Hausdorff Distance (95%): {test_metrics['hausdorff_95']:.2f} pixels")
         logger.info(f"  Inference Time: {test_time:.1f}s")
         logger.info(f"{'='*80}\n")
@@ -466,25 +483,25 @@ def main():
     # ✅ 新增：建立測試集指標追蹤器
     test_metrics_tracker = PatientMetricsTracker()
     
-    # 如果需要提取特徵，使用 test_and_extract_features
-    if args.extract_features:
-        logger.info("🔬 執行特徵提取與詳細評估...")
-        feature_output_dir = args.feature_output_dir
-        if feature_output_dir is None:
-            feature_output_dir = Path(args.output_dir) / "features"
-            
-        test_results = trainer.test_and_extract_features(
-            test_loader,
-            output_dir=str(feature_output_dir),
-            extract_deep_features=True,
-            save_predictions=True
-        )
+    # 判斷是否啟用可視化
+    save_vis = not args.no_visualizations
+    
+    # 訓練結束後執行測試並生成可視化
+    # 無論是否提取特徵，都會生成可視化結果
+    logger.info("🔬 執行測試評估與可視化...")
+    feature_output_dir = args.feature_output_dir
+    if feature_output_dir is None:
+        feature_output_dir = Path(args.output_dir) / "features"
         
-        # 更新 metrics (test_and_extract_features 返回的是詳細字典，這裡我們主要需要 loss 和 metrics)
-        # 注意: test_and_extract_features 內部已經計算了 metrics，但格式可能不同
-        # 為了保持一致性，我們還是可以跑一次 validate，或者從 test_results 解析
-        # 簡單起見，我們讓 validate 繼續跑，雖然會多花一點時間，但確保指標計算一致
+    test_results = trainer.test_and_extract_features(
+        test_loader,
+        output_dir=str(feature_output_dir),
+        extract_deep_features=args.extract_features,  # 深層特徵提取是可選的
+        save_predictions=True,
+        save_visualizations=save_vis
+    )
         
+    # 同時使用 validate 獲取標準化的測試指標和患者追蹤
     test_loss, test_metrics, test_time = trainer.validate(test_loader, metrics_tracker=test_metrics_tracker)
     
     # ✅ 新增：保存測試集詳細報告
@@ -494,11 +511,12 @@ def main():
     logger.info(f"\n{'='*80}")
     logger.info(f"✅ 測試集結果:")
     logger.info(f"  Loss: {test_loss:.4f}")
-    logger.info(f"  Dice Score: {test_metrics['dice']:.4f}")
-    logger.info(f"  IoU/Jaccard: {test_metrics['iou']:.4f}")
-    logger.info(f"  Precision: {test_metrics['precision']:.4f}")
-    logger.info(f"  Recall/Sensitivity: {test_metrics['recall']:.4f}")
+    logger.info(f"  DSC (Dice Similarity Coefficient): {test_metrics['DSC']:.4f}")
+    logger.info(f"  IoU (Intersection over Union): {test_metrics['IoU']:.4f}")
+    logger.info(f"  SEN (Sensitivity): {test_metrics['SEN']:.4f}")
+    logger.info(f"  PPV (Positive Predictive Value): {test_metrics['PPV']:.4f}")
     logger.info(f"  Specificity: {test_metrics['specificity']:.4f}")
+    logger.info(f"  Accuracy: {test_metrics['accuracy']:.4f}")
     logger.info(f"  Hausdorff Distance (95%): {test_metrics['hausdorff_95']:.2f} pixels")
     logger.info(f"  Inference Time: {test_time:.1f}s")
     logger.info(f"{'='*80}\n")

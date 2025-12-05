@@ -269,18 +269,39 @@ def compute_all_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, f
         
     Returns:
         包含所有指標的字典
+        
+    指標說明:
+        - DSC (Dice Similarity Coefficient) = dice
+        - IoU (Intersection over Union) = iou
+        - SEN (Sensitivity) = recall
+        - PPV (Positive Predictive Value) = precision
     """
     # 確保預測值為機率值
     pred_sigmoid = torch.sigmoid(pred) if pred.min() < 0 else pred
     
+    # 計算基礎指標
+    dice_score = compute_dice(pred_sigmoid, target)
+    iou_score = compute_iou(pred_sigmoid, target)
+    precision_score = compute_precision(pred_sigmoid, target)
+    recall_score = compute_recall(pred_sigmoid, target)
+    specificity_score = compute_specificity(pred_sigmoid, target)
+    accuracy_score = compute_accuracy(pred_sigmoid, target)
+    hd95_score = compute_hausdorff_distance(pred_sigmoid.squeeze(), target.squeeze())
+    
     metrics = {
-        'dice': compute_dice(pred_sigmoid, target),
-        'iou': compute_iou(pred_sigmoid, target),
-        'precision': compute_precision(pred_sigmoid, target),
-        'recall': compute_recall(pred_sigmoid, target),
-        'specificity': compute_specificity(pred_sigmoid, target),
-        'accuracy': compute_accuracy(pred_sigmoid, target),
-        'hausdorff_95': compute_hausdorff_distance(pred_sigmoid.squeeze(), target.squeeze())
+        # 標準名稱
+        'dice': dice_score,
+        'iou': iou_score,
+        'precision': precision_score,
+        'recall': recall_score,
+        'specificity': specificity_score,
+        'accuracy': accuracy_score,
+        'hausdorff_95': hd95_score,
+        # 學術標準別名 (Academic Standard Aliases)
+        'DSC': dice_score,           # Dice Similarity Coefficient
+        'IoU': iou_score,            # Intersection over Union
+        'SEN': recall_score,         # Sensitivity = Recall = TPR
+        'PPV': precision_score,      # Positive Predictive Value = Precision
     }
     
     return metrics
