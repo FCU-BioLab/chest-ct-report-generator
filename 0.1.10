@@ -1,0 +1,14 @@
+Defaulting to user installation because normal site-packages is not writeable
+Collecting iopath
+  Using cached iopath-0.1.10-py3-none-any.whl
+Requirement already satisfied: tqdm in c:\users\lab 244\appdata\roaming\python\python313\site-packages (from iopath) (4.67.1)
+Requirement already satisfied: typing_extensions in c:\users\lab 244\appdata\roaming\python\python313\site-packages (from iopath) (4.12.2)
+Collecting portalocker (from iopath)
+  Using cached portalocker-3.2.0-py3-none-any.whl.metadata (8.7 kB)
+Collecting pywin32>=226 (from portalocker->iopath)
+  Using cached pywin32-311-cp313-cp313-win_amd64.whl.metadata (10 kB)
+Requirement already satisfied: colorama in c:\users\lab 244\appdata\roaming\python\python313\site-packages (from tqdm->iopath) (0.4.6)
+Using cached portalocker-3.2.0-py3-none-any.whl (22 kB)
+Using cached pywin32-311-cp313-cp313-win_amd64.whl (9.5 MB)
+Installing collected packages: pywin32, portalocker, iopath
+Successfully installed iopath-0.1.10 portalocker-3.2.0 pywin32-311

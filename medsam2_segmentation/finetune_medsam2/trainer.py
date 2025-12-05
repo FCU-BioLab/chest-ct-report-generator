@@ -24,6 +24,276 @@ from .losses import CombinedLoss
 from .utils import compute_all_metrics, EarlyStopping, PatientMetricsTracker
 
 
+class SegmentationVisualizer:
+    """
+    分割結果可視化工具
+    
+    生成 Ground Truth 和 Prediction 的對比圖片
+    """
+    
+    def __init__(self, output_dir: str, dpi: int = 150):
+        self.output_dir = Path(output_dir)
+        self.dpi = dpi
+        self.logger = logging.getLogger(__name__)
+        
+        # 建立輸出目錄
+        self.vis_dir = self.output_dir / "visualizations"
+        self.vis_dir.mkdir(parents=True, exist_ok=True)
+    
+    def save_slice_comparison(
+        self,
+        image: np.ndarray,
+        gt_mask: np.ndarray,
+        pred_mask: np.ndarray,
+        patient_id: str,
+        slice_idx: int,
+        dice_score: float = None,
+        iou_score: float = None,
+        bboxes: np.ndarray = None
+    ):
+        """
+        保存單個切片的 GT 和 Prediction 對比圖
+        
+        Args:
+            image: CT 影像 [H, W] 或 [3, H, W]
+            gt_mask: Ground Truth 遮罩 [H, W]
+            pred_mask: 預測遮罩 [H, W]
+            patient_id: 患者 ID
+            slice_idx: 切片索引
+            dice_score: Dice 分數（可選）
+            iou_score: IoU 分數（可選）
+            bboxes: Bounding boxes（可選）
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import LinearSegmentedColormap
+        
+        # 確保 patient_id 是安全的檔名
+        safe_patient_id = str(patient_id).replace('.', '_').replace('/', '_')[:50]
+        
+        # 建立患者目錄
+        patient_vis_dir = self.vis_dir / safe_patient_id
+        patient_vis_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 處理影像格式
+        if len(image.shape) == 3:
+            if image.shape[0] == 3:  # [3, H, W] -> [H, W]
+                image = image[0]  # 取第一個通道
+            elif image.shape[2] == 3:  # [H, W, 3] -> [H, W]
+                image = image[:, :, 0]
+        
+        # 確保遮罩是二值化的
+        gt_binary = (gt_mask > 0.5).astype(np.float32)
+        pred_binary = (pred_mask > 0.5).astype(np.float32)
+        
+        # 創建顏色遮罩
+        # GT: 綠色, Pred: 紅色, 重疊: 黃色
+        
+        # ===== 圖1: Ground Truth =====
+        fig1, ax1 = plt.subplots(1, 1, figsize=(8, 8))
+        
+        # 顯示原始影像
+        ax1.imshow(image, cmap='gray', vmin=np.percentile(image, 1), vmax=np.percentile(image, 99))
+        
+        # 疊加 GT 遮罩（綠色半透明）
+        gt_overlay = np.zeros((*gt_binary.shape, 4))
+        gt_overlay[gt_binary > 0] = [0, 1, 0, 0.4]  # 綠色，40% 透明度
+        ax1.imshow(gt_overlay)
+        
+        # 繪製 GT 輪廓
+        ax1.contour(gt_binary, levels=[0.5], colors=['lime'], linewidths=2)
+        
+        # 繪製 bounding boxes
+        if bboxes is not None and len(bboxes) > 0:
+            for bbox in bboxes:
+                if len(bbox) == 4:
+                    x1, y1, x2, y2 = bbox
+                    rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                         fill=False, edgecolor='cyan', linewidth=2, linestyle='--')
+                    ax1.add_patch(rect)
+        
+        ax1.set_title(f'Ground Truth\nPatient: {patient_id[:30]}...\nSlice: {slice_idx}', fontsize=12)
+        ax1.axis('off')
+        
+        plt.tight_layout()
+        gt_path = patient_vis_dir / f"slice_{slice_idx:04d}_gt.png"
+        plt.savefig(gt_path, dpi=self.dpi, bbox_inches='tight', facecolor='black')
+        plt.close(fig1)
+        
+        # ===== 圖2: Prediction =====
+        fig2, ax2 = plt.subplots(1, 1, figsize=(8, 8))
+        
+        # 顯示原始影像
+        ax2.imshow(image, cmap='gray', vmin=np.percentile(image, 1), vmax=np.percentile(image, 99))
+        
+        # 疊加 Prediction 遮罩（紅色半透明）
+        pred_overlay = np.zeros((*pred_binary.shape, 4))
+        pred_overlay[pred_binary > 0] = [1, 0, 0, 0.4]  # 紅色，40% 透明度
+        ax2.imshow(pred_overlay)
+        
+        # 繪製 Prediction 輪廓
+        ax2.contour(pred_binary, levels=[0.5], colors=['red'], linewidths=2)
+        
+        # 繪製 bounding boxes
+        if bboxes is not None and len(bboxes) > 0:
+            for bbox in bboxes:
+                if len(bbox) == 4:
+                    x1, y1, x2, y2 = bbox
+                    rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                         fill=False, edgecolor='cyan', linewidth=2, linestyle='--')
+                    ax2.add_patch(rect)
+        
+        # 標題包含評估分數
+        title = f'Prediction\nPatient: {patient_id[:30]}...\nSlice: {slice_idx}'
+        if dice_score is not None:
+            title += f'\nDice: {dice_score:.4f}'
+        if iou_score is not None:
+            title += f' | IoU: {iou_score:.4f}'
+        ax2.set_title(title, fontsize=12)
+        ax2.axis('off')
+        
+        plt.tight_layout()
+        pred_path = patient_vis_dir / f"slice_{slice_idx:04d}_pred.png"
+        plt.savefig(pred_path, dpi=self.dpi, bbox_inches='tight', facecolor='black')
+        plt.close(fig2)
+        
+        # ===== 圖3: 對比圖（左右並排）=====
+        fig3, axes = plt.subplots(1, 3, figsize=(18, 6))
+        
+        # 左: Ground Truth
+        axes[0].imshow(image, cmap='gray', vmin=np.percentile(image, 1), vmax=np.percentile(image, 99))
+        gt_overlay = np.zeros((*gt_binary.shape, 4))
+        gt_overlay[gt_binary > 0] = [0, 1, 0, 0.4]
+        axes[0].imshow(gt_overlay)
+        axes[0].contour(gt_binary, levels=[0.5], colors=['lime'], linewidths=2)
+        axes[0].set_title('Ground Truth', fontsize=14, color='lime')
+        axes[0].axis('off')
+        
+        # 中: Prediction
+        axes[1].imshow(image, cmap='gray', vmin=np.percentile(image, 1), vmax=np.percentile(image, 99))
+        pred_overlay = np.zeros((*pred_binary.shape, 4))
+        pred_overlay[pred_binary > 0] = [1, 0, 0, 0.4]
+        axes[1].imshow(pred_overlay)
+        axes[1].contour(pred_binary, levels=[0.5], colors=['red'], linewidths=2)
+        axes[1].set_title('Prediction', fontsize=14, color='red')
+        axes[1].axis('off')
+        
+        # 右: 重疊對比 (GT=綠, Pred=紅, 重疊=黃)
+        axes[2].imshow(image, cmap='gray', vmin=np.percentile(image, 1), vmax=np.percentile(image, 99))
+        
+        # 計算重疊區域
+        overlap = gt_binary * pred_binary
+        gt_only = gt_binary * (1 - pred_binary)
+        pred_only = pred_binary * (1 - gt_binary)
+        
+        # 創建 RGB 重疊圖
+        overlap_rgb = np.zeros((*gt_binary.shape, 4))
+        overlap_rgb[gt_only > 0] = [0, 1, 0, 0.5]      # GT only: 綠色
+        overlap_rgb[pred_only > 0] = [1, 0, 0, 0.5]    # Pred only: 紅色
+        overlap_rgb[overlap > 0] = [1, 1, 0, 0.5]      # 重疊: 黃色
+        axes[2].imshow(overlap_rgb)
+        
+        # 繪製輪廓
+        axes[2].contour(gt_binary, levels=[0.5], colors=['lime'], linewidths=1.5, linestyles='--')
+        axes[2].contour(pred_binary, levels=[0.5], colors=['red'], linewidths=1.5)
+        
+        title_overlap = 'Comparison (Green=GT, Red=Pred, Yellow=Overlap)'
+        if dice_score is not None:
+            title_overlap += f'\nDice: {dice_score:.4f}'
+        if iou_score is not None:
+            title_overlap += f' | IoU: {iou_score:.4f}'
+        axes[2].set_title(title_overlap, fontsize=12)
+        axes[2].axis('off')
+        
+        # 總標題
+        fig3.suptitle(f'Patient: {patient_id[:40]}... | Slice: {slice_idx}', fontsize=14, y=1.02)
+        
+        plt.tight_layout()
+        comparison_path = patient_vis_dir / f"slice_{slice_idx:04d}_comparison.png"
+        plt.savefig(comparison_path, dpi=self.dpi, bbox_inches='tight', facecolor='black')
+        plt.close(fig3)
+        
+        return {
+            'gt_path': str(gt_path),
+            'pred_path': str(pred_path),
+            'comparison_path': str(comparison_path)
+        }
+    
+    def create_patient_summary_grid(
+        self,
+        patient_id: str,
+        slice_results: List[Dict],
+        max_slices: int = 16
+    ):
+        """
+        為單個患者創建切片摘要網格圖
+        
+        Args:
+            patient_id: 患者 ID
+            slice_results: 切片結果列表
+            max_slices: 最多顯示的切片數
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        if not slice_results:
+            return
+        
+        safe_patient_id = str(patient_id).replace('.', '_').replace('/', '_')[:50]
+        patient_vis_dir = self.vis_dir / safe_patient_id
+        
+        # 限制切片數量
+        if len(slice_results) > max_slices:
+            # 等間隔選取
+            indices = np.linspace(0, len(slice_results)-1, max_slices, dtype=int)
+            slice_results = [slice_results[i] for i in indices]
+        
+        n_slices = len(slice_results)
+        cols = min(4, n_slices)
+        rows = (n_slices + cols - 1) // cols
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 5*rows))
+        if rows == 1 and cols == 1:
+            axes = np.array([[axes]])
+        elif rows == 1:
+            axes = axes.reshape(1, -1)
+        elif cols == 1:
+            axes = axes.reshape(-1, 1)
+        
+        for idx, result in enumerate(slice_results):
+            row = idx // cols
+            col = idx % cols
+            ax = axes[row, col]
+            
+            # 載入對比圖
+            comparison_path = result.get('comparison_path')
+            if comparison_path and Path(comparison_path).exists():
+                img = plt.imread(comparison_path)
+                ax.imshow(img)
+            
+            slice_idx = result.get('slice_idx', idx)
+            dice = result.get('dice', 0)
+            ax.set_title(f'Slice {slice_idx}\nDice: {dice:.3f}', fontsize=10)
+            ax.axis('off')
+        
+        # 隱藏多餘的子圖
+        for idx in range(n_slices, rows * cols):
+            row = idx // cols
+            col = idx % cols
+            axes[row, col].axis('off')
+        
+        fig.suptitle(f'Patient Summary: {patient_id[:50]}...', fontsize=14, y=1.02)
+        plt.tight_layout()
+        
+        summary_path = patient_vis_dir / "patient_summary.png"
+        plt.savefig(summary_path, dpi=100, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+        
+        self.logger.info(f"📊 患者摘要圖已保存: {summary_path}")
+
+
 class LesionFeatureExtractor:
     """
     病灶特徵提取器
@@ -1056,6 +1326,7 @@ Total Epochs: {len(epochs)}
         output_dir: Optional[str] = None,
         extract_deep_features: bool = True,
         save_predictions: bool = True,
+        save_visualizations: bool = True,
         spacing: Tuple[float, float] = (1.0, 1.0)
     ) -> Dict:
         """
@@ -1066,6 +1337,7 @@ Total Epochs: {len(epochs)}
             output_dir: 特徵輸出目錄（預設為 self.output_dir/features）
             extract_deep_features: 是否提取深層特徵向量
             save_predictions: 是否保存預測遮罩
+            save_visualizations: 是否保存可視化 PNG 圖片（GT mask、Pred mask、對比圖）
             spacing: 像素間距 (mm)
         
         Returns:
@@ -1081,6 +1353,13 @@ Total Epochs: {len(epochs)}
         
         # 初始化特徵提取器
         feature_extractor = LesionFeatureExtractor(self.model, self.device)
+        
+        # 初始化可視化器
+        visualizer = None
+        if save_visualizations:
+            vis_dir = output_dir / "visualizations"
+            visualizer = SegmentationVisualizer(vis_dir)
+            self.logger.info(f"📸 可視化輸出目錄: {vis_dir}")
         
         self.model.eval()
         self._current_batch_cache.clear()
@@ -1263,6 +1542,35 @@ Total Epochs: {len(epochs)}
                     
                     np.save(pred_save_dir / f"slice_{slice_idx:04d}_pred.npy", combined_mask)
                 
+                # 保存可視化圖片（可選）
+                if visualizer is not None and all_pred_masks:
+                    # 準備原始影像（歸一化到 0-1）
+                    original_image_np = image[0].cpu().numpy()  # 取第一個通道
+                    if original_image_np.max() > 1.0:
+                        original_image_np = (original_image_np - original_image_np.min()) / (original_image_np.max() - original_image_np.min() + 1e-8)
+                    
+                    # 合併所有預測遮罩
+                    combined_pred = np.zeros_like(all_pred_masks[0], dtype=np.float32)
+                    for pm in all_pred_masks:
+                        combined_pred = np.maximum(combined_pred, pm.astype(np.float32))
+                    
+                    # GT mask
+                    gt_mask_np = gt_mask.squeeze().cpu().numpy()
+                    
+                    # 計算切片級別的平均指標
+                    slice_dice = slice_features['metrics'].get('dice', 0.0)
+                    slice_iou = slice_features['metrics'].get('iou', 0.0)
+                    
+                    visualizer.save_slice_comparison(
+                        patient_id=patient_id,
+                        slice_idx=slice_idx,
+                        original_image=original_image_np,
+                        gt_mask=gt_mask_np,
+                        pred_mask=combined_pred,
+                        dice_score=slice_dice,
+                        iou_score=slice_iou
+                    )
+                
                 # 更新進度條
                 pbar.set_postfix({
                     'patients': len(all_results['patient_features']),
@@ -1273,6 +1581,16 @@ Total Epochs: {len(epochs)}
         for patient_id, patient_data in all_results['patient_features'].items():
             patient_summary = self._compute_patient_summary(patient_data)
             all_results['patient_features'][patient_id]['summary'] = patient_summary
+        
+        # 生成患者摘要可視化圖（可選）
+        if visualizer is not None:
+            self.logger.info("📸 正在生成患者摘要可視化圖...")
+            for patient_id in tqdm(all_results['patient_features'].keys(), desc="生成患者摘要圖"):
+                visualizer.create_patient_summary_grid(patient_id)
+            
+            # 輸出可視化統計
+            vis_stats = visualizer.get_statistics()
+            self.logger.info(f"📊 可視化統計: 已生成 {vis_stats['total_images']} 張圖片，{vis_stats['total_patients']} 個患者")
         
         # 計算總體測試指標
         test_summary = {}
@@ -1300,6 +1618,8 @@ Total Epochs: {len(epochs)}
             self.logger.info(f"平均 Dice: {test_summary['dice']['mean']:.4f} ± {test_summary['dice']['std']:.4f}")
         if 'iou' in test_summary:
             self.logger.info(f"平均 IoU: {test_summary['iou']['mean']:.4f} ± {test_summary['iou']['std']:.4f}")
+        if visualizer is not None:
+            self.logger.info(f"可視化圖片已保存至: {visualizer.output_dir}")
         self.logger.info(f"特徵已保存至: {output_dir}")
         self.logger.info(f"{'='*80}\n")
         

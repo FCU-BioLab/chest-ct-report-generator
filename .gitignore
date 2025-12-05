@@ -1,8 +1,10 @@
 .DS_Store
 venv
-LLM/RAG/build
-LLM/RAG/dist
-LLM/RAG/model
+llm/RAG/build
+llm/RAG/dist
+llm/RAG/model
+llm/Fine_Tune/fine_tune_data
+llm/Fine_Tune/google_gemma_3/output
 medsam2_segmentation/MedSAM2
 medsam2_segmentation/segmentation_result
 medsam2_segmentation/result
