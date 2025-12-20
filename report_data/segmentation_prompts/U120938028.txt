@@ -1,0 +1,13 @@
+Generate a CT chest report based on the following segmentation results:
+
+Nodule 1:
+  - Size: 13.5 mm (ESD)
+  - Volume: 1288.2 mm³
+  - Mean HU: -350
+  - Type: part-solid
+
+Nodule 2:
+  - Size: 13.5 mm (ESD)
+  - Volume: 1288.2 mm³
+  - Mean HU: -350
+  - Type: part-solid

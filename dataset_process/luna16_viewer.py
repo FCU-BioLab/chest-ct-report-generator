@@ -1,6 +1,6 @@
 # luna16_viewer.py
 # LUNA16 資料集專用檢視器 - 支援 MHD/RAW 格式的 CT 影像瀏覽
-# 功能：2D 切片瀏覽、3D 多平面重建、結節標註顯示
+# 功能：2D 切片瀏覽、3D 多平面重建、結節標註顯示（支援分割遮罩）
 
 import numpy as np
 import SimpleITK as sitk
@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.widgets import Slider
+from matplotlib.colors import ListedColormap
 import pandas as pd
 from pathlib import Path
 import tkinter as tk
@@ -15,6 +16,8 @@ from tkinter import ttk, messagebox, filedialog
 import json
 import sys
 import threading
+from scipy import ndimage
+from skimage import measure, morphology, segmentation
 
 # 設定中文字型
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft JhengHei', 'Arial Unicode MS']
@@ -150,6 +153,278 @@ class LUNA16DataLoader:
         """將世界座標轉換為體素座標"""
         voxel_coord = (world_coord - origin) / spacing
         return voxel_coord.astype(int)
+    
+    def generate_nodule_mask(self, volume, nodule, origin, spacing, method='region_growing'):
+        """
+        生成結節的分割遮罩
+        
+        Parameters:
+        -----------
+        volume : ndarray
+            CT 體積資料 (Z, Y, X)
+        nodule : dict
+            結節資訊，包含 coordX, coordY, coordZ, diameter_mm
+        origin : ndarray
+            體積原點 (X, Y, Z)
+        spacing : ndarray
+            像素間距 (X, Y, Z)
+        method : str
+            分割方法: 'sphere', 'threshold', 'region_growing', 'watershed'
+        
+        Returns:
+        --------
+        mask : ndarray
+            3D 分割遮罩，與 volume 相同形狀
+        """
+        # 將世界座標轉換為體素座標
+        world_coord = np.array([nodule['coordX'], nodule['coordY'], nodule['coordZ']])
+        voxel_coord = self.world_to_voxel(world_coord, origin, spacing)
+        
+        vx, vy, vz = voxel_coord  # X, Y, Z in voxel space
+        diameter_mm = nodule['diameter_mm']
+        
+        # 計算體素空間中的半徑
+        radius_voxel = np.array([
+            diameter_mm / 2 / spacing[0],  # X
+            diameter_mm / 2 / spacing[1],  # Y  
+            diameter_mm / 2 / spacing[2]   # Z
+        ])
+        
+        # 擴展搜索區域（比結節大一些）
+        margin = 1.5  # 擴展係數
+        rx, ry, rz = (radius_voxel * margin).astype(int) + 3
+        
+        # 確保邊界在體積範圍內
+        z_min = max(0, vz - rz)
+        z_max = min(volume.shape[0], vz + rz + 1)
+        y_min = max(0, vy - ry)
+        y_max = min(volume.shape[1], vy + ry + 1)
+        x_min = max(0, vx - rx)
+        x_max = min(volume.shape[2], vx + rx + 1)
+        
+        # 提取局部區域
+        local_volume = volume[z_min:z_max, y_min:y_max, x_min:x_max].copy()
+        
+        # 局部座標中的結節中心
+        local_center = np.array([vz - z_min, vy - y_min, vx - x_min])
+        local_radius = np.array([radius_voxel[2], radius_voxel[1], radius_voxel[0]])  # Z, Y, X
+        
+        if method == 'sphere':
+            # 簡單球形遮罩
+            local_mask = self._create_ellipsoid_mask(local_volume.shape, local_center, local_radius)
+            
+        elif method == 'threshold':
+            # 基於 HU 閾值的分割
+            local_mask = self._threshold_segmentation(local_volume, local_center, local_radius)
+            
+        elif method == 'region_growing':
+            # 區域生長分割
+            local_mask = self._region_growing_segmentation(local_volume, local_center, local_radius)
+            
+        elif method == 'watershed':
+            # 分水嶺分割
+            local_mask = self._watershed_segmentation(local_volume, local_center, local_radius)
+        
+        else:
+            local_mask = self._create_ellipsoid_mask(local_volume.shape, local_center, local_radius)
+        
+        # 將局部遮罩放回全局遮罩
+        full_mask = np.zeros(volume.shape, dtype=bool)
+        full_mask[z_min:z_max, y_min:y_max, x_min:x_max] = local_mask
+        
+        return full_mask
+    
+    def _create_ellipsoid_mask(self, shape, center, radius):
+        """創建橢球體遮罩"""
+        z, y, x = np.ogrid[:shape[0], :shape[1], :shape[2]]
+        
+        # 避免除以零
+        rz = max(radius[0], 0.5)
+        ry = max(radius[1], 0.5)
+        rx = max(radius[2], 0.5)
+        
+        distance = ((z - center[0]) / rz) ** 2 + \
+                   ((y - center[1]) / ry) ** 2 + \
+                   ((x - center[2]) / rx) ** 2
+        
+        return distance <= 1.0
+    
+    def _threshold_segmentation(self, volume, center, radius):
+        """基於 HU 閾值的分割"""
+        # 首先創建一個搜索區域（橢球體 * 1.2）
+        search_mask = self._create_ellipsoid_mask(volume.shape, center, radius * 1.2)
+        
+        # 獲取結節中心附近的 HU 值來估計閾值
+        core_mask = self._create_ellipsoid_mask(volume.shape, center, radius * 0.5)
+        if np.sum(core_mask) > 0:
+            core_values = volume[core_mask]
+            # 結節通常具有較高的 HU 值（相對於肺實質）
+            lower_threshold = max(np.percentile(core_values, 25), -800)
+            upper_threshold = min(np.percentile(core_values, 95) + 200, 400)
+        else:
+            # 預設結節 HU 閾值範圍
+            lower_threshold = -700
+            upper_threshold = 300
+        
+        # 應用閾值
+        threshold_mask = (volume >= lower_threshold) & (volume <= upper_threshold) & search_mask
+        
+        # 形態學操作清理
+        if np.sum(threshold_mask) > 0:
+            # 開運算去除小噪點
+            threshold_mask = ndimage.binary_opening(threshold_mask, iterations=1)
+            # 閉運算填充小孔洞
+            threshold_mask = ndimage.binary_closing(threshold_mask, iterations=1)
+            
+            # 連通組件分析，保留最接近中心的組件
+            labeled, num_features = ndimage.label(threshold_mask)
+            if num_features > 1:
+                center_int = tuple(int(c) for c in center)
+                if 0 <= center_int[0] < volume.shape[0] and \
+                   0 <= center_int[1] < volume.shape[1] and \
+                   0 <= center_int[2] < volume.shape[2]:
+                    target_label = labeled[center_int]
+                    if target_label > 0:
+                        threshold_mask = labeled == target_label
+                    else:
+                        # 找到最近的連通組件
+                        best_label = 1
+                        min_dist = float('inf')
+                        for i in range(1, num_features + 1):
+                            comp_coords = np.array(np.where(labeled == i)).T
+                            if len(comp_coords) > 0:
+                                comp_center = comp_coords.mean(axis=0)
+                                dist = np.linalg.norm(comp_center - center)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_label = i
+                        threshold_mask = labeled == best_label
+        
+        # 如果分割結果太小或為空，返回橢球體
+        if np.sum(threshold_mask) < np.prod(radius) * 0.5:
+            return self._create_ellipsoid_mask(volume.shape, center, radius)
+        
+        return threshold_mask
+    
+    def _region_growing_segmentation(self, volume, center, radius):
+        """區域生長分割"""
+        # 獲取種子點的 HU 值
+        center_int = tuple(int(c) for c in center)
+        if not (0 <= center_int[0] < volume.shape[0] and 
+                0 <= center_int[1] < volume.shape[1] and 
+                0 <= center_int[2] < volume.shape[2]):
+            return self._create_ellipsoid_mask(volume.shape, center, radius)
+        
+        seed_value = volume[center_int]
+        
+        # 估計結節區域的 HU 統計
+        core_mask = self._create_ellipsoid_mask(volume.shape, center, radius * 0.6)
+        if np.sum(core_mask) > 0:
+            core_values = volume[core_mask]
+            mean_hu = np.mean(core_values)
+            std_hu = np.std(core_values)
+            # 動態調整閾值範圍
+            tolerance = max(std_hu * 2, 100)  # 至少100 HU的容差
+        else:
+            mean_hu = seed_value
+            tolerance = 150
+        
+        # 創建搜索區域限制
+        search_mask = self._create_ellipsoid_mask(volume.shape, center, radius * 1.5)
+        
+        # 簡單區域生長實現
+        lower_bound = mean_hu - tolerance
+        upper_bound = mean_hu + tolerance
+        
+        # 初始化遮罩
+        mask = np.zeros(volume.shape, dtype=bool)
+        visited = np.zeros(volume.shape, dtype=bool)
+        
+        # 使用堆疊進行區域生長
+        stack = [center_int]
+        visited[center_int] = True
+        
+        # 6-連通鄰居偏移
+        neighbors = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
+        
+        max_iterations = int(np.prod(radius) * 50)  # 限制最大迭代次數
+        iteration = 0
+        
+        while stack and iteration < max_iterations:
+            iteration += 1
+            z, y, x = stack.pop()
+            
+            # 檢查是否在閾值範圍內且在搜索區域內
+            if lower_bound <= volume[z, y, x] <= upper_bound and search_mask[z, y, x]:
+                mask[z, y, x] = True
+                
+                # 添加鄰居
+                for dz, dy, dx in neighbors:
+                    nz, ny, nx = z + dz, y + dy, x + dx
+                    if (0 <= nz < volume.shape[0] and 
+                        0 <= ny < volume.shape[1] and 
+                        0 <= nx < volume.shape[2] and 
+                        not visited[nz, ny, nx]):
+                        visited[nz, ny, nx] = True
+                        stack.append((nz, ny, nx))
+        
+        # 形態學處理
+        if np.sum(mask) > 0:
+            mask = ndimage.binary_closing(mask, iterations=2)
+            mask = ndimage.binary_fill_holes(mask)
+        
+        # 如果分割結果太小，返回閾值分割結果
+        if np.sum(mask) < np.prod(radius) * 0.3:
+            return self._threshold_segmentation(volume, center, radius)
+        
+        return mask
+    
+    def _watershed_segmentation(self, volume, center, radius):
+        """分水嶺分割"""
+        try:
+            # 創建搜索區域
+            search_mask = self._create_ellipsoid_mask(volume.shape, center, radius * 1.5)
+            
+            # 獲取核心區域作為前景種子
+            foreground = self._create_ellipsoid_mask(volume.shape, center, radius * 0.4)
+            
+            # 創建背景種子（遠離中心的區域）
+            background = ~self._create_ellipsoid_mask(volume.shape, center, radius * 1.8)
+            background = background & search_mask
+            
+            # 創建標記
+            markers = np.zeros(volume.shape, dtype=np.int32)
+            markers[foreground] = 2  # 前景
+            markers[background] = 1  # 背景
+            
+            # 計算梯度
+            gradient = ndimage.sobel(volume.astype(float))
+            gradient = np.abs(gradient)
+            
+            # 只在搜索區域內進行分水嶺
+            gradient_masked = gradient.copy()
+            gradient_masked[~search_mask] = gradient.max()
+            
+            # 執行分水嶺
+            labeled = segmentation.watershed(gradient_masked, markers)
+            
+            # 提取結節區域
+            mask = labeled == 2
+            
+            # 後處理
+            if np.sum(mask) > 0:
+                mask = ndimage.binary_closing(mask, iterations=1)
+                mask = ndimage.binary_fill_holes(mask)
+            
+            # 如果結果太小，使用區域生長
+            if np.sum(mask) < np.prod(radius) * 0.3:
+                return self._region_growing_segmentation(volume, center, radius)
+            
+            return mask
+            
+        except Exception as e:
+            print(f"分水嶺分割失敗: {e}")
+            return self._region_growing_segmentation(volume, center, radius)
 
 
 class LUNA16Viewer:
@@ -160,10 +435,14 @@ class LUNA16Viewer:
         self.current_scan = None
         self.current_nodules = []
         self.lung_mask = None
+        self.nodule_masks = {}  # 存儲每個結節的分割遮罩
         
         # 視窗設定
         self.window_center = -600  # 肺窗
         self.window_width = 1500
+        
+        # 分割方法設定
+        self.segmentation_method = 'region_growing'  # 'sphere', 'threshold', 'region_growing', 'watershed'
         
         self._create_gui()
     
@@ -287,6 +566,22 @@ class LUNA16Viewer:
         tk.Checkbutton(control_frame, text="顯示肺部遮罩", variable=self.show_lung_mask_var,
                       command=self._update_display).pack(anchor=tk.W)
         
+        # 結節標註模式選擇
+        self.use_segmentation_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(control_frame, text="使用分割遮罩 (非圓形)", variable=self.use_segmentation_var,
+                      command=self._on_segmentation_mode_change).pack(anchor=tk.W)
+        
+        # 分割方法選擇
+        seg_method_frame = tk.Frame(control_frame)
+        seg_method_frame.pack(fill=tk.X, pady=5)
+        tk.Label(seg_method_frame, text="分割方法:").pack(side=tk.LEFT)
+        self.seg_method_var = tk.StringVar(value='region_growing')
+        seg_combo = ttk.Combobox(seg_method_frame, textvariable=self.seg_method_var, 
+                                  values=['sphere', 'threshold', 'region_growing', 'watershed'],
+                                  width=15, state='readonly')
+        seg_combo.pack(side=tk.LEFT, padx=5)
+        seg_combo.bind('<<ComboboxSelected>>', self._on_seg_method_change)
+        
         # 分隔線
         ttk.Separator(control_frame, orient='horizontal').pack(fill=tk.X, pady=10)
         
@@ -342,6 +637,50 @@ class LUNA16Viewer:
         """掃描選擇改變時"""
         pass
     
+    def _on_segmentation_mode_change(self):
+        """分割模式改變時"""
+        if self.use_segmentation_var.get() and self.current_scan is not None:
+            self._generate_nodule_masks()
+        self._update_display()
+    
+    def _on_seg_method_change(self, event=None):
+        """分割方法改變時"""
+        self.segmentation_method = self.seg_method_var.get()
+        if self.use_segmentation_var.get() and self.current_scan is not None:
+            self._generate_nodule_masks()
+            self._update_display()
+    
+    def _generate_nodule_masks(self):
+        """生成所有結節的分割遮罩"""
+        if self.current_scan is None or not self.current_nodules:
+            return
+        
+        self.status_var.set("正在生成結節分割遮罩...")
+        self.root.update()
+        
+        self.nodule_masks = {}
+        volume = self.current_scan['volume']
+        origin = self.current_scan['origin']
+        spacing = self.current_scan['spacing']
+        
+        for i, nodule in enumerate(self.current_nodules):
+            try:
+                mask = self.loader.generate_nodule_mask(
+                    volume, nodule, origin, spacing, 
+                    method=self.segmentation_method
+                )
+                self.nodule_masks[i] = mask
+            except Exception as e:
+                print(f"生成結節 {i+1} 分割遮罩失敗: {e}")
+                # 使用簡單球形作為後備
+                mask = self.loader.generate_nodule_mask(
+                    volume, nodule, origin, spacing, 
+                    method='sphere'
+                )
+                self.nodule_masks[i] = mask
+        
+        self.status_var.set(f"已生成 {len(self.nodule_masks)} 個結節分割遮罩")
+    
     def _load_selected_scan(self):
         """載入選定的掃描"""
         seriesuid = self.scan_var.get()
@@ -396,6 +735,10 @@ class LUNA16Viewer:
         self.info_label.config(text=info_text)
         
         self.status_var.set(f"已載入: {self.current_scan['seriesuid'][:40]}...")
+        
+        # 生成結節分割遮罩
+        if self.use_segmentation_var.get() and self.current_nodules:
+            self._generate_nodule_masks()
         
         self._update_display()
     
@@ -527,7 +870,10 @@ class LUNA16Viewer:
         
         # 顯示結節標註
         if self.show_nodules_var.get():
-            self._draw_nodules(z_idx, y_idx, x_idx, origin, spacing)
+            if self.use_segmentation_var.get() and self.nodule_masks:
+                self._draw_nodules_segmentation(z_idx, y_idx, x_idx)
+            else:
+                self._draw_nodules(z_idx, y_idx, x_idx, origin, spacing)
         
         # 3D 結節視圖
         self._draw_3d_nodules(origin, spacing)
@@ -536,7 +882,7 @@ class LUNA16Viewer:
         self.canvas.draw()
     
     def _draw_nodules(self, z_idx, y_idx, x_idx, origin, spacing):
-        """繪製結節標註"""
+        """繪製結節標註（圓形模式）"""
         for nodule in self.current_nodules:
             # 將世界座標轉換為體素座標
             world_coord = np.array([nodule['coordX'], nodule['coordY'], nodule['coordZ']])
@@ -589,6 +935,59 @@ class LUNA16Viewer:
                                     fill=False, color='red', linewidth=2)
                 self.ax_sagittal.add_patch(circle)
                 self.ax_sagittal.plot(vy, vz, 'r+', markersize=10, markeredgewidth=2)
+    
+    def _draw_nodules_segmentation(self, z_idx, y_idx, x_idx):
+        """繪製結節分割遮罩"""
+        # 創建顏色映射
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow']
+        
+        # 合併所有結節的 2D 遮罩用於顯示
+        volume = self.current_scan['volume']
+        origin = self.current_scan['origin']
+        spacing = self.current_scan['spacing']
+        
+        for i, nodule in enumerate(self.current_nodules):
+            if i not in self.nodule_masks:
+                continue
+            
+            mask = self.nodule_masks[i]
+            color = colors[i % len(colors)]
+            
+            # 軸向切片 (Z)
+            if z_idx < mask.shape[0]:
+                axial_mask = mask[z_idx, :, :]
+                if np.any(axial_mask):
+                    # 使用 contour 繪製邊界
+                    self.ax_axial.contour(axial_mask.astype(float), levels=[0.5], 
+                                          colors=color, linewidths=2, alpha=0.9)
+                    # 使用半透明填充
+                    self.ax_axial.contourf(axial_mask.astype(float), levels=[0.5, 1.5],
+                                           colors=[color], alpha=0.3)
+                    
+                    # 標記中心
+                    world_coord = np.array([nodule['coordX'], nodule['coordY'], nodule['coordZ']])
+                    voxel_coord = self.loader.world_to_voxel(world_coord, origin, spacing)
+                    vx, vy, vz = voxel_coord
+                    if abs(vz - z_idx) < 3:
+                        self.ax_axial.plot(vx, vy, '+', color=color, markersize=12, markeredgewidth=2)
+            
+            # 冠狀切片 (Y)
+            if y_idx < mask.shape[1]:
+                coronal_mask = mask[:, y_idx, :]
+                if np.any(coronal_mask):
+                    self.ax_coronal.contour(coronal_mask.astype(float), levels=[0.5],
+                                            colors=color, linewidths=2, alpha=0.9)
+                    self.ax_coronal.contourf(coronal_mask.astype(float), levels=[0.5, 1.5],
+                                             colors=[color], alpha=0.3)
+            
+            # 矢狀切片 (X)
+            if x_idx < mask.shape[2]:
+                sagittal_mask = mask[:, :, x_idx]
+                if np.any(sagittal_mask):
+                    self.ax_sagittal.contour(sagittal_mask.astype(float), levels=[0.5],
+                                             colors=color, linewidths=2, alpha=0.9)
+                    self.ax_sagittal.contourf(sagittal_mask.astype(float), levels=[0.5, 1.5],
+                                              colors=[color], alpha=0.3)
     
     def _draw_3d_nodules(self, origin, spacing):
         """繪製 3D 結節位置圖"""

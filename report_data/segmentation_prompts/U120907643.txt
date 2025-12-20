@@ -1,0 +1,15 @@
+Generate a CT chest report based on the following segmentation results:
+
+Nodule 1:
+  - Size: 5.0 mm (ESD)
+  - Volume: 65.4 mm³
+  - Location: RML
+  - Mean HU: -200
+  - Type: nodule
+
+Nodule 2:
+  - Size: 5.0 mm (ESD)
+  - Volume: 65.4 mm³
+  - Location: RML
+  - Mean HU: -200
+  - Type: nodule

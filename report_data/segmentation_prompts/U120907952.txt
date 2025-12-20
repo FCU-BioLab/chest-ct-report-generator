@@ -1,0 +1,37 @@
+Generate a CT chest report based on the following segmentation results:
+
+Nodule 1:
+  - Size: 13.8 mm (ESD)
+  - Volume: 1376.1 mm³
+  - Mean HU: -200
+  - Type: opacity
+
+Nodule 2:
+  - Size: 7.2 mm (ESD)
+  - Volume: 195.4 mm³
+  - Mean HU: -200
+  - Type: opacity
+
+Nodule 3:
+  - Size: 12.3 mm (ESD)
+  - Volume: 974.3 mm³
+  - Mean HU: -200
+  - Type: nodule
+
+Nodule 4:
+  - Size: 13.8 mm (ESD)
+  - Volume: 1376.1 mm³
+  - Mean HU: -200
+  - Type: opacity
+
+Nodule 5:
+  - Size: 7.2 mm (ESD)
+  - Volume: 195.4 mm³
+  - Mean HU: -200
+  - Type: opacity
+
+Nodule 6:
+  - Size: 12.3 mm (ESD)
+  - Volume: 974.3 mm³
+  - Mean HU: -200
+  - Type: nodule
