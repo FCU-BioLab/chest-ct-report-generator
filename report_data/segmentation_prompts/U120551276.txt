@@ -1,0 +1,29 @@
+Generate a CT chest report based on the following segmentation results:
+
+Nodule 1:
+  - Size: 8.0 mm (ESD)
+  - Volume: 268.1 mm³
+  - Location: RIGHT UPPER LOBE
+  - Mean HU: -200
+  - Type: nodule
+
+Nodule 2:
+  - Size: 0.4 mm (ESD)
+  - Volume: 0.0 mm³
+  - Location: LEFT LOWER LOBE
+  - Mean HU: 200
+  - Type: calcified
+
+Nodule 3:
+  - Size: 8.0 mm (ESD)
+  - Volume: 268.1 mm³
+  - Location: RIGHT UPPER LOBE
+  - Mean HU: -200
+  - Type: nodule
+
+Nodule 4:
+  - Size: 0.4 mm (ESD)
+  - Volume: 0.0 mm³
+  - Location: LEFT LOWER LOBE
+  - Mean HU: 200
+  - Type: calcified

@@ -5,9 +5,9 @@ llm/RAG/dist
 llm/RAG/model
 llm/Fine_Tune/fine_tune_data
 llm/Fine_Tune/google_gemma_3/output
-medsam2_segmentation/MedSAM2
-medsam2_segmentation/segmentation_result
-medsam2_segmentation/result
+segmentation/MedSAM2
+segmentation/segmentation_result
+segmentation/result
 datasets
 detection/__pycache__
 detection/Faster_RCNN_Detection*

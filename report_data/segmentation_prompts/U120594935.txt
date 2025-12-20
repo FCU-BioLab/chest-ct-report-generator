@@ -1,0 +1,49 @@
+Generate a CT chest report based on the following segmentation results:
+
+Nodule 1:
+  - Size: 13.0 mm (ESD)
+  - Volume: 1150.3 mm³
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 2:
+  - Size: 14.0 mm (ESD)
+  - Volume: 1436.8 mm³
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 3:
+  - Size: 8.3 mm (ESD)
+  - Volume: 299.4 mm³
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 4:
+  - Size: 8.3 mm (ESD)
+  - Volume: 299.4 mm³
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 5:
+  - Size: 13.0 mm (ESD)
+  - Volume: 1150.3 mm³
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 6:
+  - Size: 14.0 mm (ESD)
+  - Volume: 1436.8 mm³
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 7:
+  - Size: 8.3 mm (ESD)
+  - Volume: 299.4 mm³
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 8:
+  - Size: 8.3 mm (ESD)
+  - Volume: 299.4 mm³
+  - Mean HU: -650
+  - Type: ground-glass

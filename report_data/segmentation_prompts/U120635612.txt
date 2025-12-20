@@ -1,0 +1,28 @@
+Generate a CT chest report based on the following segmentation results:
+
+Nodule 1:
+  - Size: 13.0 mm (ESD)
+  - Volume: 1150.3 mm³
+  - Location: RLL
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 2:
+  - Size: 5.4 mm (ESD)
+  - Volume: 82.4 mm³
+  - Location: RLL
+  - Mean HU: -650
+  - Type: ground-glass
+
+Nodule 3:
+  - Size: 13.0 mm (ESD)
+  - Volume: 1150.3 mm³
+  - Mean HU: -350
+  - Type: part-solid
+
+Nodule 4:
+  - Size: 5.4 mm (ESD)
+  - Volume: 82.4 mm³
+  - Location: RLL
+  - Mean HU: -650
+  - Type: ground-glass
