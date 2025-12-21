@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, CosineAnnealingLR, ReduceLROnPlateau
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 from skimage import measure
@@ -280,10 +280,10 @@ class UNetPPTrainer:
         
         # 學習率調度器
         if config.training.scheduler == "cosine":
-            self.scheduler = CosineAnnealingWarmRestarts(
+            # 使用 CosineAnnealingLR（不 restart），避免震盪
+            self.scheduler = CosineAnnealingLR(
                 self.optimizer,
-                T_0=10,
-                T_mult=2,
+                T_max=config.training.epochs,
                 eta_min=config.training.min_lr
             )
         else:
@@ -426,7 +426,7 @@ class UNetPPTrainer:
             json.dump(_convert_to_json_serializable(self.best_metrics), f, indent=2, ensure_ascii=False)
         logger.info(f"Best metrics saved: {metrics_path}")
 
-    def train_epoch(self, dataloader: DataLoader) -> float:
+    def train_epoch(self, dataloader: DataLoader, log_first_batch: bool = False) -> float:
         """訓練一個 epoch"""
         self.model.train()
         total_loss = 0.0
@@ -452,6 +452,11 @@ class UNetPPTrainer:
                 loss = self.criterion(outputs, masks)
                 loss.backward()
                 self.optimizer.step()
+            
+            # === Debug 記錄：首批次 shape ===
+            if log_first_batch and num_batches == 0:
+                logger.info(f"[DEBUG] First batch - input shape: {images.shape}, output shape: {outputs.shape}, mask shape: {masks.shape}")
+                logger.info(f"[DEBUG] Input channels: {images.shape[1]} ({'2D' if images.shape[1] == 1 else '2.5D' if images.shape[1] == 3 else 'other'})")
             
             total_loss += loss.item()
             num_batches += 1
@@ -511,6 +516,14 @@ class UNetPPTrainer:
         # 結節級別指標（對每個樣本計算並平均）
         lesion_metrics = self.metrics_calc.lesion_wise_metrics(all_preds, all_targets)
         
+        # === Debug 統計：空 mask/pred 統計 ===
+        pred_binary = (all_preds > self.metrics_calc.threshold)
+        target_binary = (all_targets > self.metrics_calc.target_threshold)
+        gt_nonempty_slices = int((target_binary.sum(axis=(1, 2, 3)) > 0).sum())
+        pred_nonempty_slices = int((pred_binary.sum(axis=(1, 2, 3)) > 0).sum())
+        total_slices = all_preds.shape[0]
+        avg_pred_area = float(pred_binary.sum() / total_slices) if total_slices > 0 else 0.0
+        
         metrics = {
             'loss': total_loss / num_batches,
             'dice': dice,
@@ -522,7 +535,12 @@ class UNetPPTrainer:
             'lesion_precision': lesion_metrics['lesion_precision'],
             'tp_count': lesion_metrics['tp_count'],
             'fp_count': lesion_metrics['fp_count'],
-            'fn_count': lesion_metrics['fn_count']
+            'fn_count': lesion_metrics['fn_count'],
+            # Debug 統計
+            'gt_nonempty_slices': gt_nonempty_slices,
+            'pred_nonempty_slices': pred_nonempty_slices,
+            'total_slices': total_slices,
+            'avg_pred_area': avg_pred_area
         }
         
         # 保存視覺化樣本
@@ -631,15 +649,19 @@ class UNetPPTrainer:
             訓練歷史
         """
         best_dice = 0.0
+        first_batch_logged = False
         
         logger.info(f"開始訓練，共 {self.config.training.epochs} 個 epoch")
         logger.info(f"輸出目錄: {self.output_dir}")
         
+        # === Debug 記錄：閾值設定 ===
+        logger.info(f"[DEBUG] MetricsCalculator - pred_threshold: {self.metrics_calc.threshold}, target_threshold: {self.metrics_calc.target_threshold}")
+        
         for epoch in range(self.config.training.epochs):
             epoch_start = time.time()
             
-            # 訓練
-            train_loss = self.train_epoch(train_loader)
+            # 訓練（第一個 epoch 記錄首批次 shape）
+            train_loss = self.train_epoch(train_loader, log_first_batch=(epoch == 0))
             
             # 驗證（每 5 個 epoch 保存視覺化樣本）
             save_vis = (epoch % 5 == 0) or (epoch == self.config.training.epochs - 1)
@@ -693,17 +715,27 @@ class UNetPPTrainer:
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
             
-            # 日誌
+            # 日誌（完整 debug 資訊）
             epoch_time = time.time() - epoch_start
             logger.info(
                 f"Epoch {epoch + 1}/{self.config.training.epochs} - "
-                f"Train Loss: {train_loss:.4f}, "
-                f"Val Loss: {val_metrics['loss']:.4f}, "
-                f"Val Dice: {val_metrics['dice']:.4f}, "
-                f"Val IoU: {val_metrics['iou']:.4f}, "
-                f"Lesion F1: {val_metrics['lesion_f1']:.4f}, "
-                f"LR: {current_lr:.2e}, "
-                f"Time: {epoch_time:.1f}s"
+                f"Train Loss: {train_loss:.4f}, Val Loss: {val_metrics['loss']:.4f}, "
+                f"LR: {current_lr:.2e} (after step), Time: {epoch_time:.1f}s"
+            )
+            logger.info(
+                f"  [Pixel] Dice: {val_metrics['dice']:.4f}, IoU: {val_metrics['iou']:.4f}, "
+                f"Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}"
+            )
+            logger.info(
+                f"  [Lesion] F1: {val_metrics['lesion_f1']:.4f}, "
+                f"Sensitivity: {val_metrics['lesion_sensitivity']:.4f}, "
+                f"Precision: {val_metrics['lesion_precision']:.4f}, "
+                f"TP: {val_metrics['tp_count']}, FP: {val_metrics['fp_count']}, FN: {val_metrics['fn_count']}"
+            )
+            logger.info(
+                f"  [Stats] GT非空: {val_metrics['gt_nonempty_slices']}/{val_metrics['total_slices']}, "
+                f"Pred非空: {val_metrics['pred_nonempty_slices']}/{val_metrics['total_slices']}, "
+                f"Avg pred area: {val_metrics['avg_pred_area']:.1f} px"
             )
             
             # 每 epoch 繪製訓練曲線
