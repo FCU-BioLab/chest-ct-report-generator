@@ -118,7 +118,7 @@ class InferenceConfig:
     
     # 後處理
     use_postprocessing: bool = True
-    min_volume_mm3: float = 8.0  # 最小結節體積（約 2mm 直徑球體）
+    min_volume_mm3: float = 14.0  # 最小結節體積（約 3mm 直徑球體）
     use_lung_mask: bool = True   # 只保留肺野內的預測
     use_morphology: bool = True  # 形態學平滑
     
