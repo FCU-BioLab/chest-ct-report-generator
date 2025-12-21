@@ -8,6 +8,7 @@ llm/Fine_Tune/google_gemma_3/output
 segmentation/MedSAM2
 segmentation/segmentation_result
 segmentation/result
+segmentation/cache
 datasets
 detection/__pycache__
 detection/Faster_RCNN_Detection*
