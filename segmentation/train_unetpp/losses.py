@@ -48,6 +48,49 @@ class DiceLoss(nn.Module):
         return 1 - dice
 
 
+class BCEDiceLoss(nn.Module):
+    """
+    BCE + Dice Loss（CSEA-Net 論文版本）
+    
+    L = dice_weight * DiceLoss + bce_weight * BCE
+    
+    論文預設：dice_weight=0.5, bce_weight=1.0
+    """
+    
+    def __init__(self, dice_weight: float = 0.5, bce_weight: float = 1.0, eps: float = 1e-6):
+        super().__init__()
+        self.dice_weight = dice_weight
+        self.bce_weight = bce_weight
+        self.bce = nn.BCEWithLogitsLoss()
+        self.eps = eps
+    
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        計算 BCE + Dice Loss
+        
+        Args:
+            logits: 預測值（未經 sigmoid）
+            target: 目標遮罩 (0/1 或 soft)
+            
+        Returns:
+            Combined loss
+        """
+        # BCE 損失
+        bce_loss = self.bce(logits, target)
+        
+        # Dice 損失
+        probs = torch.sigmoid(logits)
+        probs_flat = probs.contiguous().view(probs.size(0), -1)
+        target_flat = target.contiguous().view(target.size(0), -1)
+        
+        inter = (probs_flat * target_flat).sum(dim=1)
+        union = probs_flat.sum(dim=1) + target_flat.sum(dim=1)
+        dice = (2 * inter + self.eps) / (union + self.eps)
+        dice_loss = 1 - dice.mean()
+        
+        return self.dice_weight * dice_loss + self.bce_weight * bce_loss
+
+
 class SoftDiceLoss(nn.Module):
     """
     Soft Dice Loss - 支援軟標籤（0-1 連續值）
@@ -307,6 +350,9 @@ def get_loss_function(config) -> nn.Module:
     
     if loss_type == "dice":
         return SoftDiceLoss()
+    elif loss_type == "bce_dice":
+        # CSEA-Net 論文版本
+        return BCEDiceLoss(dice_weight=0.5, bce_weight=1.0)
     elif loss_type == "focal":
         return FocalLoss()
     elif loss_type == "tversky":

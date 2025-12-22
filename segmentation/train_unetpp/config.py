@@ -27,10 +27,14 @@ class DataConfig:
     hu_window_width: float = 1200   # Lung window width [-1000, 200]
     
     # Patch 設定
-    patch_size: int = 160  # 或 192
+    patch_size: int = 224  # CSEA-Net 論文規格
     
     # 2.5D 設定
+    use_2_5d: bool = True  # 啟用 2.5D input (z-1, z, z+1)
     slice_distance_mm: float = 2.0  # 固定毫米距離取鄰近切片
+    
+    # Val/Test restrictive cropping
+    val_num_patches: int = 4  # 每個 slice 抽取的 patch 數
     
     # 採樣比例
     positive_ratio: float = 0.7    # 正樣本（結節中心）比例
@@ -56,9 +60,9 @@ class ModelConfig:
     # UNet++ 架構
     encoder_name: str = "efficientnet-b4"
     encoder_weights: str = "imagenet"  # 預訓練權重
-    in_channels: int = 1  # 2D: 單一切片（改用灰階輸入）
+    in_channels: int = 3  # 2.5D: z-1, z, z+1 疊成 3 channel
     num_classes: int = 1  # 二元分割
-    use_2d: bool = True  # 使用純 2D 模式
+    use_2d: bool = True  # 使用純 2D 模式（但輸入是 2.5D）
     
     # 深度監督
     deep_supervision: bool = True
@@ -83,7 +87,7 @@ class TrainingConfig:
     min_lr: float = 1e-6
     
     # 損失函數
-    loss_type: str = "combined"  # "combined", "dice", "focal", "tversky"
+    loss_type: str = "bce_dice"  # "bce_dice" (CSEA-Net), "combined", "dice", "focal", "tversky"
     dice_weight: float = 0.5
     focal_weight: float = 0.3
     tversky_weight: float = 0.2

@@ -24,6 +24,9 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+# Lungmask 3D lung mask 目錄
+LUNGMASK_DIR = Path(r"E:\lung_ct_lesion_dataset\LNDb\lung_masks")
+
 
 class CTPreprocessor:
     """CT 影像預處理器"""
@@ -70,6 +73,32 @@ class CTPreprocessor:
         origin = np.array(image.GetOrigin())
         
         return volume.astype(np.float32), spacing, origin
+    
+    def load_lungmask_3d(self, patient_id: str) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        載入 lungmask 生成的 3D lung mask
+        
+        Args:
+            patient_id: 病人 ID，如 "LNDb-0001"
+            
+        Returns:
+            lung_mask: Binary lung mask (Z, Y, X)
+            spacing: Lung mask 的 spacing (x, y, z)
+        """
+        lung_path = LUNGMASK_DIR / f"{patient_id}_lung.mhd"
+        
+        if not lung_path.exists():
+            logger.warning(f"Lungmask 不存在: {lung_path}，使用 threshold-based fallback")
+            return None, None
+        
+        lung_sitk = sitk.ReadImage(str(lung_path))
+        lung_array = sitk.GetArrayFromImage(lung_sitk)  # (Z, Y, X)
+        lung_spacing = np.array(lung_sitk.GetSpacing())  # (x, y, z)
+        
+        # Label 1=右肺, 2=左肺 → binary
+        lung_mask = (lung_array > 0).astype(np.float32)
+        
+        return lung_mask, lung_spacing
     
     def resample_to_isotropic(
         self,
@@ -234,7 +263,8 @@ class CTPreprocessor:
     def preprocess_volume(
         self,
         mhd_path: str,
-        mask_paths: Optional[List[str]] = None
+        mask_paths: Optional[List[str]] = None,
+        patient_id: Optional[str] = None
     ) -> Dict:
         """
         完整預處理流程
@@ -242,6 +272,7 @@ class CTPreprocessor:
         Args:
             mhd_path: CT 影像路徑
             mask_paths: 遮罩路徑列表（多位醫師）
+            patient_id: 病人 ID，用於載入 lungmask（如 "LNDb-0001"）
             
         Returns:
             包含預處理結果的字典
@@ -250,17 +281,23 @@ class CTPreprocessor:
         volume, spacing, origin = self.load_mhd(mhd_path)
         original_shape = volume.shape
         
-        # 2. 肺野分割（在 resample 前做，避免小區域問題）
-        lung_mask = self.segment_lung_mask(volume)
+        # 2. 肺野分割：必須使用 lungmask 3D mhd
+        if not patient_id:
+            raise ValueError("必須提供 patient_id 以載入 lungmask")
         
-        # 3. Resample
+        lung_mask, lung_spacing = self.load_lungmask_3d(patient_id)
+        if lung_mask is None:
+            # Lungmask 不存在，返回 None 表示跳過此病人
+            return None
+        
+        # 3. Resample CT 和 lung mask
         volume_resampled, new_spacing = self.resample_to_isotropic(volume, spacing)
         lung_mask_resampled, _ = self.resample_to_isotropic(
-            lung_mask.astype(np.float32), spacing, order=0
+            lung_mask.astype(np.float32), spacing, order=0  # 最近鄰插值
         )
         lung_mask_resampled = lung_mask_resampled > 0.5
         
-        # 4. Lung ROI crop
+        # 4. Lung ROI crop（使用 lungmask 的 bbox）
         bbox = self.get_lung_bounding_box(lung_mask_resampled)
         volume_cropped = volume_resampled[bbox]
         lung_mask_cropped = lung_mask_resampled[bbox]
@@ -366,11 +403,14 @@ class CTPreprocessor:
         lung_mask = result['lung_mask']
         masks = result['masks']
         
-        # 創建軟共識遮罩
+        # 創建 binary union 遮罩（任一醫師標註即為前景，符合 CSEA-Net 論文）
         if len(masks) > 0:
-            soft_mask = self.create_soft_consensus_mask(masks)
+            # Union: 任一醫師標註 > 0 即為結節
+            binary_mask = np.zeros_like(masks[0], dtype=np.float32)
+            for m in masks:
+                binary_mask = np.logical_or(binary_mask > 0, m > 0).astype(np.float32)
         else:
-            soft_mask = np.zeros_like(volume)
+            binary_mask = np.zeros_like(volume, dtype=np.float32)
         
         num_slices = int(volume.shape[0])  # 確保是 Python int
         
@@ -411,7 +451,7 @@ class CTPreprocessor:
         
         # 找出正樣本切片
         for z in range(num_slices):
-            if np.any(soft_mask[z] > 0):
+            if np.any(binary_mask[z] > 0):
                 meta['positive_slices'].append(int(z))  # 確保是 Python int
         
         # 保存每個切片
@@ -420,7 +460,7 @@ class CTPreprocessor:
             np.savez_compressed(
                 slice_path,
                 image=volume[z].astype(np.float16),
-                mask=soft_mask[z].astype(np.float16),
+                mask=binary_mask[z].astype(np.float16),
                 lung_mask=lung_mask[z].astype(np.bool_)
             )
         
@@ -492,7 +532,13 @@ def preprocess_lndb_dataset(
                 mask_paths.append(str(mask_path))
         
         try:
-            result = preprocessor.preprocess_volume(str(ct_path), mask_paths)
+            result = preprocessor.preprocess_volume(str(ct_path), mask_paths, patient_id=patient_id)
+            
+            # 如果 lungmask 不存在，跳過此病人
+            if result is None:
+                logger.warning(f"跳過 {patient_id}：無 lungmask 3D 遮罩")
+                continue
+            
             preprocessor.save_preprocessed(result, str(output_path))
             processed_count += 1
         except Exception as e:
@@ -545,6 +591,7 @@ def preprocess_lndb_slices(
     total_slices = 0
     processed_count = 0
     skipped_no_nodule = 0
+    skipped_no_lungmask = 0
     
     for ct_path in tqdm(ct_files, desc="Preprocessing slices"):
         patient_id = ct_path.stem
@@ -572,7 +619,14 @@ def preprocess_lndb_slices(
                 mask_paths.append(str(mask_path))
         
         try:
-            result = preprocessor.preprocess_volume(str(ct_path), mask_paths)
+            result = preprocessor.preprocess_volume(str(ct_path), mask_paths, patient_id=patient_id)
+            
+            # 如果 lungmask 不存在，跳過此病人
+            if result is None:
+                skipped_no_lungmask += 1
+                logger.warning(f"跳過 {patient_id}：無 lungmask 3D 遮罩")
+                continue
+            
             num_slices = preprocessor.save_slices(result, str(output_dir), patient_id)
             total_slices += num_slices
             processed_count += 1
@@ -582,6 +636,8 @@ def preprocess_lndb_slices(
     logger.info(f"完成！共處理 {processed_count} 個病人，{total_slices} 個切片")
     if skipped_no_nodule > 0:
         logger.info(f"跳過 {skipped_no_nodule} 個無 ≥3mm 結節的病人")
+    if skipped_no_lungmask > 0:
+        logger.info(f"跳過 {skipped_no_lungmask} 個無 lungmask 的病人")
 
 
 if __name__ == "__main__":
@@ -589,7 +645,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="預處理 LNDb 資料集")
     parser.add_argument("--data_dir", type=str, default="datasets/aLL_patients_data/LNDb")
-    parser.add_argument("--output_dir", type=str, default="segmentation/cache/lndb_preprocessed")
+    parser.add_argument("--output_dir", type=str, default="cache/lndb_preprocessed")
     parser.add_argument("--spacing", type=float, nargs=3, default=[1.0, 1.0, 1.0])
     
     args = parser.parse_args()

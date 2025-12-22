@@ -40,6 +40,39 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def val_collate_fn(batch):
+    """
+    Val/Test 用的自定義 collate function
+    
+    處理 dataset 返回的特殊格式：
+    - images_4patch: (4, 3, ps, ps) -> (B, 4, 3, ps, ps)
+    - positions: list of 4 tuples -> list of lists
+    - full_mask: (1, H, W) -> list (因為 H,W 可能不同)
+    - full_image_mid: (H, W) -> list (用於視覺化)
+    - full_shape: tuple -> 分開收集
+    """
+    images = torch.stack([item['images_4patch'] for item in batch], dim=0)
+    masks = [item['full_mask'] for item in batch]  # 保持 list 因為 shape 可能不同
+    full_images = [item['full_image_mid'] for item in batch]  # 用於視覺化
+    positions = [item['positions'] for item in batch]
+    full_shapes = ([item['full_shape'][0] for item in batch], 
+                   [item['full_shape'][1] for item in batch])
+    patient_ids = [item['patient_id'] for item in batch]
+    slice_idxs = [item['slice_idx'] for item in batch]
+    is_positives = [item['is_positive'] for item in batch]
+    
+    return {
+        'images_4patch': images,
+        'positions': positions,
+        'full_mask': masks,  # list of tensors
+        'full_image_mid': full_images,  # list of tensors
+        'full_shape': (torch.tensor(full_shapes[0]), torch.tensor(full_shapes[1])),
+        'patient_id': patient_ids,
+        'slice_idx': slice_idxs,
+        'is_positive': is_positives
+    }
+
+
 class LNDbDataset(Dataset):
     """LNDb 肺結節分割資料集"""
     
@@ -651,11 +684,14 @@ class LNDbSliceDataset(Dataset):
             positive_slices = set(meta['positive_slices'])
             
             for z in range(meta['num_slices']):
+                # Train/Val/Test: 每個 slice 一個樣本
+                # Val/Test 的 4-patch cropping 在 __getitem__ 中處理
                 self.samples.append({
                     'patient_id': patient_id,
                     'slice_idx': z,
                     'is_positive': z in positive_slices,
-                    'slice_path': str(patient_dir / f"slice_{z:04d}.npz")
+                    'slice_path': str(patient_dir / f"slice_{z:04d}.npz"),
+                    'num_slices': meta['num_slices']
                 })
         
         logger.info(f"建立 {len(self.samples)} 個切片樣本索引 ({self.mode})")
@@ -701,77 +737,184 @@ class LNDbSliceDataset(Dataset):
         
         logger.info(f"Oversampling 後: {len(positive_samples)} 正樣本, {len(negative_samples)} 負樣本, 總計 {len(self.samples)}")
     
+    def _get_4patch_centers(self, lung_mask: np.ndarray, patch_size: int):
+        """
+        計算 Val/Test 用的 4 個 deterministic patch centers
+        
+        基於 lung bbox 的 1/3 和 2/3 位置產生 2x2 grid
+        
+        Returns:
+            List of (center_y, center_x) tuples
+        """
+        h, w = lung_mask.shape
+        half = patch_size // 2
+        
+        # 找到 lung bbox
+        lung_y, lung_x = np.where(lung_mask > 0)
+        if len(lung_y) == 0:
+            # 沒有 lung mask，fallback 到圖像中心
+            cy, cx = h // 2, w // 2
+            return [(cy, cx)] * 4
+        
+        y0, y1 = lung_y.min(), lung_y.max()
+        x0, x1 = lung_x.min(), lung_x.max()
+        
+        # 計算 1/3 和 2/3 位置
+        cy1 = int(y0 + (y1 - y0) / 3)
+        cy2 = int(y0 + 2 * (y1 - y0) / 3)
+        cx1 = int(x0 + (x1 - x0) / 3)
+        cx2 = int(x0 + 2 * (x1 - x0) / 3)
+        
+        # 確保 centers 在有效範圍內
+        centers = []
+        for cy, cx in [(cy1, cx1), (cy1, cx2), (cy2, cx1), (cy2, cx2)]:
+            cy = max(half, min(h - half, cy))
+            cx = max(half, min(w - half, cx))
+            centers.append((cy, cx))
+        
+        return centers
+    
     def __len__(self):
         return len(self.samples)
     
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        patient_id = sample['patient_id']
+        slice_idx = sample['slice_idx']
+        num_slices = sample.get('num_slices', 100)
         
-        # 直接讀取單一切片（非常快！）
-        data = np.load(sample['slice_path'], allow_pickle=True)
-        image = data['image'].astype(np.float32)  # (H, W)
-        mask = data['mask'].astype(np.float32)    # (H, W)
-        lung_mask = data['lung_mask']             # (H, W)
+        # === 2.5D: 讀取 z-1, z, z+1 三個切片 ===
+        patient_dir = self.slice_cache_dir / patient_id
         
-        # 提取 Patch
+        # 計算鄰近切片索引（邊界 replicate）
+        z_prev = max(0, slice_idx - 1)
+        z_curr = slice_idx
+        z_next = min(num_slices - 1, slice_idx + 1)
+        
+        # 載入三個切片
+        slices_2_5d = []
+        for z in [z_prev, z_curr, z_next]:
+            slice_path = patient_dir / f"slice_{z:04d}.npz"
+            data = np.load(slice_path, allow_pickle=True)
+            slices_2_5d.append(data['image'].astype(np.float32))
+        
+        # 讀取中心切片的 mask 和 lung_mask
+        center_data = np.load(sample['slice_path'], allow_pickle=True)
+        mask = center_data['mask'].astype(np.float32)    # (H, W)
+        lung_mask = center_data['lung_mask']             # (H, W)
+        
+        # 組裝 2.5D image: (3, H, W)
+        image_2_5d = np.stack(slices_2_5d, axis=0)  # (3, H, W)
+        
         patch_size = self.config.data.patch_size
-        h, w = image.shape
-        
-        if sample['is_positive']:
-            # 以結節為中心採樣
-            nodule_y, nodule_x = np.where(mask > 0.5)
-            if len(nodule_y) > 0:
-                center_idx = len(nodule_y) // 2
-                center_y, center_x = nodule_y[center_idx], nodule_x[center_idx]
-                # 加入抖動
-                jitter = int(patch_size * 0.3)
-                center_y += random.randint(-jitter, jitter)
-                center_x += random.randint(-jitter, jitter)
-            else:
-                center_y, center_x = h // 2, w // 2
-        else:
-            # 隨機採樣
-            center_y = random.randint(patch_size // 2, h - patch_size // 2)
-            center_x = random.randint(patch_size // 2, w - patch_size // 2)
-        
-        # 裁切 Patch
+        h, w = mask.shape
         half = patch_size // 2
-        y1, y2 = max(0, center_y - half), min(h, center_y + half)
-        x1, x2 = max(0, center_x - half), min(w, center_x + half)
         
-        image_patch = image[y1:y2, x1:x2]
-        mask_patch = mask[y1:y2, x1:x2]
+        if self.mode == "train":
+            # === Train 模式：單一 patch ===
+            if sample['is_positive']:
+                # 以結節為中心採樣
+                nodule_y, nodule_x = np.where(mask > 0.5)
+                if len(nodule_y) > 0:
+                    center_idx = len(nodule_y) // 2
+                    center_y, center_x = nodule_y[center_idx], nodule_x[center_idx]
+                    # 加入抖動
+                    jitter = int(patch_size * 0.3)
+                    center_y += random.randint(-jitter, jitter)
+                    center_x += random.randint(-jitter, jitter)
+                else:
+                    center_y, center_x = h // 2, w // 2
+            else:
+                # 負樣本：在 lung_mask 區域內隨機採樣
+                lung_y, lung_x = np.where(lung_mask > 0)
+                if len(lung_y) > 0:
+                    rand_idx = random.randint(0, len(lung_y) - 1)
+                    center_y, center_x = lung_y[rand_idx], lung_x[rand_idx]
+                else:
+                    center_y, center_x = h // 2, w // 2
+            
+            # 確保 center 在有效範圍內
+            center_y = max(half, min(h - half, center_y))
+            center_x = max(half, min(w - half, center_x))
+            
+            # 裁切 Patch
+            y1, y2 = center_y - half, center_y + half
+            x1, x2 = center_x - half, center_x + half
+            
+            image_patch = image_2_5d[:, y1:y2, x1:x2]
+            mask_patch = mask[y1:y2, x1:x2]
+            
+            # Padding 如果不足
+            if image_patch.shape[1] < patch_size or image_patch.shape[2] < patch_size:
+                padded_img = np.zeros((3, patch_size, patch_size), dtype=np.float32)
+                padded_mask = np.zeros((patch_size, patch_size), dtype=np.float32)
+                padded_img[:, :image_patch.shape[1], :image_patch.shape[2]] = image_patch
+                padded_mask[:mask_patch.shape[0], :mask_patch.shape[1]] = mask_patch
+                image_patch, mask_patch = padded_img, padded_mask
+            
+            # 轉為 (H, W, 3) 給 Albumentations
+            image_for_aug = np.transpose(image_patch, (1, 2, 0))
+            
+            if self.transform:
+                transformed = self.transform(image=image_for_aug, mask=mask_patch)
+                image_tensor = transformed['image'].float()
+                mask_tensor = transformed['mask'].float()
+            else:
+                image_tensor = torch.from_numpy(image_patch).float()
+                mask_tensor = torch.from_numpy(mask_patch).float()
+            
+            if mask_tensor.dim() == 2:
+                mask_tensor = mask_tensor.unsqueeze(0)
+            
+            return {
+                'image': image_tensor,
+                'mask': mask_tensor,
+                'patient_id': patient_id,
+                'slice_idx': slice_idx,
+                'is_positive': sample['is_positive']
+            }
         
-        # Padding 如果不足
-        if image_patch.shape[0] < patch_size or image_patch.shape[1] < patch_size:
-            padded_img = np.zeros((patch_size, patch_size), dtype=np.float32)
-            padded_mask = np.zeros((patch_size, patch_size), dtype=np.float32)
-            padded_img[:image_patch.shape[0], :image_patch.shape[1]] = image_patch
-            padded_mask[:mask_patch.shape[0], :mask_patch.shape[1]] = mask_patch
-            image_patch, mask_patch = padded_img, padded_mask
-        
-        # 轉為 (H, W, 1) 給 Albumentations
-        image_patch = image_patch[:, :, np.newaxis]
-        
-        # 應用增強
-        if self.transform:
-            transformed = self.transform(image=image_patch, mask=mask_patch)
-            image_tensor = transformed['image'].float()  # (1, H, W)
-            mask_tensor = transformed['mask'].float()    # (H, W)
         else:
-            image_tensor = torch.from_numpy(image_patch.transpose(2, 0, 1)).float()
-            mask_tensor = torch.from_numpy(mask_patch).float()
-        
-        if mask_tensor.dim() == 2:
-            mask_tensor = mask_tensor.unsqueeze(0)
-        
-        return {
-            'image': image_tensor,
-            'mask': mask_tensor,
-            'patient_id': sample['patient_id'],
-            'slice_idx': sample['slice_idx'],
-            'is_positive': sample['is_positive']
-        }
+            # === Val/Test 模式：返回 4 個 patches + full_mask ===
+            centers = self._get_4patch_centers(lung_mask, patch_size)
+            
+            image_patches = []
+            positions = []
+            
+            for cy, cx in centers:
+                y1, y2 = cy - half, cy + half
+                x1, x2 = cx - half, cx + half
+                
+                image_patch = image_2_5d[:, y1:y2, x1:x2]
+                
+                # Padding
+                if image_patch.shape[1] < patch_size or image_patch.shape[2] < patch_size:
+                    padded = np.zeros((3, patch_size, patch_size), dtype=np.float32)
+                    padded[:, :image_patch.shape[1], :image_patch.shape[2]] = image_patch
+                    image_patch = padded
+                
+                image_patches.append(torch.from_numpy(image_patch).float())
+                positions.append((y1, x1))  # 左上角座標
+            
+            # Stack 4 patches: (4, 3, ps, ps)
+            images_4patch = torch.stack(image_patches, dim=0)
+            
+            # Full mask
+            full_mask = torch.from_numpy(mask).float().unsqueeze(0)  # (1, H, W)
+            
+            # Full image 中間 channel（用於視覺化）
+            full_image_mid = torch.from_numpy(image_2_5d[1]).float()  # (H, W)
+            
+            return {
+                'images_4patch': images_4patch,  # (4, 3, 224, 224)
+                'positions': positions,           # [(y1, x1), ...] 4 個
+                'full_mask': full_mask,           # (1, H, W)
+                'full_image_mid': full_image_mid, # (H, W) 用於視覺化
+                'full_shape': (h, w),
+                'patient_id': patient_id,
+                'slice_idx': slice_idx,
+                'is_positive': sample['is_positive']
+            }
 
 
 if __name__ == "__main__":

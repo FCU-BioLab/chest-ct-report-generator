@@ -48,7 +48,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from train_unetpp.config import Config, get_default_config
     from train_unetpp.preprocess import preprocess_lndb_dataset, preprocess_lndb_slices
-    from train_unetpp.dataset import LNDbDataset, LNDbSliceDataset, LNDbInferenceDataset, get_patient_split, get_fold_split
+    from train_unetpp.dataset import LNDbDataset, LNDbSliceDataset, LNDbInferenceDataset, get_patient_split, get_fold_split, val_collate_fn
     from train_unetpp.model import get_model, count_parameters
     from train_unetpp.trainer import UNetPPTrainer
     from train_unetpp.inference import Inferencer, load_model_for_inference
@@ -216,13 +216,16 @@ def run_single_training(config: Config, train_ids: list, val_ids: list, test_ids
         persistent_workers=False if actual_workers == 0 else True
     )
     
+    # Val/Test 使用自定義 collate_fn 處理 4-patch 格式
+    # batch_size=1 因為 full_shape 可能不同
+    # pin_memory=False 避免 full_mask 消耗過多 GPU 記憶體
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config.training.batch_size,
+        batch_size=1,  # 必須 1 因為 full_shape 可能不同
         shuffle=False,
         num_workers=actual_workers,
-        pin_memory=True,
-        collate_fn=custom_collate_fn,
+        pin_memory=False,  # 避免 OOM
+        collate_fn=val_collate_fn,
         persistent_workers=False if actual_workers == 0 else True
     )
     
