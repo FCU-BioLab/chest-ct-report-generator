@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # ============= 資料集路徑 =============
 MSD_LUNG_DIR = Path(r"E:\lung_ct_lesion_dataset\MSD Lung Tumours\Task06_Lung")
 MSD_CACHE_DIR = Path(r"C:\GitHub\chest-ct-report-generator\segmentation\cache\msd_lung_slices")
+MSD_LUNGMASK_DIR = Path(r"E:\lung_ct_lesion_dataset\MSD Lung Tumours\lung_masks")
 
 
 class MSDLungPreprocessor:
@@ -47,13 +48,15 @@ class MSDLungPreprocessor:
         target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         hu_window_center: float = -600,
         hu_window_width: float = 1500,
-        cache_dir: Optional[Path] = None
+        cache_dir: Optional[Path] = None,
+        lungmask_dir: Optional[Path] = None
     ):
         self.target_spacing = target_spacing
         self.hu_window_center = hu_window_center
         self.hu_window_width = hu_window_width
         self.cache_dir = cache_dir or MSD_CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.lungmask_dir = lungmask_dir or MSD_LUNGMASK_DIR
     
     def load_nifti(self, nii_path: Path) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -77,6 +80,41 @@ class MSDLungPreprocessor:
         spacing = np.array(nii.header.get_zooms()[:3])  # (X, Y, Z)
         
         return volume.astype(np.float32), spacing
+    
+    def load_lungmask(self, case_id: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        載入預生成的 lungmask
+        
+        Args:
+            case_id: 案例 ID，如 "lung_001"
+        
+        Returns:
+            lung_mask: Binary lung mask (Z, Y, X)
+            spacing: Lung mask 的 spacing (X, Y, Z)
+        """
+        lung_path = self.lungmask_dir / f"{case_id}_lung.nii.gz"
+        
+        if not lung_path.exists():
+            logger.warning(f"Lungmask 不存在: {lung_path}，使用 threshold-based fallback")
+            return None, None
+        
+        lung_nii = nib.load(str(lung_path))
+        lung_array = lung_nii.get_fdata()
+        
+        # 處理可能的第四維度
+        if lung_array.ndim == 4:
+            lung_array = lung_array[:, :, :, 0]
+        
+        # 轉置為 (Z, Y, X)
+        lung_array = np.transpose(lung_array, (2, 1, 0))
+        
+        # 取得 spacing
+        spacing = np.array(lung_nii.header.get_zooms()[:3])  # (X, Y, Z)
+        
+        # Label 1=右肺, 2=左肺 → binary
+        lung_mask = (lung_array > 0).astype(np.float32)
+        
+        return lung_mask, spacing
     
     def resample_volume(
         self,
@@ -153,7 +191,7 @@ class MSDLungPreprocessor:
         預處理單一案例
         
         Returns:
-            dict with: volume, mask, spacing, bbox, positive_slices
+            dict with: volume, mask, lung_mask, spacing, bbox, positive_slices
         """
         # 載入影像
         volume, spacing = self.load_nifti(image_path)
@@ -165,17 +203,29 @@ class MSDLungPreprocessor:
         else:
             mask = np.zeros_like(volume)
         
+        # 載入預生成的 lungmask
+        lung_mask, lung_spacing = self.load_lungmask(case_id)
+        
+        if lung_mask is None:
+            # Lungmask 不存在，使用 threshold-based fallback
+            logger.warning(f"{case_id}: 使用 threshold-based lung mask fallback")
+            lung_mask = (volume > -1000) & (volume < -200)
+            lung_mask = lung_mask.astype(np.float32)
+        
         # 重新採樣
         volume_resampled = self.resample_volume(volume, spacing, is_mask=False)
         mask_resampled = self.resample_volume(mask, spacing, is_mask=True)
+        lung_mask_resampled = self.resample_volume(lung_mask, spacing, is_mask=True)
+        lung_mask_resampled = (lung_mask_resampled > 0.5).astype(np.float32)
         
-        # 取得肺部 bbox（在 resample 後的座標）
-        bbox = self.get_lung_bbox(volume_resampled)
+        # 取得肺部 bbox（使用 lungmask 的 bbox）
+        bbox = self.get_lung_bbox_from_mask(lung_mask_resampled)
         
         # 裁切
         (z0, z1), (y0, y1), (x0, x1) = bbox
         volume_cropped = volume_resampled[z0:z1, y0:y1, x0:x1]
         mask_cropped = mask_resampled[z0:z1, y0:y1, x0:x1]
+        lung_mask_cropped = lung_mask_resampled[z0:z1, y0:y1, x0:x1]
         
         # HU 正規化
         volume_normalized = self.normalize_hu(volume_cropped)
@@ -189,11 +239,42 @@ class MSDLungPreprocessor:
         return {
             'volume': volume_normalized,
             'mask': mask_cropped,
+            'lung_mask': lung_mask_cropped,
             'spacing': self.target_spacing,
             'bbox': bbox,
             'positive_slices': positive_slices,
             'original_spacing': spacing
         }
+    
+    def get_lung_bbox_from_mask(
+        self,
+        lung_mask: np.ndarray,
+        margin: int = 10
+    ) -> Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]:
+        """
+        從 lung mask 取得邊界框
+        
+        Args:
+            lung_mask: Binary lung mask (Z, Y, X)
+            margin: 邊界擴展像素數
+        
+        Returns:
+            ((z0, z1), (y0, y1), (x0, x1))
+        """
+        z_indices, y_indices, x_indices = np.where(lung_mask > 0)
+        
+        if len(z_indices) == 0:
+            # 找不到肺部，使用整個體積
+            return ((0, lung_mask.shape[0]), (0, lung_mask.shape[1]), (0, lung_mask.shape[2]))
+        
+        z_min = max(0, z_indices.min() - margin)
+        z_max = min(lung_mask.shape[0], z_indices.max() + margin)
+        y_min = max(0, y_indices.min() - margin)
+        y_max = min(lung_mask.shape[1], y_indices.max() + margin)
+        x_min = max(0, x_indices.min() - margin)
+        x_max = min(lung_mask.shape[2], x_indices.max() + margin)
+        
+        return ((z_min, z_max), (y_min, y_max), (x_min, x_max))
     
     def save_slices(
         self,
@@ -206,18 +287,15 @@ class MSDLungPreprocessor:
         
         volume = data['volume']
         mask = data['mask']
-        
-        # 創建簡易的 lung_mask（基於閾值）
-        # 已經正規化到 [0,1]，肺部區域大約在 0.2-0.5 (對應 HU -500 到 150)
-        lung_mask = (volume > 0.1) & (volume < 0.7)  # 簡化版 lung mask
+        lung_mask = data['lung_mask']  # 使用預生成的 lungmask
         
         num_slices = volume.shape[0]
         
         for z in range(num_slices):
             slice_data = {
-                'image': volume[z],
-                'mask': mask[z],
-                'lung_mask': lung_mask[z].astype(np.uint8)
+                'image': volume[z].astype(np.float16),
+                'mask': mask[z].astype(np.float16),
+                'lung_mask': lung_mask[z].astype(np.bool_)  # 同 LNDb 格式
             }
             np.savez_compressed(case_dir / f"slice_{z:04d}.npz", **slice_data)
         
