@@ -57,16 +57,8 @@ def find_config():
 
 def get_lndb_path():
     """取得 LNDb 資料集路徑"""
-    config_path = find_config()
-    if config_path:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        data_path = config.get('all_patient_data', 'datasets/aLL_patients_data')
-        if not Path(data_path).is_absolute():
-            data_path = (config_path.parent / data_path).resolve()
-        return Path(data_path) / 'LNDb'
-    # 預設路徑
-    return Path(__file__).parent.parent / 'datasets' / 'aLL_patients_data' / 'LNDb'
+    # 直接使用指定的路徑
+    return Path(r'E:\lung_ct_lesion_dataset\LNDb')
 
 
 class LNDbDataLoader:
@@ -79,10 +71,12 @@ class LNDbDataLoader:
         self.cts_df = None
         self.scan_files = []
         self.mask_files = {}  # {lndb_id: {rad_id: mask_path}}
+        self.lung_mask_files = {}  # {lndb_id: lung_mask_path}
         
         self._load_annotations()
         self._find_scans()
         self._find_masks()
+        self._find_lung_masks()
     
     def _load_annotations(self):
         """載入標註資料"""
@@ -128,10 +122,10 @@ class LNDbDataLoader:
         """尋找所有分割遮罩檔案"""
         self.mask_files = {}
         
-        # 遮罩在 masks/masks 資料夾
-        mask_dir = self.base_path / 'masks' / 'masks'
+        # 遮罩在 mask/masks 資料夾
+        mask_dir = self.base_path / 'mask' / 'masks'
         if not mask_dir.exists():
-            mask_dir = self.base_path / 'masks'
+            mask_dir = self.base_path / 'mask'
         
         if mask_dir.exists():
             for mhd_file in sorted(mask_dir.glob('LNDb-*_rad*.mhd')):
@@ -146,6 +140,21 @@ class LNDbDataLoader:
         
         total_masks = sum(len(v) for v in self.mask_files.values())
         print(f"找到 {total_masks} 個分割遮罩 ({len(self.mask_files)} 個 CT)")
+    
+    def _find_lung_masks(self):
+        """尋找所有肺部分割遮罩檔案"""
+        self.lung_mask_files = {}
+        
+        # 肺部遮罩在 lung_masks 資料夾
+        lung_mask_dir = self.base_path / 'lung_masks'
+        
+        if lung_mask_dir.exists():
+            for mhd_file in sorted(lung_mask_dir.glob('LNDb-*_lung.mhd')):
+                # 檔名格式: LNDb-0001_lung.mhd
+                lndb_id = int(mhd_file.stem.split('-')[1].split('_')[0])
+                self.lung_mask_files[lndb_id] = mhd_file
+        
+        print(f"找到 {len(self.lung_mask_files)} 個肺部遮罩")
     
     def get_scan_list(self):
         """取得所有掃描的 LNDb ID 清單"""
@@ -233,6 +242,37 @@ class LNDbDataLoader:
         
         return masks
     
+    def load_lung_mask(self, lndb_id):
+        """
+        載入指定 CT 的肺部分割遮罩
+        
+        Parameters:
+        -----------
+        lndb_id : int
+            LNDb ID
+        
+        Returns:
+        --------
+        numpy.ndarray or None : 肺部遮罩 (1=右肺, 2=左肺)
+        """
+        if isinstance(lndb_id, str):
+            if lndb_id.startswith('LNDb-'):
+                lndb_id = int(lndb_id.split('-')[1])
+            else:
+                lndb_id = int(lndb_id)
+        
+        if lndb_id not in self.lung_mask_files:
+            return None
+        
+        try:
+            mask_path = self.lung_mask_files[lndb_id]
+            itk_mask = sitk.ReadImage(str(mask_path))
+            lung_mask = sitk.GetArrayFromImage(itk_mask)
+            return lung_mask
+        except Exception as e:
+            print(f"載入肺部遮罩失敗 {self.lung_mask_files[lndb_id]}: {e}")
+            return None
+    
     def get_nodules_for_scan(self, lndb_id):
         """取得指定掃描的結節標註"""
         if isinstance(lndb_id, str):
@@ -291,6 +331,7 @@ class LNDbViewer:
         self.current_nodules = []
         self.current_nodules_gt = []
         self.current_masks = {}  # {rad_id: mask_volume}
+        self.current_lung_mask = None  # 肺部遮罩
         
         # 視窗設定
         self.window_center = -600  # 肺窗
@@ -420,6 +461,10 @@ class LNDbViewer:
         tk.Checkbutton(control_frame, text="顯示結節中心點", variable=self.show_nodule_center_var,
                       command=self._update_display).pack(anchor=tk.W)
         
+        self.show_lung_mask_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(control_frame, text="顯示肺部遮罩 (藍色)", variable=self.show_lung_mask_var,
+                      command=self._update_display).pack(anchor=tk.W)
+        
         # 醫師選擇
         rad_frame = tk.Frame(control_frame)
         rad_frame.pack(fill=tk.X, pady=5)
@@ -519,6 +564,9 @@ class LNDbViewer:
                 # 載入分割遮罩
                 self.current_masks = self.loader.load_masks(lndb_id)
                 
+                # 載入肺部遮罩
+                self.current_lung_mask = self.loader.load_lung_mask(lndb_id)
+                
                 self.root.after(0, self._on_scan_loaded)
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("錯誤", f"載入失敗: {e}"))
@@ -553,11 +601,13 @@ class LNDbViewer:
         
         # 更新資訊
         spacing = self.current_scan['spacing']
+        lung_mask_status = "有" if self.current_lung_mask is not None else "無"
         info_text = f"LNDb ID: {self.current_scan['lndb_id']}\n"
         info_text += f"體積大小: {volume.shape}\n"
         info_text += f"像素間距: {spacing[0]:.2f}x{spacing[1]:.2f}x{spacing[2]:.2f} mm\n"
         info_text += f"結節數量: {len(self.current_nodules_gt)} (GT)\n"
         info_text += f"遮罩數量: {len(self.current_masks)} 位醫師\n"
+        info_text += f"肺部遮罩: {lung_mask_status}\n"
         info_text += f"HU範圍: [{volume.min():.0f}, {volume.max():.0f}]"
         self.info_label.config(text=info_text)
         
@@ -728,6 +778,9 @@ class LNDbViewer:
             # 單一醫師或融合：紅色
             cmap = ListedColormap(['none', 'red'])
         
+        # 肺部遮罩顏色映射 (1=右肺:藍色, 2=左肺:青色)
+        lung_cmap = ListedColormap(['none', '#0066CC', '#00CCCC'])
+        
         # === 軸向切片 (Axial) - Z 平面 ===
         axial_slice = volume[z_idx, :, :]
         axial_slice = np.flipud(axial_slice)  # 垂直翻轉
@@ -741,6 +794,14 @@ class LNDbViewer:
                 self.ax_axial.imshow(mask_slice, cmap=cmap, alpha=alpha, 
                                      origin='lower', vmin=0, 
                                      vmax=max(3, mask_slice.max()))
+        
+        # 肺部遮罩 (藍色)
+        if self.show_lung_mask_var.get() and self.current_lung_mask is not None:
+            lung_slice = self.current_lung_mask[z_idx, :, :]
+            lung_slice = np.flipud(lung_slice)
+            if np.any(lung_slice > 0):
+                self.ax_axial.imshow(lung_slice, cmap=lung_cmap, alpha=alpha * 0.5, 
+                                     origin='lower', vmin=0, vmax=2)
         
         self.ax_axial.set_title(f'軸向 (Axial) - Z={z_idx}')
         self.ax_axial.axis('off')
@@ -757,6 +818,13 @@ class LNDbViewer:
                                        aspect='auto', origin='lower', vmin=0,
                                        vmax=max(3, mask_slice.max()))
         
+        # 肺部遮罩 (藍色)
+        if self.show_lung_mask_var.get() and self.current_lung_mask is not None:
+            lung_slice = self.current_lung_mask[:, y_idx, :]
+            if np.any(lung_slice > 0):
+                self.ax_coronal.imshow(lung_slice, cmap=lung_cmap, alpha=alpha * 0.5, 
+                                       aspect='auto', origin='lower', vmin=0, vmax=2)
+        
         self.ax_coronal.set_title(f'冠狀 (Coronal) - Y={y_idx}')
         self.ax_coronal.axis('off')
         
@@ -771,6 +839,13 @@ class LNDbViewer:
                 self.ax_sagittal.imshow(mask_slice, cmap=cmap, alpha=alpha, 
                                         aspect='auto', origin='lower', vmin=0,
                                         vmax=max(3, mask_slice.max()))
+        
+        # 肺部遮罩 (藍色)
+        if self.show_lung_mask_var.get() and self.current_lung_mask is not None:
+            lung_slice = self.current_lung_mask[:, :, x_idx]
+            if np.any(lung_slice > 0):
+                self.ax_sagittal.imshow(lung_slice, cmap=lung_cmap, alpha=alpha * 0.5, 
+                                        aspect='auto', origin='lower', vmin=0, vmax=2)
         
         self.ax_sagittal.set_title(f'矢狀 (Sagittal) - X={x_idx}')
         self.ax_sagittal.axis('off')

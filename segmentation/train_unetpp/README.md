@@ -1,15 +1,21 @@
-# UNet++ 肺結節分割訓練
+# UNet++ 肺結節/肺腫瘤分割訓練
 
-使用 LNDb 資料集和 PyTorch 訓練 UNet++ 模型進行肺結節自動分割。
+使用 LNDb 資料集和 MSD Lung Tumours 資料集，以 PyTorch 訓練 UNet++ 模型進行肺部病灶自動分割。
 
 ## 特點
 
-- **Patch-based 訓練**：解決極端類別不平衡
-- **2.5D 固定 spacing**：統一到 1.0mm 各向同性
-- **軟共識標註**：整合多位放射科醫師的標註
-- **多指標評估**：ROI Dice、Lesion-wise F1、FP/scan
-- **推論後處理**：連通區域過濾、肺野遮罩
-- **結節屬性輸出**：JSON 格式供 LLM 使用
+- **2.5D 輸入**：使用 z-1, z, z+1 三個連續切片作為 RGB 輸入
+- **Slice-Level 預處理**：切片式快取，加速訓練載入
+- **Lungmask 分割**：自動生成肺部遮罩用於 ROI 裁切
+- **4-Patch 驗證**：Val/Test 使用 4-patch stitch → full-slice 評估
+- **多指標評估**：Global Dice、Boundary IoU、Lesion F1
+
+## 支援資料集
+
+| 資料集 | 格式 | 病人數 | 任務 |
+|--------|------|--------|------|
+| **LNDb** | MHD/RAW | 236 | 肺結節分割 |
+| **MSD Task06** | NIfTI | 64+32 | 肺腫瘤分割 |
 
 ## 安裝
 
@@ -19,32 +25,31 @@ pip install -r requirements.txt
 
 ## 使用方式
 
-### 1. 預處理資料集
+### LNDb 資料集
 
 ```bash
-python -m segmentation.train_unetpp.main --preprocess
-```
+cd segmentation
 
-### 2. 訓練模型
+# 1. 切片式預處理（推薦）
+python train_unetpp\main.py --preprocess-slices
 
-```bash
-# 單次訓練（預設）
-python train_unetpp\main.py --epochs 50
+# 2. 訓練
+python train_unetpp\main.py --epochs 100
 
-# 5-fold CV 訓練
+# 3. 5-fold CV
 python train_unetpp\main.py --cv --epochs 100
-
-# 只訓練特定 fold
-python train_unetpp\main.py --cv --fold 0 --epochs 100
-
-# 快速測試
-python train_unetpp\main.py --data_fraction 0.1 --epochs 5
 ```
 
-### 3. 推論
+### MSD Lung Tumours 資料集
 
 ```bash
-python train_unetpp\main.py --inference --model_path path/to/model.pth
+cd segmentation
+
+# 1. 預處理
+python train_unetpp\train_msd.py --preprocess
+
+# 2. 訓練
+python train_unetpp\train_msd.py --epochs 100
 ```
 
 ## 參數說明
@@ -54,100 +59,76 @@ python train_unetpp\main.py --inference --model_path path/to/model.pth
 | `--epochs` | 訓練 epochs | 100 |
 | `--batch_size` | Batch size | 16 |
 | `--lr` | 學習率 | 1e-4 |
-| `--patch_size` | Patch 大小 | 160 |
+| `--patch_size` | Patch 大小 | 224 |
 | `--encoder` | 編碼器名稱 | efficientnet-b4 |
 | `--cv` | 啟用 5-fold CV | False |
-| `--fold` | 指定 fold | None |
-| `--data_fraction` | 資料比例 | 1.0 |
 
-## 目標指標
+## 評估指標
 
-| 指標 | 目標值 |
-|------|--------|
-| ROI Dice | ≥ 0.85 |
-| Lesion Sensitivity | ≥ 0.90 |
-| FP per Scan | ≤ 2.0 |
+| 指標 | 說明 | 計算方式 |
+|------|------|----------|
+| **Global Dice** | 全局像素級 Dice | Stitch 後 full-slice 計算 |
+| **Boundary IoU** | 邊界 IoU (d=2) | 只算有 GT 的 slice |
+| **Lesion F1** | Slice-level 偵測 F1 | TP/FP/FN 按 slice 計算 |
+| **Val Loss** | Patch-level loss | 4 個 patch 平均 |
+
+## 目錄結構
+
+```
+train_unetpp/
+├── main.py           # LNDb 訓練入口
+├── train_msd.py      # MSD Lung 訓練入口
+├── config.py         # 配置管理
+├── dataset.py        # LNDb 資料集 (含 val_collate_fn)
+├── msd_dataset.py    # MSD 資料集
+├── trainer.py        # 訓練器 (4-patch stitch 驗證)
+├── model.py          # UNet++ 模型
+├── losses.py         # 損失函數
+├── preprocess.py     # 預處理器
+├── sampler.py        # Patch 採樣器
+├── inference.py      # 推論模組
+└── utils.py          # 工具函數
+```
 
 ## 輸出結構
 
 ```
-segmentation/result/train_unetpp/
-├── unetpp_lndb_YYYYMMDD_HHMMSS/
-│   ├── config.json
-│   ├── best_model.pth
-│   ├── final_model.pth
-│   ├── history.json
-│   └── training_curves.png
-└── inference_results/
-    ├── LNDb-0001_nodules.json
-    ├── LNDb-0001_pred.nii.gz
-    └── inference_summary.json
+segmentation/result/unetpp_lndb_YYYYMMDD_HHMMSS/
+├── config.json              # 訓練配置
+├── data_split.json          # 資料分割
+├── best_model.pth           # 最佳模型
+├── history.json             # 訓練歷史
+├── training_curves.png      # 訓練曲線
+├── train.log                # 訓練日誌
+└── validation_samples/      # 驗證視覺化
+    └── epoch_XXX.png        # 每 5 epoch 儲存
 ```
 
-## JSON 輸出範例
-
-結節屬性 JSON（供 LLM 使用）：
-
-```json
-{
-  "patient_id": "LNDb-0001",
-  "nodules": [
-    {
-      "id": 1,
-      "centroid_mm": [120.5, 85.2, 45.0],
-      "volume_mm3": 523.6,
-      "max_diameter_mm": 10.2,
-      "mean_hu": -450
-    }
-  ]
-}
-```
-
-## 資料載入邏輯
-
-### 整體流程
+## Val/Test 4-Patch Stitch 流程
 
 ```
-1. 預處理 (preprocess.py)
-   LNDb .mhd/.raw → CTPreprocessor → cache/*.npz
-   • Resample 到 1.0mm³ 各向同性
-   • HU Windowing [-1000, 200]
-   • 肺野分割與 ROI 裁切
+1. Dataset 返回:
+   - images_4patch: (4, 3, 224, 224)
+   - positions: [(y1,x1), ...]
+   - full_mask: (1, H, W)
+   - full_image_mid: (H, W)
 
-2. 資料分割 (main.py)
-   236 病人按 7:2:1 分割 → train(165) / val(47) / test(24)
+2. Trainer 處理:
+   - Forward 4 patches → outputs (4,1,224,224)
+   - 裁切 GT patches → 計算 patch-level loss
+   - Max stitch → full_pred (1, H, W)
+   - 計算 full-slice metrics
 
-3. 建立樣本索引 (dataset.py)
-   每個病人的每個切片 = 一個樣本
-   165 病人 → 約 52,000 個原始樣本
-
-4. 正樣本 Oversampling
-   正樣本（含結節切片）只佔 ~4%
-   max_samples_per_epoch = 20,000
-   正負比例調整為 7:3
-
-5. 預載入到記憶體 (preload=True)
-   首次啟動讀取所有 .npz 到記憶體
-   避免訓練時重複讀取磁碟
-
-6. __getitem__ 取樣
-   ① 取出病人資料
-   ② 創建軟共識遮罩 (多醫師平均)
-   ③ 提取 2.5D 切片 (center ± 2mm)
-   ④ 隨機採樣 160×160 Patch
-   ⑤ 資料增強
-   ⑥ 返回 image(3,160,160) + mask(1,160,160)
-
-7. DataLoader
-   batch_size=32 → 625 批次/epoch
+3. 視覺化:
+   - Full Image | GT | Pred | Overlay
 ```
 
-### 設計決策
+## 設計決策
 
 | 設計 | 原因 |
 |------|------|
-| Preload | 避免每次讀取磁碟，加速 100 倍 |
-| 2.5D 切片 | 提供 Z 軸上下文，比 3D 省記憶體 |
-| Patch-based | 處理類別不平衡，聚焦結節區域 |
-| 軟共識遮罩 | 整合多醫師標註，處理標註不確定性 |
-| max_samples_per_epoch | 限制樣本數，避免過長的 epoch |
+| 2.5D 輸入 | 提供 Z 軸上下文，比 3D 省記憶體 |
+| Slice-Level Cache | 避免每次讀取整個 volume，加速 10x |
+| 4-Patch Stitch | 驗證時覆蓋整個 slice，避免 patch 邊界問題 |
+| Lungmask ROI | 使用 lungmask 套件生成肺部遮罩 |
+| Oversampling | 正樣本 oversample 到 70%，處理不平衡 |
