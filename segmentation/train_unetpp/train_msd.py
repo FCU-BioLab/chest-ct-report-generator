@@ -55,13 +55,7 @@ def parse_args():
 
 def run_training(args):
     """執行訓練"""
-    # 設置
-    set_seed(args.seed)
     device = get_device()
-    
-    logger.info(f"使用設備: {device}")
-    if device.type == 'cuda':
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
     
     # 載入配置
     config = get_default_config()
@@ -166,12 +160,20 @@ def main():
         run_dir = Path("result") / f"msd_lung_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     
-    # 設置日誌（含檔案輸出）
+    # 設置日誌（與 LNDb 一致）
     log_file = run_dir / "train.log" if not args.preprocess else None
-    setup_logging(
-        log_file=str(log_file) if log_file else None,
-        level=logging.INFO
-    )
+    setup_logging(str(log_file) if log_file else None)
+    
+    # 設定隨機種子
+    set_seed(args.seed)
+    
+    # 設備
+    device = get_device()
+    logger.info(f"使用設備: {device}")
+    
+    if torch.cuda.is_available():
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
     if args.preprocess:
         logger.info("執行 MSD Lung Tumours 預處理...")
@@ -184,4 +186,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
