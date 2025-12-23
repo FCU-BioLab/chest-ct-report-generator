@@ -1,4 +1,4 @@
-# UNet++ 肺結節/肺腫瘤分割訓練
+# UNet++ 肺病灶分割訓練
 
 使用 LNDb 資料集和 MSD Lung Tumours 資料集，以 PyTorch 訓練 UNet++ 模型進行肺部病灶自動分割。
 
@@ -25,43 +25,62 @@ pip install -r requirements.txt
 
 ## 使用方式
 
-### LNDb 資料集
+### 統一入口
+
+所有操作都透過 `main.py` 執行，使用 `--dataset` 參數選擇資料集：
 
 ```bash
 cd segmentation
 
-# 1. 切片式預處理（推薦）
-python train_unetpp\main.py --preprocess-slices
+# 查看所有選項
+python train_unetpp\main.py --help
+```
+
+### LNDb 資料集
+
+```bash
+# 1. 預處理
+python train_unetpp\main.py --dataset lndb --preprocess
 
 # 2. 訓練
-python train_unetpp\main.py --epochs 100
+python train_unetpp\main.py --dataset lndb --epochs 100
 
 # 3. 5-fold CV
-python train_unetpp\main.py --cv --epochs 100
+python train_unetpp\main.py --dataset lndb --cv --epochs 100
+
+# 4. 推論
+python train_unetpp\main.py --dataset lndb --inference --model_path result/xxx/best_model.pth
 ```
 
 ### MSD Lung Tumours 資料集
 
 ```bash
-cd segmentation
-
 # 1. 預處理
-python train_unetpp\train_msd.py --preprocess
+python train_unetpp\main.py --dataset msd --preprocess
 
 # 2. 訓練
-python train_unetpp\train_msd.py --epochs 100
+python train_unetpp\main.py --dataset msd --epochs 100
+
+# 3. 只執行測試（不訓練）
+python train_unetpp\main.py --dataset msd --test --model_path result/xxx/best_model.pth
+
+# 4. 視覺化資料集
+python train_unetpp\main.py --dataset msd --visualize
 ```
 
 ## 參數說明
 
 | 參數 | 說明 | 預設值 |
 |------|------|--------|
+| `--dataset` | 資料集類型 (lndb/msd) | lndb |
 | `--epochs` | 訓練 epochs | 100 |
 | `--batch_size` | Batch size | 16 |
 | `--lr` | 學習率 | 1e-4 |
 | `--patch_size` | Patch 大小 | 224 |
 | `--encoder` | 編碼器名稱 | efficientnet-b4 |
-| `--cv` | 啟用 5-fold CV | False |
+| `--cv` | 啟用 5-fold CV (僅 LNDb) | False |
+| `--test` | 只執行測試評估 (僅 MSD) | False |
+| `--visualize` | 視覺化資料集 (僅 MSD) | False |
 
 ## 評估指標
 
@@ -76,15 +95,14 @@ python train_unetpp\train_msd.py --epochs 100
 
 ```
 train_unetpp/
-├── main.py           # LNDb 訓練入口
-├── train_msd.py      # MSD Lung 訓練入口
+├── main.py           # 統一訓練入口 (支援 LNDb 和 MSD)
 ├── config.py         # 配置管理
-├── dataset.py        # LNDb 資料集 (含 val_collate_fn)
+├── dataset.py        # LNDb 資料集
 ├── msd_dataset.py    # MSD 資料集
 ├── trainer.py        # 訓練器 (4-patch stitch 驗證)
 ├── model.py          # UNet++ 模型
 ├── losses.py         # 損失函數
-├── preprocess.py     # 預處理器
+├── preprocess.py     # CT 預處理器
 ├── sampler.py        # Patch 採樣器
 ├── inference.py      # 推論模組
 └── utils.py          # 工具函數
@@ -100,6 +118,7 @@ segmentation/result/unetpp_lndb_YYYYMMDD_HHMMSS/
 ├── history.json             # 訓練歷史
 ├── training_curves.png      # 訓練曲線
 ├── train.log                # 訓練日誌
+├── test_metrics.json        # 測試指標 (僅 MSD)
 └── validation_samples/      # 驗證視覺化
     └── epoch_XXX.png        # 每 5 epoch 儲存
 ```
