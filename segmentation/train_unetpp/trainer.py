@@ -35,12 +35,12 @@ import sys
 try:
     from .config import Config
     from .model import get_model, count_parameters
-    from .losses import get_loss_function
+    from .losses import get_loss_function, BCEDiceLoss
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from train_unetpp.config import Config
     from train_unetpp.model import get_model, count_parameters
-    from train_unetpp.losses import get_loss_function
+    from train_unetpp.losses import get_loss_function, BCEDiceLoss
 
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ class EarlyStopping:
     
     def __init__(
         self,
-        patience: int = 20,
+        patience: int = 0,
         min_delta: float = 0.001,
         mode: str = "max"
     ):
@@ -370,8 +370,11 @@ class UNetPPTrainer:
         self.model = self.model.to(self.device)
         logger.info(f"模型參數數量: {count_parameters(self.model):,}")
         
-        # 損失函數
+        # 訓練損失函數（AdaptiveLoss 用於 training）
         self.criterion = get_loss_function(config)
+        
+        # 驗證損失函數（BCE+Dice 用於 val/test 評估）
+        self.val_criterion = BCEDiceLoss(dice_weight=0.5, bce_weight=1.0)
         
         # 優化器
         self.optimizer = AdamW(
@@ -657,8 +660,8 @@ class UNetPPTrainer:
                 
                 gt_patches = torch.cat(gt_patches, dim=0)  # (4, 1, ps, ps)
                 
-                # 計算 loss
-                loss_patch = self.criterion(outputs, gt_patches)
+                # 計算 patch-level loss（使用 BCE+Dice，不用 AdaptiveLoss）
+                loss_patch = self.val_criterion(outputs, gt_patches)
                 val_loss_sum += float(loss_patch.item())
                 val_loss_n += 1
                 
@@ -851,88 +854,6 @@ class UNetPPTrainer:
         plt.tight_layout()
         plt.savefig(vis_dir / f'epoch_{epoch:03d}.png', dpi=100)
         plt.close()
-
-    
-    def _save_validation_samples(
-        self, 
-        images: np.ndarray, 
-        targets: np.ndarray, 
-        preds: np.ndarray,
-        patient_ids: list,
-        epoch: int,
-        num_samples: int = 4
-    ):
-        """保存驗證樣本視覺化"""
-        import matplotlib.pyplot as plt
-        
-        # 確保輸出目錄存在
-        vis_dir = self.output_dir / "validation_samples"
-        vis_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 選擇有正樣本的樣本優先
-        positive_indices = [i for i in range(len(targets)) if targets[i].sum() > 0]
-        if len(positive_indices) >= num_samples:
-            selected_indices = positive_indices[:num_samples]
-        else:
-            selected_indices = list(range(min(num_samples, len(images))))
-        
-        fig, axes = plt.subplots(len(selected_indices), 4, figsize=(16, 4 * len(selected_indices)))
-        if len(selected_indices) == 1:
-            axes = axes.reshape(1, -1)
-        
-        for row, idx in enumerate(selected_indices):
-            img = images[idx]
-            gt = targets[idx]
-            pred = preds[idx]
-            patient_id = patient_ids[idx] if idx < len(patient_ids) else f"sample_{idx}"
-            
-            # 取中間通道或唯一通道作為顯示影像
-            if img.ndim == 3:
-                if img.shape[0] == 1:
-                    display_img = img[0]  # 2D 模式：單通道
-                elif img.shape[0] == 3:
-                    display_img = img[1]  # 2.5D 模式：中間切片
-                else:
-                    display_img = img[0]
-            else:
-                display_img = img
-            
-            # GT 和 Pred 取第一個通道
-            gt_2d = gt[0] if gt.ndim == 3 else gt
-            pred_2d = pred[0] if pred.ndim == 3 else pred
-            
-            # 1. 原始影像
-            axes[row, 0].imshow(display_img, cmap='gray')
-            axes[row, 0].set_title(f'{patient_id}\nInput')
-            axes[row, 0].axis('off')
-            
-            # 2. Ground Truth
-            axes[row, 1].imshow(gt_2d, cmap='gray', vmin=0, vmax=1)
-            axes[row, 1].set_title('Ground Truth')
-            axes[row, 1].axis('off')
-            
-            # 3. Prediction
-            axes[row, 2].imshow(pred_2d, cmap='gray', vmin=0, vmax=1)
-            axes[row, 2].set_title(f'Prediction\n(max={pred_2d.max():.2f})')
-            axes[row, 2].axis('off')
-            
-            # 4. Overlay (GT=Green, Pred=Red)
-            overlay = np.stack([display_img] * 3, axis=-1)
-            overlay = (overlay - overlay.min()) / (overlay.max() - overlay.min() + 1e-8)
-            overlay[gt_2d > 0, 1] = 1.0  # GT = Green (使用 > 0 因為軟共識遮罩值可能 < 0.5)
-            overlay[pred_2d > 0.5, 0] = 1.0  # Pred = Red
-            axes[row, 3].imshow(overlay)
-            axes[row, 3].set_title('Overlay\n(GT=Green, Pred=Red)')
-            axes[row, 3].axis('off')
-        
-        plt.suptitle(f'Validation Samples - Epoch {epoch + 1}', fontsize=14)
-        plt.tight_layout()
-        
-        save_path = vis_dir / f"epoch_{epoch + 1:03d}.png"
-        plt.savefig(save_path, dpi=100, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"Validation samples saved: {save_path}")
     
     def fit(
         self,
@@ -949,7 +870,7 @@ class UNetPPTrainer:
         Returns:
             訓練歷史
         """
-        best_dice = 0.0
+        best_lesion_f1 = 0.0
         first_batch_logged = False
         
         logger.info(f"開始訓練，共 {self.config.training.epochs} 個 epoch")
@@ -1001,10 +922,10 @@ class UNetPPTrainer:
             self.history['val_lesion_precision'].append(val_metrics['lesion_precision'])
             self.history['lr'].append(current_lr)
             
-            # 保存最佳模型
-            if val_metrics['dice'] > best_dice:
-                best_dice = val_metrics['dice']
-                # 更新最佳指標（包含 lesion-wise）
+            # 保存最佳模型（使用 Lesion F1 作為 model selection 指標）
+            if val_metrics['lesion_f1'] > best_lesion_f1:
+                best_lesion_f1 = val_metrics['lesion_f1']
+                # 更新最佳指標
                 self.best_metrics = {
                     'val_dice': val_metrics['dice'],
                     'val_iou': val_metrics['iou'],
@@ -1022,9 +943,10 @@ class UNetPPTrainer:
                     val_metrics
                 )
                 self._save_best_metrics()
+                logger.info(f"New best model saved! Lesion F1: {val_metrics['lesion_f1']:.4f}")
             
-            # Early Stopping
-            if self.early_stopping(val_metrics['dice']):
+            # Early Stopping (使用 Lesion F1)
+            if self.early_stopping(val_metrics['lesion_f1']):
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
             
@@ -1077,7 +999,7 @@ class UNetPPTrainer:
         # 保存最佳指標
         self._save_best_metrics()
         
-        logger.info(f"訓練完成！最佳 Dice: {best_dice:.4f} (Epoch {self.best_metrics['epoch']})")
+        logger.info(f"訓練完成！最佳 Lesion F1: {best_lesion_f1:.4f} (Epoch {self.best_metrics['epoch']})")
         
         return self.history
     
@@ -1101,32 +1023,3 @@ class UNetPPTrainer:
         }
         torch.save(checkpoint, path)
         logger.info(f"模型已保存: {path}")
-    
-    def load_checkpoint(self, path: str):
-        """載入檢查點"""
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        logger.info(f"模型已載入: {path}")
-        logger.info(f"Epoch: {checkpoint['epoch']}, Metrics: {checkpoint['metrics']}")
-        
-        return checkpoint
-
-
-if __name__ == "__main__":
-    # 測試訓練器
-    try:
-        from .config import get_default_config
-    except ImportError:
-        from train_unetpp.config import get_default_config
-    
-    config = get_default_config()
-    config.training.epochs = 2
-    config.training.batch_size = 2
-    
-    trainer = UNetPPTrainer(config)
-    
-    print(f"Trainer initialized")
-    print(f"Output dir: {trainer.output_dir}")

@@ -222,13 +222,19 @@ def custom_collate_fn(batch):
     # 支援 patient_id (LNDb) 或 case_id (MSD)
     id_key = 'patient_id' if 'patient_id' in batch[0] else 'case_id'
     
-    return {
+    result = {
         'image': torch.stack([b['image'] for b in batch]),
         'mask': torch.stack([b['mask'] for b in batch]),
         'patient_id': [b[id_key] for b in batch],  # 統一命名
         'slice_idx': [b['slice_idx'] for b in batch],
         'is_positive': [b['is_positive'] for b in batch]
     }
+    
+    # 新增 patch_idx（如果存在）
+    if 'patch_idx' in batch[0]:
+        result['patch_idx'] = [b['patch_idx'] for b in batch]
+    
+    return result
 
 
 if __name__ == "__main__":

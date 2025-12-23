@@ -17,7 +17,7 @@ class DataConfig:
     """資料相關配置"""
     # 資料路徑
     data_dir: str = "datasets/aLL_patients_data/LNDb"
-    output_dir: str = "segmentation/result"
+    output_dir: str = "result"
     
     # Spacing 設定
     target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # 各向同性 spacing (mm)
@@ -51,7 +51,7 @@ class DataConfig:
     
     # 快取
     cache_preprocessed: bool = True
-    cache_dir: str = "segmentation/cache/lndb_preprocessed"
+    cache_dir: str = "cache/lndb_preprocessed"
 
 
 @dataclass
@@ -87,7 +87,7 @@ class TrainingConfig:
     min_lr: float = 1e-6
     
     # 損失函數
-    loss_type: str = "bce_dice"  # "bce_dice" (CSEA-Net), "combined", "dice", "focal", "tversky"
+    loss_type: str = "bce_dice"  # "adaptive" (GT=0: FocalBCE, GT>0: BCE+Dice), "bce_dice", "combined"
     dice_weight: float = 0.5
     focal_weight: float = 0.3
     tversky_weight: float = 0.2
@@ -95,7 +95,7 @@ class TrainingConfig:
     tversky_beta: float = 0.3   # 控制 FP 權重
     
     # Early Stopping
-    early_stopping_patience: int = 20
+    early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.001
     
     # 資料增強
@@ -146,10 +146,8 @@ class Config:
     device: str = "cuda"
     
     def __post_init__(self):
-        """確保路徑存在"""
-        Path(self.data.output_dir).mkdir(parents=True, exist_ok=True)
-        if self.data.cache_preprocessed:
-            Path(self.data.cache_dir).mkdir(parents=True, exist_ok=True)
+        """初始化後處理（不自動創建目錄，由 get_default_config 處理）"""
+        pass
     
     def save(self, path: str):
         """保存配置到 JSON（包含完整訓練環境資訊）"""
