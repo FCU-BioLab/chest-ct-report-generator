@@ -95,7 +95,7 @@ class TrainingConfig:
     tversky_beta: float = 0.3   # 控制 FP 權重
     
     # Early Stopping
-    early_stopping_patience: int = 0
+    early_stopping_patience: int = 500
     early_stopping_min_delta: float = 0.001
     
     # 資料增強
