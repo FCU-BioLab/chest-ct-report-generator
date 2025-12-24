@@ -374,7 +374,7 @@ class UNetPPTrainer:
         self.criterion = get_loss_function(config)
         
         # 驗證損失函數（BCE+Dice 用於 val/test 評估）
-        self.val_criterion = BCEDiceLoss(dice_weight=0.5, bce_weight=1.0)
+        self.val_criterion = BCEDiceLoss(dice_weight=config.training.dice_weight, bce_weight=1.0)
         
         # 優化器
         self.optimizer = AdamW(
@@ -424,9 +424,6 @@ class UNetPPTrainer:
             'val_iou': [],
             'val_precision': [],
             'val_recall': [],
-            'val_lesion_f1': [],
-            'val_lesion_sensitivity': [],
-            'val_lesion_precision': [],
             'lr': []
         }
         
@@ -436,9 +433,6 @@ class UNetPPTrainer:
             'val_iou': 0.0,
             'val_precision': 0.0,
             'val_recall': 0.0,
-            'val_lesion_f1': 0.0,
-            'val_lesion_sensitivity': 0.0,
-            'val_lesion_precision': 0.0,
             'epoch': 0
         }
         
@@ -575,22 +569,14 @@ class UNetPPTrainer:
     @torch.no_grad()
     def validate(self, dataloader: DataLoader, epoch: int = None, save_samples: bool = True) -> Dict[str, float]:
         """
-        驗證（含 4-patch to slice stitch + 視覺化輸出）
-        
-        Val/Test 模式：每個 slice 返回 4 個 patches，這裡會：
-        1. 對 4 個 patches 分別 forward
-        2. 計算 patch-level loss
-        3. Stitch 回 full-slice prediction
-        4. 用 full-slice prediction vs full_mask 計算 metrics
+        驗證（patch-level 評估，與 train 相同格式）
         """
         self.model.eval()
         
         all_preds = []
         all_targets = []
-        all_full_images = []  # 用於視覺化的 full-slice 中間 channel
-        sample_patient_ids = []
-        
-        patch_size = self.config.data.patch_size
+        all_images = []
+        sample_info = []
         
         # 累積 val loss
         val_loss_sum = 0.0
@@ -598,122 +584,45 @@ class UNetPPTrainer:
         
         pbar = tqdm(dataloader, desc="Validating", leave=False)
         for batch in pbar:
-            # 新格式：images_4patch (B, 4, 3, ps, ps), positions, full_mask (B, 1, H, W)
-            images_4patch = batch['images_4patch']  # (B, 4, 3, ps, ps)
-            positions = batch['positions']           # list of 4 * [(y1, x1), ...]
-            full_masks = batch['full_mask']          # list of (1, H, W) tensors
-            full_shapes = batch['full_shape']        # tuple of (H, W) tensors
+            images = batch['image'].to(self.device)
+            masks = batch['mask'].to(self.device)
             
-            batch_size = images_4patch.shape[0]
+            if self.use_amp:
+                with autocast('cuda'):
+                    outputs = self.model(images)
+                    loss = self.val_criterion(outputs, masks)
+            else:
+                outputs = self.model(images)
+                loss = self.val_criterion(outputs, masks)
             
-            for b in range(batch_size):
-                # 取得該 slice 的 4 個 patches
-                patches = images_4patch[b]  # (4, 3, ps, ps)
-                pos = positions[b] if isinstance(positions[0], list) else [positions[i][b] for i in range(4)]
-                # full_masks 是 list of tensors（來自 val_collate_fn）
-                full_mask = full_masks[b] if isinstance(full_masks, list) else full_masks[b]
-                h, w = full_shapes[0][b].item(), full_shapes[1][b].item()
-                
-                # Forward 4 個 patches
-                patches_gpu = patches.to(self.device)  # (4, 3, ps, ps)
-                
-                if self.use_amp:
-                    with autocast('cuda'):
-                        outputs = self.model(patches_gpu)  # (4, 1, ps, ps)
-                else:
-                    outputs = self.model(patches_gpu)
-                
-                # === 計算 patch-level loss（用 full_mask 裁出對應 GT patch）===
-                # 確保 full_mask_t 維度是 (1,1,H,W)
-                full_mask_t = full_mask.to(self.device)
-                if full_mask_t.ndim == 2:  # (H,W)
-                    full_mask_t = full_mask_t[None, None, :, :]
-                elif full_mask_t.ndim == 3:  # (1,H,W) or (C,H,W)
-                    full_mask_t = full_mask_t[None, :, :, :]
-                elif full_mask_t.ndim == 4:  # (1,1,H,W) or (B,1,H,W)
-                    if full_mask_t.shape[0] != 1:
-                        full_mask_t = full_mask_t[:1]
-                # 現在 full_mask_t 是 (1,C,H,W)，取 channel 0 確保是 (1,1,H,W)
-                if full_mask_t.shape[1] != 1:
-                    full_mask_t = full_mask_t[:, :1, :, :]
-                
-                gt_patches = []
-                for (y1, x1) in pos:
-                    y1, x1 = int(y1), int(x1)
-                    y2, x2 = y1 + patch_size, x1 + patch_size
-                    
-                    gt_patch = torch.zeros((1, 1, patch_size, patch_size), device=self.device, dtype=full_mask_t.dtype)
-                    
-                    dst_y1 = max(0, -y1)
-                    dst_x1 = max(0, -x1)
-                    src_y1 = max(0, y1)
-                    src_x1 = max(0, x1)
-                    src_y2 = min(h, y2)
-                    src_x2 = min(w, x2)
-                    
-                    ph = src_y2 - src_y1
-                    pw = src_x2 - src_x1
-                    if ph > 0 and pw > 0:
-                        gt_patch[:, :, dst_y1:dst_y1+ph, dst_x1:dst_x1+pw] = full_mask_t[:, :, src_y1:src_y2, src_x1:src_x2]
-                    
-                    gt_patches.append(gt_patch)
-                
-                gt_patches = torch.cat(gt_patches, dim=0)  # (4, 1, ps, ps)
-                
-                # 計算 patch-level loss（使用 BCE+Dice，不用 AdaptiveLoss）
-                loss_patch = self.val_criterion(outputs, gt_patches)
-                val_loss_sum += float(loss_patch.item())
-                val_loss_n += 1
-                
-                # === Stitch 回 full-slice ===
-                preds_4patch = torch.sigmoid(outputs).cpu().numpy()  # (4, 1, ps, ps)
-                
-                full_pred = np.zeros((1, h, w), dtype=np.float32)
-                
-                for i, (y1, x1) in enumerate(pos):
-                    y1, x1 = int(y1), int(x1)
-                    y2, x2 = y1 + patch_size, x1 + patch_size
-                    
-                    src_y1 = max(0, -y1)
-                    src_x1 = max(0, -x1)
-                    dst_y1 = max(0, y1)
-                    dst_x1 = max(0, x1)
-                    dst_y2 = min(h, y2)
-                    dst_x2 = min(w, x2)
-                    
-                    ph = dst_y2 - dst_y1
-                    pw = dst_x2 - dst_x1
-                    
-                    if ph > 0 and pw > 0:
-                        full_pred[:, dst_y1:dst_y2, dst_x1:dst_x2] = np.maximum(
-                            full_pred[:, dst_y1:dst_y2, dst_x1:dst_x2],
-                            preds_4patch[i, :, src_y1:src_y1+ph, src_x1:src_x1+pw]
-                        )
-                
-                # 收集結果
-                all_preds.append(full_pred)
-                all_targets.append(full_mask.numpy() if hasattr(full_mask, 'numpy') else full_mask)
+            val_loss_sum += loss.item() * images.shape[0]
+            val_loss_n += images.shape[0]
+            
+            # 收集預測結果
+            preds = torch.sigmoid(outputs).cpu().numpy()
+            targets = masks.cpu().numpy()
+            imgs = images[:, 1, :, :].cpu().numpy()  # 取中間 channel
+            
+            for i in range(images.shape[0]):
+                all_preds.append(preds[i])
+                all_targets.append(targets[i])
+                all_images.append(imgs[i])
                 
                 # 支援 patient_id (LNDb) 或 case_id (MSD)
                 id_key = 'patient_id' if 'patient_id' in batch else 'case_id'
-                sample_patient_ids.append(batch[id_key][b])
-                
-                # 收集 full image 中間 channel 用於視覺化（從 batch 直接取）
-                full_img_mid = batch['full_image_mid'][b]
-                all_full_images.append(full_img_mid.numpy() if hasattr(full_img_mid, 'numpy') else full_img_mid)
+                sample_info.append({
+                    'id': batch[id_key][i] if isinstance(batch[id_key], list) else str(batch[id_key][i]),
+                    'slice_idx': batch['slice_idx'][i] if isinstance(batch['slice_idx'], list) else int(batch['slice_idx'][i])
+                })
+            
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         
         # === 計算 Metrics ===
         total_intersection = 0.0
         total_pred_sum = 0.0
         total_target_sum = 0.0
         total_union = 0.0
-        tp_count, fp_count, fn_count = 0, 0, 0
-        boundary_iou_sum = 0.0
-        boundary_iou_n = 0
-        
-        gt_nonempty = 0
-        pred_nonempty = 0
-        total_slices = len(all_preds)
+        total_patches = len(all_preds)
         
         for pred, target in zip(all_preds, all_targets):
             pred_binary = (pred > self.metrics_calc.threshold).astype(np.float32)
@@ -724,71 +633,26 @@ class UNetPPTrainer:
             total_pred_sum += pred_binary.sum()
             total_target_sum += target_binary.sum()
             total_union += pred_binary.sum() + target_binary.sum() - intersection
-            
-            # 統計
-            if target_binary.sum() > 0:
-                gt_nonempty += 1
-            if pred_binary.sum() > 0:
-                pred_nonempty += 1
-            
-            # Slice-level detection (簡化版 lesion-wise)
-            if target_binary.sum() > 0 and pred_binary.sum() > 0:
-                tp_count += 1
-            elif target_binary.sum() == 0 and pred_binary.sum() > 0:
-                fp_count += 1
-            elif target_binary.sum() > 0 and pred_binary.sum() == 0:
-                fn_count += 1
-            
-            # Boundary IoU（只對有 GT 的 slice 計算）
-            # 確保維度統一為 2D (H,W)
-            if target_binary.sum() > 0:
-                pred_2d = pred[0] if pred.ndim == 3 else pred
-                tar_2d = target_binary[0] if target_binary.ndim == 3 else target_binary
-                pred_2d_bin = (pred_2d > self.metrics_calc.threshold).astype(np.float32)
-                b_iou = self.metrics_calc.boundary_iou(
-                    pred_2d_bin[np.newaxis, np.newaxis, ...],
-                    tar_2d[np.newaxis, np.newaxis, ...],
-                    d=2
-                )
-                boundary_iou_sum += b_iou
-                boundary_iou_n += 1
         
-        # Global Dice
+        # Pixel-level Segmentation Metrics
         smooth = 1e-6
         dice = (2 * total_intersection + smooth) / (total_pred_sum + total_target_sum + smooth)
         iou = (total_intersection + smooth) / (total_union + smooth)
         precision = total_intersection / (total_pred_sum + smooth)
         recall = total_intersection / (total_target_sum + smooth)
         
-        # Lesion-wise F1 (slice-level)
-        lesion_precision = tp_count / (tp_count + fp_count + smooth)
-        lesion_recall = tp_count / (tp_count + fn_count + smooth)
-        lesion_f1 = 2 * lesion_precision * lesion_recall / (lesion_precision + lesion_recall + smooth)
-        
-        # Boundary IoU
-        boundary_iou = boundary_iou_sum / max(boundary_iou_n, 1)
-        
         metrics = {
             'loss': val_loss_sum / max(val_loss_n, 1),
             'dice': dice,
             'iou': iou,
-            'boundary_iou': boundary_iou,
             'precision': precision,
             'recall': recall,
-            'lesion_f1': lesion_f1,
-            'lesion_sensitivity': lesion_recall,
-            'lesion_precision': lesion_precision,
-            'tp_count': tp_count,
-            'fp_count': fp_count,
-            'fn_count': fn_count,
-            'gt_nonempty_slices': gt_nonempty,
-            'pred_nonempty_slices': pred_nonempty,
-            'total_slices': total_slices,
-            'avg_pred_area': float(total_pred_sum / total_slices) if total_slices > 0 else 0,
-            'avg_gt_area': float(total_target_sum / total_slices) if total_slices > 0 else 0
+            'total_patches': total_patches,
+            'avg_pred_area': float(total_pred_sum / total_patches) if total_patches > 0 else 0,
+            'avg_gt_area': float(total_target_sum / total_patches) if total_patches > 0 else 0
         }
         
-        # 保存視覺化樣本（使用 full-slice）
+        # 保存視覺化樣本
         if save_samples and epoch is not None and len(all_preds) > 0:
             # 選擇有 GT 的樣本
             positive_indices = [i for i, t in enumerate(all_targets) if t.sum() > 0]
@@ -797,18 +661,18 @@ class UNetPPTrainer:
             else:
                 selected = list(range(min(4, len(all_preds))))
             
-            self._save_validation_samples_fullslice(
-                [all_full_images[i] for i in selected],
+            self._save_validation_samples(
+                [all_images[i] for i in selected],
                 [all_targets[i] for i in selected],
                 [all_preds[i] for i in selected],
-                [sample_patient_ids[i] for i in selected],
+                [sample_info[i]['id'] for i in selected],
                 epoch
             )
         
         return metrics
     
-    def _save_validation_samples_fullslice(self, images, targets, preds, patient_ids, epoch):
-        """視覺化保存（使用相同尺寸）"""
+    def _save_validation_samples(self, images, targets, preds, patient_ids, epoch):
+        """視覺化保存"""
         import matplotlib.pyplot as plt
         
         vis_dir = self.output_dir / "validation_samples"
@@ -870,7 +734,7 @@ class UNetPPTrainer:
         Returns:
             訓練歷史
         """
-        best_lesion_f1 = 0.0
+        best_dice = 0.0
         first_batch_logged = False
         
         logger.info(f"開始訓練，共 {self.config.training.epochs} 個 epoch")
@@ -910,30 +774,24 @@ class UNetPPTrainer:
             # 取得 step 後的真實 LR
             current_lr = self.optimizer.param_groups[0]['lr']
             
-            # 記錄（包含 lesion-wise 指標）
+            # 記錄
             self.history['train_loss'].append(train_loss)
             self.history['val_loss'].append(val_metrics['loss'])
             self.history['val_dice'].append(val_metrics['dice'])
             self.history['val_iou'].append(val_metrics['iou'])
             self.history['val_precision'].append(val_metrics['precision'])
             self.history['val_recall'].append(val_metrics['recall'])
-            self.history['val_lesion_f1'].append(val_metrics['lesion_f1'])
-            self.history['val_lesion_sensitivity'].append(val_metrics['lesion_sensitivity'])
-            self.history['val_lesion_precision'].append(val_metrics['lesion_precision'])
             self.history['lr'].append(current_lr)
             
-            # 保存最佳模型（使用 Lesion F1 作為 model selection 指標）
-            if val_metrics['lesion_f1'] > best_lesion_f1:
-                best_lesion_f1 = val_metrics['lesion_f1']
+            # 保存最佳模型（使用 Dice 作為 model selection 指標）
+            if val_metrics['dice'] > best_dice:
+                best_dice = val_metrics['dice']
                 # 更新最佳指標
                 self.best_metrics = {
                     'val_dice': val_metrics['dice'],
                     'val_iou': val_metrics['iou'],
                     'val_precision': val_metrics['precision'],
                     'val_recall': val_metrics['recall'],
-                    'val_lesion_f1': val_metrics['lesion_f1'],
-                    'val_lesion_sensitivity': val_metrics['lesion_sensitivity'],
-                    'val_lesion_precision': val_metrics['lesion_precision'],
                     'val_loss': val_metrics['loss'],
                     'epoch': epoch + 1
                 }
@@ -943,44 +801,24 @@ class UNetPPTrainer:
                     val_metrics
                 )
                 self._save_best_metrics()
-                logger.info(f"New best model saved! Lesion F1: {val_metrics['lesion_f1']:.4f}")
+                logger.info(f"New best model saved! Dice: {val_metrics['dice']:.4f}")
             
-            # Early Stopping (使用 Lesion F1)
-            if self.early_stopping(val_metrics['lesion_f1']):
+            # Early Stopping (使用 Dice)
+            if self.early_stopping(val_metrics['dice']):
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
             
-            # 日誌（完整 debug 資訊）
+            # 日誌
             epoch_time = time.time() - epoch_start
             logger.info(
                 f"Epoch {epoch + 1}/{self.config.training.epochs} - "
                 f"Train Loss: {train_loss:.4f}, Val Loss: {val_metrics['loss']:.4f}, "
-                f"LR: {current_lr:.2e} (after step), Time: {epoch_time:.1f}s"
+                f"LR: {current_lr:.2e}, Time: {epoch_time:.1f}s"
             )
             logger.info(
-                f"  [Pixel] Dice: {val_metrics['dice']:.4f}, IoU: {val_metrics['iou']:.4f}, "
-                f"Boundary IoU: {val_metrics['boundary_iou']:.4f}, "
+                f"  Dice: {val_metrics['dice']:.4f}, IoU: {val_metrics['iou']:.4f}, "
                 f"Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}"
             )
-            logger.info(
-                f"  [Lesion] F1: {val_metrics['lesion_f1']:.4f}, "
-                f"Sensitivity: {val_metrics['lesion_sensitivity']:.4f}, "
-                f"Precision: {val_metrics['lesion_precision']:.4f}, "
-                f"TP: {val_metrics['tp_count']}, FP: {val_metrics['fp_count']}, FN: {val_metrics['fn_count']}"
-            )
-            logger.info(
-                f"  [Stats] GT非空: {val_metrics['gt_nonempty_slices']}/{val_metrics['total_slices']}, "
-                f"Pred非空: {val_metrics['pred_nonempty_slices']}/{val_metrics['total_slices']}, "
-                f"Avg GT area: {val_metrics['avg_gt_area']:.1f} px, "
-                f"Avg pred area: {val_metrics['avg_pred_area']:.1f} px"
-            )
-            # 顯示 4-patch 聚合統計（如果有）
-            if 'num_patches' in val_metrics:
-                logger.info(
-                    f"  [4-Patch] Patches: {val_metrics['num_patches']}, "
-                    f"Unique Slices: {val_metrics['num_slices_unique']}, "
-                    f"Ratio: {val_metrics['num_patches'] / val_metrics['num_slices_unique']:.1f}x"
-                )
             
             # 每 epoch 繪製訓練曲線
             self._plot_training_curves(epoch)
@@ -999,7 +837,7 @@ class UNetPPTrainer:
         # 保存最佳指標
         self._save_best_metrics()
         
-        logger.info(f"訓練完成！最佳 Lesion F1: {best_lesion_f1:.4f} (Epoch {self.best_metrics['epoch']})")
+        logger.info(f"訓練完成！最佳 Dice: {best_dice:.4f} (Epoch {self.best_metrics['epoch']})")
         
         return self.history
     

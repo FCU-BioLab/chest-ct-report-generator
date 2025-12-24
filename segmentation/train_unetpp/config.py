@@ -78,24 +78,24 @@ class TrainingConfig:
     
     # 優化器
     optimizer: str = "adamw"
-    learning_rate: float = 1e-4
-    weight_decay: float = 1e-5
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-6
     
     # 學習率調度
     scheduler: str = "cosine"  # "cosine", "step", "plateau"
     warmup_epochs: int = 5
-    min_lr: float = 1e-6
+    min_lr: float = 1e-5  # 提高最低 LR，避免下降太快
     
     # 損失函數
     loss_type: str = "bce_dice"  # "adaptive" (GT=0: FocalBCE, GT>0: BCE+Dice), "bce_dice", "combined"
-    dice_weight: float = 0.5
+    dice_weight: float = 0.7  # 增加 Dice 權重，改善 under-segmentation
     focal_weight: float = 0.3
     tversky_weight: float = 0.2
     tversky_alpha: float = 0.7  # 控制 FN 權重（提高 recall）
     tversky_beta: float = 0.3   # 控制 FP 權重
     
     # Early Stopping
-    early_stopping_patience: int = 500
+    early_stopping_patience: int = 20  # 恢復 early stopping
     early_stopping_min_delta: float = 0.001
     
     # 資料增強
@@ -118,7 +118,7 @@ class TrainingConfig:
 class InferenceConfig:
     """推論相關配置"""
     # 閾值
-    prediction_threshold: float = 0.5
+    prediction_threshold: float = 0.4  # 降低閾值，增加 Recall
     
     # 後處理
     use_postprocessing: bool = True
