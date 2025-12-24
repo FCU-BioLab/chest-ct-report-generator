@@ -24,7 +24,7 @@ from .losses import get_loss_function, BCEDiceLoss, AdaptiveLoss
 from .trainer import UNetPPTrainer, MetricsCalculator
 from .inference import Inferencer, load_model_for_inference, NoduleExtractor
 from .dataset import LNDbSliceDataset, get_patient_split, get_fold_split, val_collate_fn
-from .msd_dataset import MSDLungSliceDataset, get_msd_lung_cases, get_msd_train_val_split, msd_val_collate_fn
+from .msd_dataset import MSDLungSliceDataset, get_msd_lung_cases, get_msd_train_val_split
 from .preprocess import CTPreprocessor, preprocess_lndb_slices
 from .utils import setup_logging, set_seed, get_device, plot_training_history, custom_collate_fn
 from .patch_utils import compute_4patch_positions, extract_patch_with_lung_mask, stitch_4patches
@@ -57,7 +57,7 @@ __all__ = [
     'MSDLungSliceDataset',
     'get_msd_lung_cases',
     'get_msd_train_val_split',
-    'msd_val_collate_fn',
+
     # Patch Utils
     'compute_4patch_positions',
     'extract_patch_with_lung_mask',

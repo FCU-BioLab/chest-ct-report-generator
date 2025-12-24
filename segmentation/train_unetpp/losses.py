@@ -119,11 +119,12 @@ def get_loss_function(config) -> nn.Module:
         損失函數
     """
     loss_type = config.training.loss_type
+    dice_weight = config.training.dice_weight  # 從 config 讀取
     
     if loss_type == "adaptive":
-        return AdaptiveLoss()
+        return AdaptiveLoss(dice_weight=dice_weight)
     elif loss_type == "bce_dice":
-        return BCEDiceLoss(dice_weight=0.5, bce_weight=1.0)
+        return BCEDiceLoss(dice_weight=dice_weight, bce_weight=1.0)
     else:
         raise ValueError(f"未知的損失函數類型: {loss_type}。支援: 'adaptive', 'bce_dice'")
 

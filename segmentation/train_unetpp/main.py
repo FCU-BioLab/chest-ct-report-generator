@@ -360,7 +360,7 @@ def run_msd_training(config: Config, args, run_dir: Path):
     from train_unetpp.msd_dataset import (
         MSD_LUNG_DIR, MSD_CACHE_DIR,
         get_msd_lung_cases, get_msd_train_val_split,
-        MSDLungSliceDataset, msd_val_collate_fn
+        MSDLungSliceDataset
     )
     
     device = get_device(args.device)
@@ -401,9 +401,9 @@ def run_msd_training(config: Config, args, run_dir: Path):
     )
     
     val_loader = DataLoader(
-        val_dataset, batch_size=1, shuffle=False,
-        num_workers=actual_workers, pin_memory=False,
-        collate_fn=msd_val_collate_fn,
+        val_dataset, batch_size=config.training.batch_size, shuffle=False,
+        num_workers=actual_workers, pin_memory=True,
+        collate_fn=custom_collate_fn,
         persistent_workers=actual_workers > 0
     )
     
@@ -425,7 +425,8 @@ def run_msd_training(config: Config, args, run_dir: Path):
 
 def _run_msd_test_eval(trainer, test_ids, config, actual_workers, run_dir, device):
     """執行 MSD 測試評估"""
-    from train_unetpp.msd_dataset import MSD_CACHE_DIR, MSDLungSliceDataset, msd_val_collate_fn
+    from train_unetpp.msd_dataset import MSD_CACHE_DIR, MSDLungSliceDataset
+    from train_unetpp.utils import custom_collate_fn
     
     logger.info("=" * 50)
     logger.info(f"開始 Test 評估... ({len(test_ids)} 案例)")
@@ -436,9 +437,9 @@ def _run_msd_test_eval(trainer, test_ids, config, actual_workers, run_dir, devic
     )
     
     test_loader = DataLoader(
-        test_dataset, batch_size=1, shuffle=False,
-        num_workers=actual_workers, pin_memory=False,
-        collate_fn=msd_val_collate_fn,
+        test_dataset, batch_size=config.training.batch_size, shuffle=False,
+        num_workers=actual_workers, pin_memory=True,
+        collate_fn=custom_collate_fn,
         persistent_workers=actual_workers > 0
     )
     
@@ -493,8 +494,9 @@ def run_msd_test_only(config: Config, args, run_dir: Path):
     from train_unetpp.msd_dataset import (
         MSD_LUNG_DIR, MSD_CACHE_DIR,
         get_msd_lung_cases, get_msd_train_val_split,
-        MSDLungSliceDataset, msd_val_collate_fn
+        MSDLungSliceDataset
     )
+    from train_unetpp.utils import custom_collate_fn
     from tqdm import tqdm
     
     if not args.model_path:
@@ -526,9 +528,9 @@ def run_msd_test_only(config: Config, args, run_dir: Path):
     
     actual_workers = min(4, args.num_workers)
     test_loader = DataLoader(
-        test_dataset, batch_size=1, shuffle=False,
-        num_workers=actual_workers, pin_memory=False,
-        collate_fn=msd_val_collate_fn,
+        test_dataset, batch_size=config.training.batch_size, shuffle=False,
+        num_workers=actual_workers, pin_memory=True,
+        collate_fn=custom_collate_fn,
         persistent_workers=actual_workers > 0
     )
     

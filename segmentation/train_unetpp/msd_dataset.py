@@ -264,11 +264,27 @@ class MSDLungSliceDataset(Dataset):
         if transform is not None:
             self.transform = transform
         elif mode == "train":
+            # 強化資料增強以減少過擬合
             self.transform = A.Compose([
+                # 基本幾何變換
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
                 A.RandomRotate90(p=0.5),
-                A.GaussNoise(var_limit=(0.001, 0.01), p=0.3),
+                A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.15, rotate_limit=15, p=0.5),
+                
+                # 彈性變形（模擬解剖變異）
+                A.ElasticTransform(alpha=100, sigma=10, p=0.3),
+                A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
+                
+                # 強度變化
+                A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.3),
+                A.GaussNoise(var_limit=(0.001, 0.02), p=0.3),
+                
+                # Cutout（隨機遮擋）
+                A.CoarseDropout(max_holes=4, max_height=32, max_width=32, 
+                               min_holes=1, min_height=8, min_width=8, 
+                               fill_value=0, p=0.2),
+                
                 ToTensorV2()
             ])
         else:
@@ -315,32 +331,28 @@ class MSDLungSliceDataset(Dataset):
                 }
                 self.samples.append(slice_info)
                 
-                if self.mode == "train":
-                    # 載入 mask 判斷每個 patch 是否為正
-                    data = np.load(slice_info['slice_path'])
-                    mask = data['mask'].astype(np.float32)
-                    lung_mask = data['lung_mask'].astype(np.float32)
+                # 所有模式都建立 patch-level 索引
+                data = np.load(slice_info['slice_path'])
+                mask = data['mask'].astype(np.float32)
+                lung_mask = data['lung_mask'].astype(np.float32)
+                
+                patch_positions = compute_4patch_positions(lung_mask, self.patch_size)
+                
+                for patch_idx, ((py1, px1), (py2, px2)) in enumerate(patch_positions):
+                    py1_c, py2_c = max(0, py1), min(mask.shape[0], py2)
+                    px1_c, px2_c = max(0, px1), min(mask.shape[1], px2)
                     
-                    patch_positions = compute_4patch_positions(lung_mask, self.patch_size)
+                    patch_mask_area = mask[py1_c:py2_c, px1_c:px2_c].sum()
+                    is_patch_positive = patch_mask_area > 0
                     
-                    for patch_idx, ((py1, px1), (py2, px2)) in enumerate(patch_positions):
-                        py1_c, py2_c = max(0, py1), min(mask.shape[0], py2)
-                        px1_c, px2_c = max(0, px1), min(mask.shape[1], px2)
-                        
-                        patch_mask_area = mask[py1_c:py2_c, px1_c:px2_c].sum()
-                        is_patch_positive = patch_mask_area > 0
-                        
-                        self.patch_samples.append({
-                            **slice_info,
-                            'patch_idx': patch_idx,
-                            'is_patch_positive': is_patch_positive
-                        })
+                    self.patch_samples.append({
+                        **slice_info,
+                        'patch_idx': patch_idx,
+                        'is_patch_positive': is_patch_positive
+                    })
         
-        if self.mode == "train":
-            pos = sum(1 for s in self.patch_samples if s['is_patch_positive'])
-            logger.info(f"Patch-level 索引: {pos} 正 / {len(self.patch_samples) - pos} 負")
-        else:
-            logger.info(f"建立 {len(self.samples)} 個切片索引 ({self.mode})")
+        pos = sum(1 for s in self.patch_samples if s['is_patch_positive'])
+        logger.info(f"Patch-level 索引 ({self.mode}): {pos} 正 / {len(self.patch_samples) - pos} 負")
     
     def _oversample_patches(self):
         """Patch-level oversampling"""
@@ -398,90 +410,37 @@ class MSDLungSliceDataset(Dataset):
         return np.stack([prev_image, center_image, next_image], axis=0)
     
     def __len__(self):
-        return len(self.patch_samples) if self.mode == "train" else len(self.samples)
+        return len(self.patch_samples)
     
     def __getitem__(self, idx):
-        if self.mode == "train":
-            sample = self.patch_samples[idx]
-            case_dir = self.cache_dir / sample['case_id']
-            
-            image_2_5d = self._load_2_5d_slice(case_dir, sample['slice_idx'], sample['num_slices'])
-            center_data = np.load(sample['slice_path'])
-            mask = center_data['mask'].astype(np.float32)
-            lung_mask = center_data['lung_mask'].astype(np.float32)
-            
-            patch_positions = compute_4patch_positions(lung_mask, self.patch_size)
-            (py1, px1), (py2, px2) = patch_positions[sample['patch_idx']]
-            
-            image_patch, mask_patch, _ = extract_patch_with_lung_mask(
-                image_2_5d, mask, lung_mask, ((py1, px1), (py2, px2)), self.patch_size
-            )
-            
-            image_for_aug = np.transpose(image_patch, (1, 2, 0))
-            transformed = self.transform(image=image_for_aug, mask=mask_patch)
-            
-            mask_tensor = transformed['mask'].float()
-            if mask_tensor.dim() == 2:
-                mask_tensor = mask_tensor.unsqueeze(0)
-            
-            return {
-                'image': transformed['image'].float(),
-                'mask': mask_tensor,
-                'case_id': sample['case_id'],
-                'slice_idx': sample['slice_idx'],
-                'patch_idx': sample['patch_idx'],
-                'is_positive': sample['is_patch_positive']
-            }
+        """所有模式統一返回單一 patch（和 train 相同格式）"""
+        sample = self.patch_samples[idx]
+        case_dir = self.cache_dir / sample['case_id']
         
-        else:
-            sample = self.samples[idx]
-            case_dir = self.cache_dir / sample['case_id']
-            
-            image_2_5d = self._load_2_5d_slice(case_dir, sample['slice_idx'], sample['num_slices'])
-            center_data = np.load(sample['slice_path'])
-            mask = center_data['mask'].astype(np.float32)
-            lung_mask = center_data['lung_mask'].astype(np.float32)
-            
-            h, w = mask.shape
-            patch_positions = compute_4patch_positions(lung_mask, self.patch_size)
-            
-            image_patches = []
-            positions = []
-            
-            for (py1, px1), (py2, px2) in patch_positions:
-                image_patch, _, _ = extract_patch_with_lung_mask(
-                    image_2_5d, mask, lung_mask, ((py1, px1), (py2, px2)), self.patch_size
-                )
-                image_patches.append(torch.from_numpy(image_patch).float())
-                positions.append((py1, px1))
-            
-            full_mask = mask.copy()
-            full_mask[lung_mask == 0] = 0
-            
-            full_image_mid = image_2_5d[1].copy()
-            full_image_mid[lung_mask == 0] = 0
-            
-            return {
-                'images_4patch': torch.stack(image_patches, dim=0),
-                'positions': positions,
-                'full_mask': torch.from_numpy(full_mask).float().unsqueeze(0),
-                'full_image_mid': torch.from_numpy(full_image_mid).float(),
-                'full_shape': (h, w),
-                'case_id': sample['case_id'],
-                'slice_idx': sample['slice_idx'],
-                'is_positive': sample['is_positive']
-            }
-
-
-def msd_val_collate_fn(batch):
-    return {
-        'images_4patch': torch.stack([item['images_4patch'] for item in batch]),
-        'positions': [item['positions'] for item in batch],
-        'full_mask': [item['full_mask'] for item in batch],
-        'full_image_mid': [item['full_image_mid'] for item in batch],
-        'full_shape': (torch.tensor([item['full_shape'][0] for item in batch]),
-                       torch.tensor([item['full_shape'][1] for item in batch])),
-        'case_id': [item['case_id'] for item in batch],
-        'slice_idx': [item['slice_idx'] for item in batch],
-        'is_positive': [item['is_positive'] for item in batch]
-    }
+        image_2_5d = self._load_2_5d_slice(case_dir, sample['slice_idx'], sample['num_slices'])
+        center_data = np.load(sample['slice_path'])
+        mask = center_data['mask'].astype(np.float32)
+        lung_mask = center_data['lung_mask'].astype(np.float32)
+        
+        patch_positions = compute_4patch_positions(lung_mask, self.patch_size)
+        (py1, px1), (py2, px2) = patch_positions[sample['patch_idx']]
+        
+        image_patch, mask_patch, _ = extract_patch_with_lung_mask(
+            image_2_5d, mask, lung_mask, ((py1, px1), (py2, px2)), self.patch_size
+        )
+        
+        image_for_aug = np.transpose(image_patch, (1, 2, 0))
+        transformed = self.transform(image=image_for_aug, mask=mask_patch)
+        
+        mask_tensor = transformed['mask'].float()
+        if mask_tensor.dim() == 2:
+            mask_tensor = mask_tensor.unsqueeze(0)
+        
+        return {
+            'image': transformed['image'].float(),
+            'mask': mask_tensor,
+            'case_id': sample['case_id'],
+            'slice_idx': sample['slice_idx'],
+            'patch_idx': sample['patch_idx'],
+            'is_positive': sample['is_patch_positive']
+        }
