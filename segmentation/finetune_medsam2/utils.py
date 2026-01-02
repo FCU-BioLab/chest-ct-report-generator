@@ -17,6 +17,39 @@ import torch
 from scipy.ndimage import distance_transform_edt, binary_erosion
 
 
+# =============================================================================
+# 通用工具函數
+# =============================================================================
+
+def convert_to_serializable(obj):
+    """
+    將 NumPy 和 PyTorch 類型轉換為 JSON 可序列化的 Python 原生類型
+    
+    Args:
+        obj: 要轉換的物件（支援嵌套的 dict/list）
+        
+    Returns:
+        轉換後的 Python 原生物件
+    """
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.int64, np.int32, np.int16, np.int8)):
+        return int(obj)
+    elif isinstance(obj, (np.float64, np.float32, np.float16)):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().numpy().tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_to_serializable(item) for item in obj)
+    return obj
+
+
 def setup_logging(log_dir: str = "finetune_logs") -> logging.Logger:
     """
     設定日誌系統（支援多進程安全）
@@ -47,15 +80,15 @@ def setup_logging(log_dir: str = "finetune_logs") -> logging.Logger:
     log_path.mkdir(parents=True, exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"training_{timestamp}.log"  # ✅ 改名為 training_*.log
+    log_filename = f"training_{timestamp}.log"
     
-    logger = logging.getLogger(__name__)
+    # ✅ 使用 root logger 確保所有模組的 log 都寫入同一個檔案
+    root_logger = logging.getLogger()
     
-    # ✅ 修正：清空現有 handlers 避免重複
-    if logger.handlers:
-        logger.handlers.clear()
+    # 清空現有 handlers 避免重複
+    root_logger.handlers.clear()
     
-    logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     
     # 檔案 handler
@@ -65,17 +98,16 @@ def setup_logging(log_dir: str = "finetune_logs") -> logging.Logger:
     )
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    root_logger.addHandler(file_handler)
     
     # 終端 handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    root_logger.addHandler(console_handler)
     
-    logger.propagate = False
-    
-    return logger
+    # 返回 root logger 供呼叫者使用
+    return root_logger
 
 
 def suppress_noisy_logs() -> None:

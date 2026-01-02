@@ -355,33 +355,17 @@ class MSDLungSliceDataset(Dataset):
         logger.info(f"Patch-level 索引 ({self.mode}): {pos} 正 / {len(self.patch_samples) - pos} 負")
     
     def _oversample_patches(self):
-        """Patch-level oversampling"""
+        """只保留正樣本 patches（移除所有負樣本）"""
         positives = [s for s in self.patch_samples if s['is_patch_positive']]
-        negatives = [s for s in self.patch_samples if not s['is_patch_positive']]
         
         if not positives:
-            self.patch_samples = negatives
+            logger.warning(f"沒有正樣本 patches！保留所有 {len(self.patch_samples)} 個 patches")
             return
         
-        total = len(positives) + len(negatives)
-        target_pos = int(total * self.positive_ratio)
-        target_neg = total - target_pos
-        
-        random.shuffle(positives)
-        random.shuffle(negatives)
-        
-        if len(positives) < target_pos:
-            factor = target_pos // len(positives) + 1
-            positives = (positives * factor)[:target_pos]
-        else:
-            positives = positives[:target_pos]
-        
-        negatives = negatives[:target_neg]
-        
-        self.patch_samples = positives + negatives
+        self.patch_samples = positives
         random.shuffle(self.patch_samples)
         
-        logger.info(f"Oversampling: {len(positives)} 正 + {len(negatives)} 負 = {len(self.patch_samples)}")
+        logger.info(f"只保留正樣本: {len(self.patch_samples)} patches")
     
     def _load_2_5d_slice(self, case_dir: Path, slice_idx: int, num_slices: int):
         """

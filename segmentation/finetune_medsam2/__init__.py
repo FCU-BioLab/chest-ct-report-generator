@@ -15,7 +15,7 @@ MedSAM2 Fine-tuning Package
 __version__ = "1.0.0"
 __author__ = "MedSAM2 Fine-tuning Team"
 
-from .dataset import ChestTumorDataset, DataAugmentation
+from .dataset import LNDbDataset, DataAugmentation, CachedSliceDataset
 from .trainer import MedSAM2Trainer
 from .losses import DiceLoss, CombinedLoss, FocalLoss
 from .utils import (
@@ -26,11 +26,21 @@ from .utils import (
     EarlyStopping,
     custom_collate_fn
 )
+from .config import (
+    Config,
+    DataConfig,
+    ModelConfig,
+    TrainingConfig,
+    InferenceConfig,
+    get_default_config
+)
 
 __all__ = [
     # Dataset
-    'ChestTumorDataset',
+    'LNDbDataset',
+    'CachedSliceDataset',
     'DataAugmentation',
+    'classify_nodule_size',
     
     # Trainer
     'MedSAM2Trainer',

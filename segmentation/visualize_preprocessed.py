@@ -345,7 +345,8 @@ class SliceViewer:
 def main():
     parser = argparse.ArgumentParser(description='預處理切片檢視器')
     parser.add_argument('--cache_dir', type=str,
-                        default='C:/GitHub/chest-ct-report-generator/segmentation/cache/msd_lung_slices',
+                        # default='C:/GitHub/chest-ct-report-generator/segmentation/cache/msd_lung_slices',
+                        default='C:/GitHub/chest-ct-report-generator/segmentation/cache/lndb_slices',
                         help='切片快取目錄')
     parser.add_argument('--patient', type=str, default=None,
                         help='初始載入的病人 ID')

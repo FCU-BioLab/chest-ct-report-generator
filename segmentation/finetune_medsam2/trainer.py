@@ -21,7 +21,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 from .losses import CombinedLoss, EnhancedCombinedLoss, TverskyLoss, FocalLoss
-from .utils import compute_all_metrics, EarlyStopping, PatientMetricsTracker
+from .utils import compute_all_metrics, EarlyStopping, PatientMetricsTracker, convert_to_serializable
 
 
 class SegmentationVisualizer:
@@ -1125,6 +1125,121 @@ class MedSAM2Trainer:
         epoch_time = time.time() - start_time
         return avg_loss, epoch_time
     
+    def _save_first_epoch_samples(self, train_loader: DataLoader, val_loader: DataLoader):
+        """
+        保存第一個 epoch 的訓練和驗證樣本以供檢視
+        
+        輸出到 output_dir/first_epoch_samples/
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        sample_dir = self.output_dir / "first_epoch_samples"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.logger.info(f"📸 保存訓練樣本到: {sample_dir}")
+        
+        # 保存訓練樣本
+        try:
+            train_batch = next(iter(train_loader))
+            self._save_batch_samples(train_batch, sample_dir, prefix="train", max_samples=4)
+        except Exception as e:
+            self.logger.warning(f"無法保存訓練樣本: {e}")
+        
+        # 保存驗證樣本
+        try:
+            if len(val_loader) > 0:
+                val_batch = next(iter(val_loader))
+                self._save_batch_samples(val_batch, sample_dir, prefix="val", max_samples=4)
+        except Exception as e:
+            self.logger.warning(f"無法保存驗證樣本: {e}")
+        
+        self.logger.info(f"✅ 第一 epoch 樣本已保存")
+    
+    def _save_batch_samples(self, batch: dict, save_dir: Path, prefix: str, max_samples: int = 4):
+        """
+        保存 batch 中的樣本
+        
+        顯示：image, mask, bbox 位置
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        images = batch['image']  # [B, 3, H, W]
+        masks = batch['mask']    # [B, 1, H, W]
+        patient_ids = batch['patient_id']
+        bboxes = batch.get('bboxes', None)
+        
+        num_samples = min(max_samples, len(images))
+        
+        for i in range(num_samples):
+            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+            
+            # 取得資料
+            img = images[i].cpu().numpy()  # [3, H, W]
+            mask = masks[i].cpu().numpy()  # [1, H, W]
+            patient_id = str(patient_ids[i])
+            
+            # 中間通道 (2.5D 的 z 切片)
+            img_center = img[1] if img.shape[0] == 3 else img[0]
+            mask_2d = mask[0] if mask.ndim == 3 else mask
+            
+            # 1. 原始影像
+            axes[0].imshow(img_center, cmap='gray')
+            axes[0].set_title(f'{prefix.upper()} #{i}\n{patient_id}\nShape: {img.shape}')
+            axes[0].axis('off')
+            
+            # 2. Mask (GT)
+            axes[1].imshow(mask_2d, cmap='Reds', vmin=0, vmax=1)
+            mask_area = (mask_2d > 0.5).sum()
+            axes[1].set_title(f'Mask (GT)\nArea: {mask_area} px')
+            axes[1].axis('off')
+            
+            # 3. 3-channel 視覺化 (RGB)
+            if img.shape[0] == 3:
+                # 歸一化每個通道到 0-1
+                img_rgb = np.stack([
+                    (img[0] - img[0].min()) / (img[0].max() - img[0].min() + 1e-6),
+                    (img[1] - img[1].min()) / (img[1].max() - img[1].min() + 1e-6),
+                    (img[2] - img[2].min()) / (img[2].max() - img[2].min() + 1e-6),
+                ], axis=-1)
+                axes[2].imshow(img_rgb)
+                axes[2].set_title('3-Channel (Z-1, Z, Z+1)')
+            else:
+                axes[2].imshow(img_center, cmap='gray')
+                axes[2].set_title('Single Channel')
+            axes[2].axis('off')
+            
+            # 4. Overlay (影像 + Mask + BBox)
+            overlay = np.stack([img_center, img_center, img_center], axis=-1)
+            overlay = (overlay - overlay.min()) / (overlay.max() - overlay.min() + 1e-6)
+            
+            # 疊加 mask (紅色)
+            mask_overlay = np.zeros_like(overlay)
+            mask_overlay[:, :, 0] = (mask_2d > 0.5).astype(float) * 0.5
+            overlay = np.clip(overlay + mask_overlay, 0, 1)
+            
+            axes[3].imshow(overlay)
+            
+            # 畫 BBox
+            if bboxes is not None and len(bboxes[i]) > 0:
+                for bbox in bboxes[i]:
+                    if bbox.sum() > 0:
+                        x1, y1, x2, y2 = bbox.cpu().numpy()
+                        rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                             linewidth=2, edgecolor='lime', facecolor='none')
+                        axes[3].add_patch(rect)
+            
+            axes[3].set_title('Overlay + BBox')
+            axes[3].axis('off')
+            
+            plt.tight_layout()
+            save_path = save_dir / f"{prefix}_sample_{i}.png"
+            plt.savefig(save_path, dpi=100, bbox_inches='tight')
+            plt.close()
+    
     @torch.no_grad()
     def validate(
         self, 
@@ -1358,6 +1473,9 @@ class MedSAM2Trainer:
         self.logger.info(f"Val samples: {len(val_loader.dataset)}")
         self.logger.info(f"{'='*80}\n")
         
+        # 保存第一個 epoch 的樣本以供檢視
+        self._save_first_epoch_samples(train_loader, val_loader)
+        
         for epoch in range(epochs):
             self.current_epoch = epoch
             
@@ -1422,6 +1540,8 @@ class MedSAM2Trainer:
                 }
                 self.save_checkpoint('best_model.pth', is_best=True)
                 self.logger.info(f"✅ 保存最佳模型 (Dice: {val_metrics['dice']:.4f})")
+                # 保存最佳指標到 JSON
+                self._save_best_metrics()
             
             # 早停檢查
             if early_stopping(epoch, val_metrics['dice']):
@@ -1431,6 +1551,9 @@ class MedSAM2Trainer:
             # 定期保存 checkpoint
             if (epoch + 1) % 10 == 0:
                 self.save_checkpoint(f'checkpoint_epoch_{epoch+1}.pth')
+            
+            # 每個 epoch 更新訓練曲線
+            self.plot_training_curves()
         
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"✅ 訓練完成！")
@@ -1448,8 +1571,30 @@ class MedSAM2Trainer:
             self.logger.info(f"   Inference Time: {self.best_val_metrics['inference_time_ms']:.1f} ms/sample")
         self.logger.info(f"{'='*80}\n")
         
-        # 繪製訓練曲線
+        # 保存最終模型
+        self.save_checkpoint('final_model.pth')
+        self.logger.info(f"💾 最終模型已保存: {self.output_dir / 'final_model.pth'}")
+        
+        # 保存訓練歷史到 JSON
+        self._save_training_history()
+        
+        # 繪製最終訓練曲線
         self.plot_training_curves()
+    
+    def _save_best_metrics(self):
+        """保存最佳指標到 JSON 檔案"""
+        if not self.best_val_metrics:
+            return
+        metrics_path = self.output_dir / 'best_metrics.json'
+        with open(metrics_path, 'w', encoding='utf-8') as f:
+            json.dump(convert_to_serializable(self.best_val_metrics), f, indent=2, ensure_ascii=False)
+    
+    def _save_training_history(self):
+        """保存訓練歷史到 JSON 檔案"""
+        history_path = self.output_dir / 'history.json'
+        with open(history_path, 'w', encoding='utf-8') as f:
+            json.dump(convert_to_serializable(self.train_history), f, indent=2, ensure_ascii=False)
+        self.logger.info(f"💾 訓練歷史已保存: {history_path}")
     
     def save_checkpoint(self, filename: str, is_best: bool = False):
         """保存 checkpoint"""
@@ -2223,19 +2368,7 @@ Total Epochs: {len(epochs)}
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # 將 numpy 類型轉換為 Python 原生類型
-        def convert_to_serializable(obj):
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, (np.int64, np.int32)):
-                return int(obj)
-            elif isinstance(obj, (np.float64, np.float32)):
-                return float(obj)
-            elif isinstance(obj, dict):
-                return {k: convert_to_serializable(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_to_serializable(item) for item in obj]
-            return obj
+        # 使用 utils.convert_to_serializable 轉換 numpy 類型
         
         # 1. 保存完整結果（不含深層特徵向量以減小檔案大小）
         full_results_lite = self._create_lite_results(results)
@@ -2374,19 +2507,7 @@ Total Epochs: {len(epochs)}
         slices_dir = patient_dir / "slices"
         slices_dir.mkdir(parents=True, exist_ok=True)
         
-        # 將 numpy 類型轉換為 Python 原生類型
-        def convert_to_serializable(obj):
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, (np.int64, np.int32)):
-                return int(obj)
-            elif isinstance(obj, (np.float64, np.float32)):
-                return float(obj)
-            elif isinstance(obj, dict):
-                return {k: convert_to_serializable(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_to_serializable(item) for item in obj]
-            return obj
+        # 使用 utils.convert_to_serializable 轉換 numpy 類型
         
         # 1. 保存患者 metadata
         metadata = {
