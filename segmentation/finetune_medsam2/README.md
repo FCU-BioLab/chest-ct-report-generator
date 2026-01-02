@@ -31,7 +31,147 @@
 └──────────────────────────────────────────────────────┘
 ```
 
-## 🚀 快速開始
+## � 完整訓練流程 (Pipeline)
+
+### Stage 1: 資料預處理
+
+```
+原始 CT (MHD/NIfTI)
+        │
+        ▼
+┌─────────────────────────────────────┐
+│ 1. 載入 CT 影像                     │
+│    └─ load_mhd() / SimpleITK        │
+├─────────────────────────────────────┤
+│ 2. Spacing Resample                 │
+│    └─ 統一到 (1.0, 1.0, 1.0) mm     │
+├─────────────────────────────────────┤
+│ 3. HU Windowing (Lung Window)       │
+│    └─ Center=-400, Width=1200       │
+│    └─ 輸出範圍: [-1000, 200] HU     │
+│    └─ 歸一化到 [0, 1]               │
+├─────────────────────────────────────┤
+│ 4. 肺部遮罩 (Lungmask)              │
+│    └─ 3D U-Net 肺野分割             │
+├─────────────────────────────────────┤
+│ 5. 軟共識遮罩 (Soft Consensus)      │
+│    └─ 多位醫師標註平均              │
+├─────────────────────────────────────┤
+│ 6. 2D 切片輸出                      │
+│    └─ slice_{z}.npz                 │
+│    └─ 包含: image, mask, lung_mask  │
+└─────────────────────────────────────┘
+        │
+        ▼
+cache/{dataset}_slices/{patient}/slice_XXXX.npz
+```
+
+**預處理指令：**
+```bash
+# 預處理 LNDb 資料集
+python train_unetpp/preprocess.py --data_dir path/to/LNDb --output_dir cache/lndb_slices
+```
+
+### Stage 2: 資料載入與增強
+
+```
+slice_XXXX.npz
+        │
+        ▼
+┌─────────────────────────────────────┐
+│ CachedSliceDataset                  │
+├─────────────────────────────────────┤
+│ 1. 載入 NPZ (image, mask, lung)     │
+│ 2. 2.5D 格式 (Z-1, Z, Z+1)          │
+│ 3. Resize to 512x512                │
+│ 4. 轉為 RGB 格式 (3 channel)        │
+│ 5. 從 Mask 產生 BBox prompts        │
+├─────────────────────────────────────┤
+│ 資料增強 (可選):                    │
+│    └─ RandomFlip                    │
+│    └─ RandomRotation                │
+│    └─ RandomBrightness              │
+│    └─ ElasticDeformation (強增強)   │
+└─────────────────────────────────────┘
+        │
+        ▼
+   DataLoader (batch_size=16)
+```
+
+### Stage 3: 模型訓練
+
+```
+每個 Batch:
+┌─────────────────────────────────────┐
+│ Input: image [B, 3, 512, 512]       │
+│        bbox  [B, N, 4]              │
+│        mask  [B, 1, 512, 512]       │
+└─────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────┐
+│ Image Encoder (凍結)                │
+│    └─ image → image_embedding       │
+├─────────────────────────────────────┤
+│ Prompt Encoder                      │
+│    └─ bbox → sparse/dense embed     │
+├─────────────────────────────────────┤
+│ Mask Decoder                        │
+│    └─ embeddings → pred_mask        │
+├─────────────────────────────────────┤
+│ Loss: DiceLoss + BCEWithLogitsLoss  │
+├─────────────────────────────────────┤
+│ Optimizer: AdamW (lr=5e-6)          │
+│ Scheduler: Warmup + CosineAnnealing │
+└─────────────────────────────────────┘
+        │
+        ▼
+    Backpropagation (只更新 Decoder)
+```
+
+### Stage 4: 驗證與評估
+
+```
+每個 Epoch 結束:
+┌─────────────────────────────────────┐
+│ 評估指標:                           │
+│    ├─ Dice Score (主要)             │
+│    ├─ IoU / Jaccard                 │
+│    ├─ Precision / Recall            │
+│    ├─ Specificity / Accuracy        │
+│    └─ Hausdorff Distance 95         │
+├─────────────────────────────────────┤
+│ 輸出:                               │
+│    ├─ best_model.pth (Dice 最佳)    │
+│    ├─ training_curves.png           │
+│    ├─ history.json                  │
+│    └─ best_metrics.json             │
+└─────────────────────────────────────┘
+```
+
+### Stage 5: 測試與特徵提取
+
+```
+python main.py --test --resume best_model.pth
+        │
+        ▼
+┌─────────────────────────────────────┐
+│ 測試集評估                          │
+│    └─ 計算所有指標                  │
+├─────────────────────────────────────┤
+│ 特徵提取 (可選)                     │
+│    ├─ 形態學特徵                    │
+│    ├─ 強度統計特徵                  │
+│    ├─ 深層特徵向量                  │
+│    └─ 病灶分類 (惡性/良性)          │
+└─────────────────────────────────────┘
+        │
+        ▼
+   features/*.json (供 LLM 使用)
+```
+
+
+## �🚀 快速開始
 
 ### 使用快取資料訓練（推薦）
 
