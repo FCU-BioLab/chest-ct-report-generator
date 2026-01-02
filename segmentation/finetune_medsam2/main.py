@@ -94,8 +94,9 @@ if Path(config_dir).exists():
     initialize_config_dir(config_dir=config_dir, version_base="1.2")
 
 # 匯入自定義模組
-from finetune_medsam2.dataset import ChestTumorDataset, LNDbDataset, DataAugmentation
+from finetune_medsam2.dataset import LNDbDataset, DataAugmentation, CachedSliceDataset
 from finetune_medsam2.trainer import MedSAM2Trainer
+from finetune_medsam2.config import Config, get_default_config
 from finetune_medsam2.utils import (
     setup_logging, 
     suppress_noisy_logs, 
@@ -106,6 +107,8 @@ from finetune_medsam2.utils import (
     PatientMetricsTracker
 )
 
+# 載入預設配置
+_default_config = get_default_config()
 
 def main():
     """主函數"""
@@ -119,35 +122,46 @@ def main():
     
     # 資料參數
     parser.add_argument(
-        "--dataset_type",
+        "--use_cache",
+        action="store_true",
+        help="使用預處理的快取資料 (更快的訓練)"
+    )
+    parser.add_argument(
+        "--cache_dir",
         type=str,
-        default="lndb",
-        choices=["luna16", "lndb"],
-        help="資料集類型: luna16=LUNA16(需生成GT), lndb=LNDb(專家標註,推薦)"
+        default=_default_config.data.cache_dir,
+        help="快取資料目錄 (預設: cache)"
+    )
+    parser.add_argument(
+        "--cache_dataset_type",
+        type=str,
+        default=_default_config.data.cache_dataset_type,
+        choices=["lndb", "msd", "both"],
+        help="快取資料集類型: lndb/msd/both (預設: both)"
     )
     parser.add_argument(
         "--data_dir", 
         type=str, 
-        default="../datasets/aLL_patients_data/LNDb",
-        help="資料集目錄 (LNDb 或 LUNA16 root)"
+        default=_default_config.data.data_dir,
+        help="LNDb 資料集目錄 (非快取模式使用)"
     )
     parser.add_argument(
         "--rad_id",
         type=str,
-        default="consensus",
+        default=_default_config.data.rad_id,
         help="LNDb: 放射科醫師ID (1/2/3) 或 'consensus' 使用多數投票"
     )
     parser.add_argument(
         "--axis", 
         type=int, 
-        default=2, 
+        default=_default_config.data.axis, 
         choices=[0, 1, 2],
         help="切片軸向 (0=sagittal, 1=coronal, 2=axial)"
     )
     parser.add_argument(
         "--data_fraction", 
         type=float, 
-        default=1.0,
+        default=_default_config.data.data_fraction,
         help="使用資料集的比例 (0.0-1.0)，用於快速測試"
     )
     
@@ -155,37 +169,37 @@ def main():
     parser.add_argument(
         "--epochs", 
         type=int, 
-        default=50,
+        default=_default_config.training.epochs,
         help="訓練輪數"
     )
     parser.add_argument(
         "--batch_size", 
         type=int, 
-        default=32,
+        default=_default_config.training.batch_size,
         help="批次大小"
     )
     parser.add_argument(
         "--lr", 
         type=float, 
-        default=5e-6,
+        default=_default_config.training.learning_rate,
         help="學習率"
     )
     parser.add_argument(
         "--weight_decay", 
         type=float, 
-        default=1e-4,
+        default=_default_config.training.weight_decay,
         help="權重衰減"
     )
     parser.add_argument(
         "--early_stopping_patience", 
         type=int, 
-        default=50,
+        default=_default_config.training.early_stopping_patience,
         help="早停容忍 epoch 數"
     )
     parser.add_argument(
         "--accumulation_steps", 
         type=int, 
-        default=1,
+        default=_default_config.training.accumulation_steps,
         help="梯度累積步數（模擬更大的 batch size）"
     )
     
@@ -193,14 +207,13 @@ def main():
     parser.add_argument(
         "--config", 
         type=str, 
-        default="sam2.1_hiera_t512.yaml",
+        default=_default_config.model.config,
         help="MedSAM2 配置檔案"
     )
     parser.add_argument(
         "--checkpoint", 
         type=str, 
-        # default="MedSAM2/checkpoints/MedSAM2_latest.pt",
-        default="MedSAM2/checkpoints/MedSAM2_CTLesion.pt",
+        default=_default_config.model.checkpoint,
         help="預訓練模型路徑"
     )
     parser.add_argument(
@@ -227,7 +240,7 @@ def main():
     parser.add_argument(
         "--num_workers", 
         type=int, 
-        default=8,
+        default=_default_config.num_workers,
         help="DataLoader 工作進程數"
     )
     parser.add_argument(
@@ -276,27 +289,20 @@ def main():
     parser.add_argument(
         "--seed", 
         type=int, 
-        default=None,
-        help="隨機種子（留空則隨機切分，設定數字則可重現）"
-    )
-    parser.add_argument(
-        "--segmentation_method",
-        type=str,
-        default="adaptive",
-        choices=["sphere", "threshold", "region_growing", "watershed", "adaptive"],
-        help="GT 分割方法: sphere=球形遮罩, threshold=HU閾值, region_growing=區域生長, watershed=分水嶺, adaptive=自適應(預設,推薦)"
+        default=_default_config.seed,
+        help="隨機種子（預設 42，可重現實驗結果）"
     )
     parser.add_argument(
         "--loss_type",
         type=str,
-        default="combined",
+        default=_default_config.training.loss_type,
         choices=["combined", "enhanced", "tversky", "focal"],
         help="損失函數類型: combined=Dice+BCE(預設), enhanced=多損失組合(推薦高DSC), tversky=Tversky, focal=Focal"
     )
     parser.add_argument(
         "--warmup_epochs",
         type=int,
-        default=5,
+        default=_default_config.training.warmup_epochs,
         help="Warmup epoch 數，學習率從 10%% 線性增加到 100%% (預設 5)"
     )
     parser.add_argument(
@@ -307,7 +313,7 @@ def main():
     parser.add_argument(
         "--min_nodule_diameter",
         type=float,
-        default=0.0,
+        default=_default_config.inference.min_nodule_diameter,
         help="最小結節直徑 (mm)，過濾小於此值的結節以提高 Dice (建議 4-6mm)"
     )
     
@@ -425,15 +431,13 @@ def main():
         logger.info(f"💾 GPU 記憶體: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # 獲取所有患者 ID
-    data_dir = Path(args.data_dir)
-    if not data_dir.exists():
-        logger.error(f"❌ 資料目錄不存在: {data_dir}")
-        sys.exit(1)
-    
-    # 根據資料集類型獲取患者 ID
-    all_patients = []
-    
-    if args.dataset_type == "lndb":
+    # 如果使用快取模式，跳過 data_dir 驗證（在建立資料集時處理）
+    if not args.use_cache:
+        data_dir = Path(args.data_dir)
+        if not data_dir.exists():
+            logger.error(f"❌ 資料目錄不存在: {data_dir}")
+            sys.exit(1)
+        
         # ============================================
         # LNDb 資料集：讀取 trainNodules_gt.csv
         # ============================================
@@ -454,79 +458,58 @@ def main():
             mask_count = len(list(mask_dir.glob("*.mhd")))
             logger.info(f"🎭 專家分割遮罩: {mask_count} 個")
         
-    else:
-        # ============================================
-        # LUNA16 資料集：掃描 subset 資料夾
-        # ============================================
-        for i in range(10):
-            subset_dir = data_dir / f"subset{i}"
-            if subset_dir.exists():
-                for f in subset_dir.glob("*.mhd"):
-                    all_patients.append(f.stem)
+        # 依比例減少資料集
+        if args.data_fraction < 1.0:
+            import random
+            rng = random.Random(args.seed) if args.seed is not None else random.Random()
+            
+            num_samples = int(len(all_patients) * args.data_fraction)
+            num_samples = max(1, num_samples)
+            
+            all_patients = rng.sample(all_patients, num_samples)
+            all_patients = sorted(all_patients)
+            logger.info(f"✂️ 依比例 {args.data_fraction} 縮減資料集: 剩餘 {len(all_patients)} 個 CT")
         
-        # 去除重複並排序
-        all_patients = sorted(list(set(all_patients)))
-        logger.info(f"📊 找到 {len(all_patients)} 個患者 [LUNA16]")
-    
-    # 依比例減少資料集
-    if args.data_fraction < 1.0:
-        import random
-        # 使用相同的 seed 確保每次縮減的結果一致 (如果 seed 有設定)
-        rng = random.Random(args.seed) if args.seed is not None else random.Random()
+        if len(all_patients) == 0:
+            logger.error(f"❌ 資料目錄為空或未找到 .mhd 檔案: {data_dir}")
+            sys.exit(1)
         
-        num_samples = int(len(all_patients) * args.data_fraction)
-        # 確保至少有一個樣本
-        num_samples = max(1, num_samples)
-        
-        all_patients = rng.sample(all_patients, num_samples)
-        all_patients = sorted(all_patients)
-        logger.info(f"✂️ 依比例 {args.data_fraction} 縮減資料集: 剩餘 {len(all_patients)} 個 CT")
-    
-    if len(all_patients) == 0:
-        logger.error(f"❌ 資料目錄為空或未找到 .mhd 檔案: {data_dir}")
-        sys.exit(1)
-    
-    # 分割資料集
-    if args.split_file:
-        # ✅ 從既有的 split 檔案載入
-        logger.info(f"📂 從既有分割檔案載入: {args.split_file}")
-        if args.resume:
-            logger.info(f"   ↳ 自動繼承自 resume checkpoint 的訓練設定")
-        train_ids, val_ids, test_ids = load_dataset_split_info(args.split_file)
-        
-        # ✅ 修正：統一 ID 類型（LNDb 使用整數，LUNA16 使用字串）
-        if args.dataset_type == "lndb":
-            # LNDb: 確保所有 ID 都是整數
+        # 分割資料集
+        if args.split_file:
+            logger.info(f"📂 從既有分割檔案載入: {args.split_file}")
+            if args.resume:
+                logger.info(f"   ↳ 自動繼承自 resume checkpoint 的訓練設定")
+            train_ids, val_ids, test_ids = load_dataset_split_info(args.split_file)
+            
+            # LNDb 使用整數 ID
             train_ids = [int(pid) if isinstance(pid, str) else pid for pid in train_ids]
             val_ids = [int(pid) if isinstance(pid, str) else pid for pid in val_ids]
             test_ids = [int(pid) if isinstance(pid, str) else pid for pid in test_ids]
+            
+            # 驗證載入的 patient IDs 是否存在於資料集中
+            loaded_ids = set(train_ids + val_ids + test_ids)
+            available_ids = set(all_patients)
+            missing_ids = loaded_ids - available_ids
+            if missing_ids:
+                logger.warning(f"⚠️ 分割檔案中有 {len(missing_ids)} 個患者在資料集中不存在，將被忽略")
+                train_ids = [pid for pid in train_ids if pid in available_ids]
+                val_ids = [pid for pid in val_ids if pid in available_ids]
+                test_ids = [pid for pid in test_ids if pid in available_ids]
         else:
-            # LUNA16: 確保所有 ID 都是字串
-            train_ids = [str(pid) for pid in train_ids]
-            val_ids = [str(pid) for pid in val_ids]
-            test_ids = [str(pid) for pid in test_ids]
+            # 隨機分割資料集
+            train_ids, val_ids, test_ids = split_dataset(all_patients, seed=args.seed)
         
-        # 驗證載入的 patient IDs 是否存在於資料集中
-        loaded_ids = set(train_ids + val_ids + test_ids)
-        available_ids = set(all_patients)
-        missing_ids = loaded_ids - available_ids
-        if missing_ids:
-            logger.warning(f"⚠️ 分割檔案中有 {len(missing_ids)} 個患者在資料集中不存在，將被忽略")
-            train_ids = [pid for pid in train_ids if pid in available_ids]
-            val_ids = [pid for pid in val_ids if pid in available_ids]
-            test_ids = [pid for pid in test_ids if pid in available_ids]
+        logger.info(
+            f"📊 資料集分割: Train={len(train_ids)}, "
+            f"Val={len(val_ids)}, Test={len(test_ids)}"
+        )
+        
+        # 儲存分割資訊
+        if not args.eval_only and not args.test:
+            save_dataset_split_info(train_ids, val_ids, test_ids, args.output_dir)
     else:
-        # 隨機分割資料集
-        train_ids, val_ids, test_ids = split_dataset(all_patients, seed=args.seed)
-    
-    logger.info(
-        f"📊 資料集分割: Train={len(train_ids)}, "
-        f"Val={len(val_ids)}, Test={len(test_ids)}"
-    )
-    
-    # ✅ 修正：只在非 eval_only 和非 test 模式時才覆寫 split 檔案
-    if not args.eval_only and not args.test:
-        save_dataset_split_info(train_ids, val_ids, test_ids, args.output_dir)
+        # 快取模式：train_ids, val_ids, test_ids 將在建立資料集時設定
+        train_ids, val_ids, test_ids = [], [], []
     
     # 建立資料增強
     transform = None
@@ -555,9 +538,67 @@ def main():
     # 建立資料集
     logger.info("🔧 建立資料集...")
     
-    if args.dataset_type == "lndb":
+    if args.use_cache:
         # ============================================
-        # LNDb 資料集（專家標註，推薦）
+        # 快取資料集模式（預處理的 .npz 切片）
+        # ============================================
+        cache_path = Path(args.cache_dir)
+        if not cache_path.is_absolute():
+            cache_path = Path(__file__).parent.parent / args.cache_dir
+        
+        logger.info(f"📂 使用快取資料集: {cache_path}")
+        logger.info(f"📊 資料集類型: {args.cache_dataset_type}")
+        
+        # 取得所有可用的患者 ID
+        all_cache_patients = []
+        lndb_dir = cache_path / 'lndb_slices'
+        msd_dir = cache_path / 'msd_lung_slices'
+        
+        if args.cache_dataset_type in ('lndb', 'both') and lndb_dir.exists():
+            all_cache_patients.extend([d.name for d in lndb_dir.iterdir() if d.is_dir()])
+        if args.cache_dataset_type in ('msd', 'both') and msd_dir.exists():
+            all_cache_patients.extend([d.name for d in msd_dir.iterdir() if d.is_dir()])
+        
+        logger.info(f"📊 找到 {len(all_cache_patients)} 個患者")
+        
+        # 依比例減少資料集
+        if args.data_fraction < 1.0:
+            import random
+            rng = random.Random(args.seed) if args.seed is not None else random.Random()
+            num_samples = max(1, int(len(all_cache_patients) * args.data_fraction))
+            all_cache_patients = sorted(rng.sample(all_cache_patients, num_samples))
+            logger.info(f"✂️ 依比例 {args.data_fraction} 縮減: 剩餘 {len(all_cache_patients)} 個患者")
+        
+        # 分割資料集
+        train_ids, val_ids, test_ids = split_dataset(all_cache_patients, seed=args.seed)
+        logger.info(f"📊 資料集分割: Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
+        
+        # 建立資料集
+        train_dataset = CachedSliceDataset(
+            str(cache_path),
+            dataset_type=args.cache_dataset_type,
+            patient_ids=train_ids,
+            transform=transform
+        )
+        val_dataset = CachedSliceDataset(
+            str(cache_path),
+            dataset_type=args.cache_dataset_type,
+            patient_ids=val_ids,
+            transform=None
+        )
+        test_dataset = CachedSliceDataset(
+            str(cache_path),
+            dataset_type=args.cache_dataset_type,
+            patient_ids=test_ids,
+            transform=None
+        )
+        
+        # 儲存分割資訊
+        if not args.eval_only and not args.test:
+            save_dataset_split_info(train_ids, val_ids, test_ids, args.output_dir)
+    else:
+        # ============================================
+        # LNDb 原始資料集模式
         # ============================================
         if args.rad_id == "consensus":
             logger.info("🎭 使用多放射科醫師共識遮罩 (consensus mode)")
@@ -587,39 +628,6 @@ def main():
             axis=args.axis, 
             cache_data=args.cache_data,
             rad_id=args.rad_id,
-            min_nodule_diameter=args.min_nodule_diameter
-        )
-    else:
-        # ============================================
-        # LUNA16 資料集（需生成 GT）
-        # ============================================
-        logger.info(f"🎯 GT 分割方法: {args.segmentation_method}")
-        if args.min_nodule_diameter > 0:
-            logger.info(f"🔍 過濾小於 {args.min_nodule_diameter}mm 的結節")
-        
-        train_dataset = ChestTumorDataset(
-            args.data_dir, 
-            train_ids, 
-            axis=args.axis, 
-            transform=transform,
-            cache_data=args.cache_data,
-            segmentation_method=args.segmentation_method,
-            min_nodule_diameter=args.min_nodule_diameter
-        )
-        val_dataset = ChestTumorDataset(
-            args.data_dir, 
-            val_ids, 
-            axis=args.axis, 
-            cache_data=args.cache_data,
-            segmentation_method=args.segmentation_method,
-            min_nodule_diameter=args.min_nodule_diameter
-        )
-        test_dataset = ChestTumorDataset(
-            args.data_dir, 
-            test_ids, 
-            axis=args.axis, 
-            cache_data=args.cache_data,
-            segmentation_method=args.segmentation_method,
             min_nodule_diameter=args.min_nodule_diameter
         )
     

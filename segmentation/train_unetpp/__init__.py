@@ -23,7 +23,7 @@ from .model import get_model, create_unetpp_model, count_parameters
 from .losses import get_loss_function, BCEDiceLoss, AdaptiveLoss
 from .trainer import UNetPPTrainer, MetricsCalculator
 from .inference import Inferencer, load_model_for_inference, NoduleExtractor
-from .dataset import LNDbSliceDataset, get_patient_split, get_fold_split, val_collate_fn
+from .dataset import LNDbSliceDataset, get_patient_split, get_fold_split
 from .msd_dataset import MSDLungSliceDataset, get_msd_lung_cases, get_msd_train_val_split
 from .preprocess import CTPreprocessor, preprocess_lndb_slices
 from .utils import setup_logging, set_seed, get_device, plot_training_history, custom_collate_fn
@@ -52,7 +52,7 @@ __all__ = [
     'LNDbSliceDataset',
     'get_patient_split',
     'get_fold_split',
-    'val_collate_fn',
+
     # MSD Dataset
     'MSDLungSliceDataset',
     'get_msd_lung_cases',

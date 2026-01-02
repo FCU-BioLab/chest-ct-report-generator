@@ -158,7 +158,7 @@ def run_lndb_preprocess(config: Config):
 
 def run_lndb_training(config: Config, args, run_dir: Path):
     """執行 LNDb 訓練"""
-    from train_unetpp.dataset import LNDbSliceDataset, get_patient_split, get_fold_split, val_collate_fn
+    from train_unetpp.dataset import LNDbSliceDataset, get_patient_split, get_fold_split
     
     slice_cache_dir = str(Path(config.data.cache_dir).parent / "lndb_slices")
     
@@ -210,11 +210,11 @@ def run_lndb_training(config: Config, args, run_dir: Path):
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,  # 4-patch stitch
+        batch_size=config.training.batch_size,
         shuffle=False,
         num_workers=actual_workers,
-        pin_memory=False,
-        collate_fn=val_collate_fn,
+        pin_memory=True,
+        collate_fn=custom_collate_fn,
         persistent_workers=actual_workers > 0
     )
     
@@ -461,17 +461,8 @@ def _run_msd_test_eval(trainer, test_ids, config, actual_workers, run_dir, devic
         'metrics': {
             'dice': float(test_metrics['dice']),
             'iou': float(test_metrics['iou']),
-            'boundary_iou': float(test_metrics['boundary_iou']),
             'precision': float(test_metrics['precision']),
             'recall': float(test_metrics['recall']),
-            'lesion_f1': float(test_metrics['lesion_f1']),
-            'lesion_sensitivity': float(test_metrics['lesion_sensitivity']),
-            'lesion_precision': float(test_metrics['lesion_precision']),
-        },
-        'detection': {
-            'tp': int(test_metrics['tp_count']),
-            'fp': int(test_metrics['fp_count']),
-            'fn': int(test_metrics['fn_count']),
         }
     }
     
@@ -481,9 +472,8 @@ def _run_msd_test_eval(trainer, test_ids, config, actual_workers, run_dir, devic
     
     logger.info("=" * 50)
     logger.info("Test 評估結果:")
-    logger.info(f"  [Pixel] Dice: {test_metrics['dice']:.4f}, IoU: {test_metrics['iou']:.4f}")
-    logger.info(f"  [Lesion] F1: {test_metrics['lesion_f1']:.4f}")
-    logger.info(f"  [Detection] TP: {test_metrics['tp_count']}, FP: {test_metrics['fp_count']}, FN: {test_metrics['fn_count']}")
+    logger.info(f"  Dice: {test_metrics['dice']:.4f}, IoU: {test_metrics['iou']:.4f}")
+    logger.info(f"  Precision: {test_metrics['precision']:.4f}, Recall: {test_metrics['recall']:.4f}")
     logger.info(f"Test 結果已保存: {test_metrics_path}")
     logger.info("=" * 50)
 
@@ -543,73 +533,40 @@ def run_msd_test_only(config: Config, args, run_dir: Path):
     logger.info("=" * 50)
     logger.info("開始 Test 評估...")
     
-    # 手動測試並收集結果
-    patch_size = config.data.patch_size
+    # 使用 patch-level 評估（和 validate() 相同邏輯）
     all_preds, all_targets, all_images, all_case_ids = [], [], [], []
     
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Testing"):
-            images_4patch = batch['images_4patch']
-            positions = batch['positions']
-            full_masks = batch['full_mask']
-            full_shapes = batch['full_shape']
+            images = batch['image'].to(device)
+            masks = batch['mask']
             
-            for b in range(images_4patch.shape[0]):
-                patches = images_4patch[b].to(device)
-                pos = positions[b] if isinstance(positions[0], list) else [positions[i][b] for i in range(4)]
-                full_mask = full_masks[b]
-                h, w = full_shapes[0][b].item(), full_shapes[1][b].item()
-                
-                outputs = model(patches)
-                preds_4patch = torch.sigmoid(outputs).cpu().numpy()
-                
-                # Stitch
-                full_pred = np.zeros((1, h, w), dtype=np.float32)
-                for i, (y1, x1) in enumerate(pos):
-                    y1, x1 = int(y1), int(x1)
-                    y2, x2 = y1 + patch_size, x1 + patch_size
-                    
-                    src_y1, src_x1 = max(0, -y1), max(0, -x1)
-                    dst_y1, dst_x1 = max(0, y1), max(0, x1)
-                    dst_y2, dst_x2 = min(h, y2), min(w, x2)
-                    
-                    ph, pw = dst_y2 - dst_y1, dst_x2 - dst_x1
-                    
-                    if ph > 0 and pw > 0:
-                        full_pred[:, dst_y1:dst_y2, dst_x1:dst_x2] = np.maximum(
-                            full_pred[:, dst_y1:dst_y2, dst_x1:dst_x2],
-                            preds_4patch[i, :, src_y1:src_y1+ph, src_x1:src_x1+pw]
-                        )
-                
-                all_preds.append(full_pred)
-                all_targets.append(full_mask.numpy() if hasattr(full_mask, 'numpy') else full_mask)
-                all_images.append(batch['full_image_mid'][b].numpy() if hasattr(batch['full_image_mid'][b], 'numpy') else batch['full_image_mid'][b])
+            outputs = model(images)
+            preds = torch.sigmoid(outputs).cpu().numpy()
+            targets = masks.numpy()
+            imgs = images[:, 1, :, :].cpu().numpy()  # 取中間 channel
+            
+            for i in range(images.shape[0]):
+                all_preds.append(preds[i])
+                all_targets.append(targets[i])
+                all_images.append(imgs[i])
                 
                 id_key = 'patient_id' if 'patient_id' in batch else 'case_id'
-                all_case_ids.append(batch[id_key][b])
+                case_id = batch[id_key][i] if isinstance(batch[id_key], list) else str(batch[id_key][i])
+                all_case_ids.append(case_id)
     
     # 計算指標
     total_intersection, total_pred_sum, total_target_sum, total_union = 0, 0, 0, 0
-    tp_count, fp_count, fn_count = 0, 0, 0
     
     for pred, target in zip(all_preds, all_targets):
         pred_binary = (pred > 0.5).astype(np.float32)
         target_binary = (target > 0.5).astype(np.float32)
-        if target_binary.ndim == 2:
-            target_binary = target_binary[np.newaxis, ...]
         
         intersection = (pred_binary * target_binary).sum()
         total_intersection += intersection
         total_pred_sum += pred_binary.sum()
         total_target_sum += target_binary.sum()
         total_union += pred_binary.sum() + target_binary.sum() - intersection
-        
-        if target_binary.sum() > 0 and pred_binary.sum() > 0:
-            tp_count += 1
-        elif target_binary.sum() == 0 and pred_binary.sum() > 0:
-            fp_count += 1
-        elif target_binary.sum() > 0 and pred_binary.sum() == 0:
-            fn_count += 1
     
     smooth = 1e-6
     dice = (2 * total_intersection + smooth) / (total_pred_sum + total_target_sum + smooth)
@@ -617,24 +574,16 @@ def run_msd_test_only(config: Config, args, run_dir: Path):
     precision = total_intersection / (total_pred_sum + smooth)
     recall = total_intersection / (total_target_sum + smooth)
     
-    lesion_precision = tp_count / (tp_count + fp_count + smooth)
-    lesion_recall = tp_count / (tp_count + fn_count + smooth)
-    lesion_f1 = 2 * lesion_precision * lesion_recall / (lesion_precision + lesion_recall + smooth)
-    
     # 保存結果
     test_results = {
         'model_path': str(model_path),
         'test_ids': test_ids,
         'num_test_cases': len(test_ids),
-        'num_test_slices': len(test_dataset),
+        'num_test_patches': len(test_dataset),
         'metrics': {
             'dice': float(dice), 'iou': float(iou),
             'precision': float(precision), 'recall': float(recall),
-            'lesion_f1': float(lesion_f1),
-            'lesion_sensitivity': float(lesion_recall),
-            'lesion_precision': float(lesion_precision),
-        },
-        'detection': {'tp': tp_count, 'fp': fp_count, 'fn': fn_count}
+        }
     }
     
     test_metrics_path = run_dir / "test_metrics.json"
@@ -687,10 +636,8 @@ def run_msd_test_only(config: Config, args, run_dir: Path):
     
     logger.info("=" * 50)
     logger.info("Test 評估結果:")
-    logger.info(f"  [Pixel] Dice: {dice:.4f}, IoU: {iou:.4f}")
-    logger.info(f"  [Pixel] Precision: {precision:.4f}, Recall: {recall:.4f}")
-    logger.info(f"  [Lesion] F1: {lesion_f1:.4f}")
-    logger.info(f"  [Detection] TP: {tp_count}, FP: {fp_count}, FN: {fn_count}")
+    logger.info(f"  Dice: {dice:.4f}, IoU: {iou:.4f}")
+    logger.info(f"  Precision: {precision:.4f}, Recall: {recall:.4f}")
     logger.info(f"結果已保存: {test_metrics_path}")
     logger.info("=" * 50)
 
