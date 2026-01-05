@@ -19,30 +19,29 @@ MedSAM2 Fine-tuning for Chest Tumor Segmentation
 
 使用範例:
     # ==========================================
-    # LNDb 資料集訓練（推薦，專家標註）
+    # 快取資料集訓練（推薦）
     # ==========================================
     
-    # 基本訓練（使用多放射科醫師共識遮罩）
-    python finetune_medsam2/main.py --dataset_type lndb --epochs 100
+    # 基本訓練（使用 LNDb 快取資料）
+    python finetune_medsam2/main.py --cache_dataset_type lndb --epochs 100
+    
+    # 使用 MSD Lung 快取資料
+    python finetune_medsam2/main.py --cache_dataset_type msd --epochs 100
+    
+    # 使用兩個資料集（LNDb + MSD）
+    python finetune_medsam2/main.py --cache_dataset_type both --epochs 100
     
     # 啟用資料增強
-    python finetune_medsam2/main.py --dataset_type lndb --augmentation --epochs 100
-    
-    # 使用單一放射科醫師標註
-    python finetune_medsam2/main.py --dataset_type lndb --rad_id 1 --epochs 100
+    python finetune_medsam2/main.py --cache_dataset_type lndb --augmentation --epochs 100
     
     # 過濾小結節 + 強資料增強
-    python finetune_medsam2/main.py --dataset_type lndb --min_nodule_diameter 4 --strong_augmentation --epochs 150
+    python finetune_medsam2/main.py --cache_dataset_type lndb --min_nodule_diameter 4 --strong_augmentation --epochs 150
     
-    # ==========================================
-    # LUNA16 資料集訓練（需生成 GT）
-    # ==========================================
+    # 使用增強損失函數（推薦用於高 DSC）
+    python finetune_medsam2/main.py --cache_dataset_type lndb --loss_type enhanced --epochs 100
     
-    # 基本訓練
-    python finetune_medsam2/main.py --dataset_type luna16 --data_dir ../datasets/aLL_patients_data --epochs 100
-    
-    # 過濾小結節訓練（推薦，提高 Dice）
-    python finetune_medsam2/main.py --dataset_type luna16 --min_nodule_diameter 6 --epochs 200
+    # 使用 MedSAM2 原生損失函數（與 MedSAM2 訓練一致）
+    python finetune_medsam2/main.py --cache_dataset_type lndb --loss_type native --epochs 100
     
     # ==========================================
     # 通用選項
@@ -59,6 +58,9 @@ MedSAM2 Fine-tuning for Chest Tumor Segmentation
     
     # 快速測試（使用 10% 資料）
     python finetune_medsam2/main.py --data_fraction 0.1 --epochs 5
+    
+    # 禁用 2.5D 模式（使用傳統 2D）
+    python finetune_medsam2/main.py --no_2_5d --epochs 100
 """
 
 import sys
@@ -117,15 +119,10 @@ def main():
     
     # 命令列參數解析
     parser = argparse.ArgumentParser(
-        description="Fine-tune MedSAM2 for Chest Tumor Segmentation"
+        description="Fine-tune MedSAM2 for Chest Tumor Segmentation (Cache-Only Mode)"
     )
     
-    # 資料參數
-    parser.add_argument(
-        "--use_cache",
-        action="store_true",
-        help="使用預處理的快取資料 (更快的訓練)"
-    )
+    # 資料參數（僅快取模式）
     parser.add_argument(
         "--cache_dir",
         type=str,
@@ -138,25 +135,6 @@ def main():
         default=_default_config.data.cache_dataset_type,
         choices=["lndb", "msd", "both"],
         help="快取資料集類型: lndb/msd/both (預設: both)"
-    )
-    parser.add_argument(
-        "--data_dir", 
-        type=str, 
-        default=_default_config.data.data_dir,
-        help="LNDb 資料集目錄 (非快取模式使用)"
-    )
-    parser.add_argument(
-        "--rad_id",
-        type=str,
-        default=_default_config.data.rad_id,
-        help="LNDb: 放射科醫師ID (1/2/3) 或 'consensus' 使用多數投票"
-    )
-    parser.add_argument(
-        "--axis", 
-        type=int, 
-        default=_default_config.data.axis, 
-        choices=[0, 1, 2],
-        help="切片軸向 (0=sagittal, 1=coronal, 2=axial)"
     )
     parser.add_argument(
         "--data_fraction", 
@@ -296,8 +274,8 @@ def main():
         "--loss_type",
         type=str,
         default=_default_config.training.loss_type,
-        choices=["combined", "enhanced", "tversky", "focal"],
-        help="損失函數類型: combined=Dice+BCE(預設), enhanced=多損失組合(推薦高DSC), tversky=Tversky, focal=Focal"
+        choices=["combined", "enhanced", "native", "tversky", "focal"],
+        help="損失函數類型: combined=Dice+BCE(預設), enhanced=多損失組合(推薦高DSC), native=MedSAM2原生(Dice+Focal), tversky=Tversky, focal=Focal"
     )
     parser.add_argument(
         "--warmup_epochs",
@@ -315,6 +293,18 @@ def main():
         type=float,
         default=_default_config.inference.min_nodule_diameter,
         help="最小結節直徑 (mm)，過濾小於此值的結節以提高 Dice (建議 4-6mm)"
+    )
+    parser.add_argument(
+        "--use_2_5d",
+        action="store_true",
+        default=True,
+        help="使用 2.5D 輸入 (Z-1, Z, Z+1)，提升上下文資訊和分割效果 (預設啟用)"
+    )
+    parser.add_argument(
+        "--no_2_5d",
+        action="store_false",
+        dest="use_2_5d",
+        help="禁用 2.5D 模式，使用傳統 2D 輸入（三個通道重複同一切片）"
     )
     
     args = parser.parse_args()
@@ -430,87 +420,6 @@ def main():
         logger.info(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
         logger.info(f"💾 GPU 記憶體: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
-    # 獲取所有患者 ID
-    # 如果使用快取模式，跳過 data_dir 驗證（在建立資料集時處理）
-    if not args.use_cache:
-        data_dir = Path(args.data_dir)
-        if not data_dir.exists():
-            logger.error(f"❌ 資料目錄不存在: {data_dir}")
-            sys.exit(1)
-        
-        # ============================================
-        # LNDb 資料集：讀取 trainNodules_gt.csv
-        # ============================================
-        import pandas as pd
-        gt_csv = data_dir / "trainset_csv" / "trainNodules_gt.csv"
-        if not gt_csv.exists():
-            logger.error(f"❌ LNDb GT 檔案不存在: {gt_csv}")
-            sys.exit(1)
-        
-        df = pd.read_csv(gt_csv)
-        # LNDbID 是整數
-        all_patients = sorted(df['LNDbID'].unique().tolist())
-        logger.info(f"📊 找到 {len(all_patients)} 個 CT ({len(df)} 個結節標註) [LNDb]")
-        
-        # 檢查 mask 資料夾
-        mask_dir = data_dir / "masks" / "masks"
-        if mask_dir.exists():
-            mask_count = len(list(mask_dir.glob("*.mhd")))
-            logger.info(f"🎭 專家分割遮罩: {mask_count} 個")
-        
-        # 依比例減少資料集
-        if args.data_fraction < 1.0:
-            import random
-            rng = random.Random(args.seed) if args.seed is not None else random.Random()
-            
-            num_samples = int(len(all_patients) * args.data_fraction)
-            num_samples = max(1, num_samples)
-            
-            all_patients = rng.sample(all_patients, num_samples)
-            all_patients = sorted(all_patients)
-            logger.info(f"✂️ 依比例 {args.data_fraction} 縮減資料集: 剩餘 {len(all_patients)} 個 CT")
-        
-        if len(all_patients) == 0:
-            logger.error(f"❌ 資料目錄為空或未找到 .mhd 檔案: {data_dir}")
-            sys.exit(1)
-        
-        # 分割資料集
-        if args.split_file:
-            logger.info(f"📂 從既有分割檔案載入: {args.split_file}")
-            if args.resume:
-                logger.info(f"   ↳ 自動繼承自 resume checkpoint 的訓練設定")
-            train_ids, val_ids, test_ids = load_dataset_split_info(args.split_file)
-            
-            # LNDb 使用整數 ID
-            train_ids = [int(pid) if isinstance(pid, str) else pid for pid in train_ids]
-            val_ids = [int(pid) if isinstance(pid, str) else pid for pid in val_ids]
-            test_ids = [int(pid) if isinstance(pid, str) else pid for pid in test_ids]
-            
-            # 驗證載入的 patient IDs 是否存在於資料集中
-            loaded_ids = set(train_ids + val_ids + test_ids)
-            available_ids = set(all_patients)
-            missing_ids = loaded_ids - available_ids
-            if missing_ids:
-                logger.warning(f"⚠️ 分割檔案中有 {len(missing_ids)} 個患者在資料集中不存在，將被忽略")
-                train_ids = [pid for pid in train_ids if pid in available_ids]
-                val_ids = [pid for pid in val_ids if pid in available_ids]
-                test_ids = [pid for pid in test_ids if pid in available_ids]
-        else:
-            # 隨機分割資料集
-            train_ids, val_ids, test_ids = split_dataset(all_patients, seed=args.seed)
-        
-        logger.info(
-            f"📊 資料集分割: Train={len(train_ids)}, "
-            f"Val={len(val_ids)}, Test={len(test_ids)}"
-        )
-        
-        # 儲存分割資訊
-        if not args.eval_only and not args.test:
-            save_dataset_split_info(train_ids, val_ids, test_ids, args.output_dir)
-    else:
-        # 快取模式：train_ids, val_ids, test_ids 將在建立資料集時設定
-        train_ids, val_ids, test_ids = [], [], []
-    
     # 建立資料增強
     transform = None
     if args.augmentation or args.strong_augmentation:
@@ -535,101 +444,81 @@ def main():
             )
             logger.info("🔄 已啟用基本資料增強")
     
-    # 建立資料集
+    # 建立資料集（僅快取模式）
     logger.info("🔧 建立資料集...")
     
-    if args.use_cache:
-        # ============================================
-        # 快取資料集模式（預處理的 .npz 切片）
-        # ============================================
-        cache_path = Path(args.cache_dir)
-        if not cache_path.is_absolute():
-            cache_path = Path(__file__).parent.parent / args.cache_dir
-        
-        logger.info(f"📂 使用快取資料集: {cache_path}")
-        logger.info(f"📊 資料集類型: {args.cache_dataset_type}")
-        
-        # 取得所有可用的患者 ID
-        all_cache_patients = []
-        lndb_dir = cache_path / 'lndb_slices'
-        msd_dir = cache_path / 'msd_lung_slices'
-        
-        if args.cache_dataset_type in ('lndb', 'both') and lndb_dir.exists():
-            all_cache_patients.extend([d.name for d in lndb_dir.iterdir() if d.is_dir()])
-        if args.cache_dataset_type in ('msd', 'both') and msd_dir.exists():
-            all_cache_patients.extend([d.name for d in msd_dir.iterdir() if d.is_dir()])
-        
-        logger.info(f"📊 找到 {len(all_cache_patients)} 個患者")
-        
-        # 依比例減少資料集
-        if args.data_fraction < 1.0:
-            import random
-            rng = random.Random(args.seed) if args.seed is not None else random.Random()
-            num_samples = max(1, int(len(all_cache_patients) * args.data_fraction))
-            all_cache_patients = sorted(rng.sample(all_cache_patients, num_samples))
-            logger.info(f"✂️ 依比例 {args.data_fraction} 縮減: 剩餘 {len(all_cache_patients)} 個患者")
-        
-        # 分割資料集
-        train_ids, val_ids, test_ids = split_dataset(all_cache_patients, seed=args.seed)
-        logger.info(f"📊 資料集分割: Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
-        
-        # 建立資料集
-        train_dataset = CachedSliceDataset(
-            str(cache_path),
-            dataset_type=args.cache_dataset_type,
-            patient_ids=train_ids,
-            transform=transform
-        )
-        val_dataset = CachedSliceDataset(
-            str(cache_path),
-            dataset_type=args.cache_dataset_type,
-            patient_ids=val_ids,
-            transform=None
-        )
-        test_dataset = CachedSliceDataset(
-            str(cache_path),
-            dataset_type=args.cache_dataset_type,
-            patient_ids=test_ids,
-            transform=None
-        )
-        
-        # 儲存分割資訊
-        if not args.eval_only and not args.test:
-            save_dataset_split_info(train_ids, val_ids, test_ids, args.output_dir)
-    else:
-        # ============================================
-        # LNDb 原始資料集模式
-        # ============================================
-        if args.rad_id == "consensus":
-            logger.info("🎭 使用多放射科醫師共識遮罩 (consensus mode)")
-        else:
-            logger.info(f"🎭 使用單一放射科醫師遮罩 (RadID={args.rad_id})")
-        
-        train_dataset = LNDbDataset(
-            args.data_dir, 
-            train_ids, 
-            axis=args.axis, 
-            transform=transform,
-            cache_data=args.cache_data,
-            rad_id=args.rad_id,
-            min_nodule_diameter=args.min_nodule_diameter
-        )
-        val_dataset = LNDbDataset(
-            args.data_dir, 
-            val_ids, 
-            axis=args.axis, 
-            cache_data=args.cache_data,
-            rad_id=args.rad_id,
-            min_nodule_diameter=args.min_nodule_diameter
-        )
-        test_dataset = LNDbDataset(
-            args.data_dir, 
-            test_ids, 
-            axis=args.axis, 
-            cache_data=args.cache_data,
-            rad_id=args.rad_id,
-            min_nodule_diameter=args.min_nodule_diameter
-        )
+    # ============================================
+    # 快取資料集模式（預處理的 .npz 切片）
+    # ============================================
+    cache_path = Path(args.cache_dir)
+    if not cache_path.is_absolute():
+        cache_path = Path(__file__).parent.parent / args.cache_dir
+    
+    if not cache_path.exists():
+        logger.error(f"❌ 快取目錄不存在: {cache_path}")
+        logger.error(f"請先執行預處理腳本生成快取資料")
+        sys.exit(1)
+    
+    logger.info(f"📂 使用快取資料集: {cache_path}")
+    logger.info(f"📊 資料集類型: {args.cache_dataset_type}")
+    
+    # 取得所有可用的患者 ID
+    all_cache_patients = []
+    lndb_dir = cache_path / 'lndb_slices'
+    msd_dir = cache_path / 'msd_lung_slices'
+    
+    if args.cache_dataset_type in ('lndb', 'both') and lndb_dir.exists():
+        all_cache_patients.extend([d.name for d in lndb_dir.iterdir() if d.is_dir()])
+    if args.cache_dataset_type in ('msd', 'both') and msd_dir.exists():
+        all_cache_patients.extend([d.name for d in msd_dir.iterdir() if d.is_dir()])
+    
+    if len(all_cache_patients) == 0:
+        logger.error(f"❌ 快取目錄中沒有找到患者資料")
+        logger.error(f"   LNDb 目錄: {lndb_dir} (存在: {lndb_dir.exists()})")
+        logger.error(f"   MSD 目錄: {msd_dir} (存在: {msd_dir.exists()})")
+        logger.error(f"請先執行預處理腳本生成快取資料")
+        sys.exit(1)
+    
+    logger.info(f"📊 找到 {len(all_cache_patients)} 個患者")
+    
+    # 依比例減少資料集
+    if args.data_fraction < 1.0:
+        import random
+        rng = random.Random(args.seed) if args.seed is not None else random.Random()
+        num_samples = max(1, int(len(all_cache_patients) * args.data_fraction))
+        all_cache_patients = sorted(rng.sample(all_cache_patients, num_samples))
+        logger.info(f"✂️ 依比例 {args.data_fraction} 縮減: 剩餘 {len(all_cache_patients)} 個患者")
+    
+    # 分割資料集
+    train_ids, val_ids, test_ids = split_dataset(all_cache_patients, seed=args.seed)
+    logger.info(f"📊 資料集分割: Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
+    
+    # 建立資料集
+    train_dataset = CachedSliceDataset(
+        str(cache_path),
+        dataset_type=args.cache_dataset_type,
+        patient_ids=train_ids,
+        transform=transform,
+        use_2_5d=getattr(args, 'use_2_5d', True)  # ✅ 2.5D 模式
+    )
+    val_dataset = CachedSliceDataset(
+        str(cache_path),
+        dataset_type=args.cache_dataset_type,
+        patient_ids=val_ids,
+        transform=None,
+        use_2_5d=getattr(args, 'use_2_5d', True)  # ✅ 2.5D 模式
+    )
+    test_dataset = CachedSliceDataset(
+        str(cache_path),
+        dataset_type=args.cache_dataset_type,
+        patient_ids=test_ids,
+        transform=None,
+        use_2_5d=getattr(args, 'use_2_5d', True)  # ✅ 2.5D 模式
+    )
+    
+    # 儲存分割資訊
+    if not args.eval_only and not args.test:
+        save_dataset_split_info(train_ids, val_ids, test_ids, args.output_dir)
     
     # ✅ 輸出資料集過濾統計摘要
     logger.info("")
@@ -713,12 +602,17 @@ def main():
         logger.info(f"✅ 已更新 dataset_split.json 為過濾後的 {len(filtered_train_ids)+len(filtered_val_ids)+len(filtered_test_ids)} 位患者")
     
     # 建立 DataLoader
+    # ✅ 優化：使用 persistent_workers 和 prefetch_factor 加速資料載入
+    use_persistent_workers = args.num_workers > 0  # 只在有 worker 時啟用
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True if device == "cuda" else False,
+        pin_memory=True if device.type == "cuda" else False,
+        persistent_workers=use_persistent_workers,  # ✅ 避免重複初始化 worker
+        prefetch_factor=2 if args.num_workers > 0 else None,  # ✅ 預取 2 個 batch
         collate_fn=custom_collate_fn
     )
     val_loader = DataLoader(
@@ -726,7 +620,9 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True if device == "cuda" else False,
+        pin_memory=True if device.type == "cuda" else False,
+        persistent_workers=use_persistent_workers,  # ✅ 避免重複初始化 worker
+        prefetch_factor=2 if args.num_workers > 0 else None,  # ✅ 預取 2 個 batch
         collate_fn=custom_collate_fn
     )
     test_loader = DataLoader(
@@ -734,7 +630,9 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True if device == "cuda" else False,
+        pin_memory=True if device.type == "cuda" else False,
+        persistent_workers=use_persistent_workers,  # ✅ 避免重複初始化 worker
+        prefetch_factor=2 if args.num_workers > 0 else None,  # ✅ 預取 2 個 batch
         collate_fn=custom_collate_fn
     )
     
@@ -776,14 +674,18 @@ def main():
             extract_deep_features=args.extract_features,
             save_predictions=True,
             save_visualizations=save_vis,
-            spacing=(1.0, 1.0)  # 可以從 DICOM metadata 讀取
+            spacing=(1.0, 1.0),  # 可以從 DICOM metadata 讀取
+            min_area=_default_config.inference.min_area,  # ✅ 從 config 讀取
+            min_confidence=_default_config.inference.min_confidence,  # ✅ 從 config 讀取
+            min_dice=_default_config.inference.min_dice  # ✅ 從 config 讀取
         )
         
         # 保存測試配置
         test_config = {
             'mode': 'test',
             'checkpoint': args.resume or args.checkpoint,
-            'data_dir': args.data_dir,
+            'cache_dir': args.cache_dir,  # ✅ 使用 cache_dir 而非 data_dir
+            'cache_dataset_type': args.cache_dataset_type,
             'test_samples': test_results['total_samples'],
             'test_lesions': test_results['total_lesions'],
             'test_patients': len(test_results['patient_features']),
@@ -811,10 +713,10 @@ def main():
         logger.info(f"\n{'='*80}")
         logger.info(f"✅ 驗證集結果:")
         logger.info(f"  Loss: {val_loss:.4f}")
-        logger.info(f"  DSC (Dice Similarity Coefficient): {val_metrics['DSC']:.4f}")
-        logger.info(f"  IoU (Intersection over Union): {val_metrics['IoU']:.4f}")
-        logger.info(f"  SEN (Sensitivity): {val_metrics['SEN']:.4f}")
-        logger.info(f"  PPV (Positive Predictive Value): {val_metrics['PPV']:.4f}")
+        logger.info(f"  Dice: {val_metrics['dice']:.4f}")
+        logger.info(f"  IoU: {val_metrics['iou']:.4f}")
+        logger.info(f"  Recall (Sensitivity): {val_metrics['recall']:.4f}")
+        logger.info(f"  Precision (PPV): {val_metrics['precision']:.4f}")
         logger.info(f"  Specificity: {val_metrics['specificity']:.4f}")
         logger.info(f"  Accuracy: {val_metrics['accuracy']:.4f}")
         logger.info(f"  Hausdorff Distance (95%): {val_metrics['hausdorff_95']:.2f} pixels")
@@ -827,10 +729,10 @@ def main():
         logger.info(f"\n{'='*80}")
         logger.info(f"✅ 測試集結果:")
         logger.info(f"  Loss: {test_loss:.4f}")
-        logger.info(f"  DSC (Dice Similarity Coefficient): {test_metrics['DSC']:.4f}")
-        logger.info(f"  IoU (Intersection over Union): {test_metrics['IoU']:.4f}")
-        logger.info(f"  SEN (Sensitivity): {test_metrics['SEN']:.4f}")
-        logger.info(f"  PPV (Positive Predictive Value): {test_metrics['PPV']:.4f}")
+        logger.info(f"  Dice: {test_metrics['dice']:.4f}")
+        logger.info(f"  IoU: {test_metrics['iou']:.4f}")
+        logger.info(f"  Recall (Sensitivity): {test_metrics['recall']:.4f}")
+        logger.info(f"  Precision (PPV): {test_metrics['precision']:.4f}")
         logger.info(f"  Specificity: {test_metrics['specificity']:.4f}")
         logger.info(f"  Accuracy: {test_metrics['accuracy']:.4f}")
         logger.info(f"  Hausdorff Distance (95%): {test_metrics['hausdorff_95']:.2f} pixels")
@@ -903,10 +805,10 @@ def main():
     logger.info(f"\n{'='*80}")
     logger.info(f"✅ 測試集結果:")
     logger.info(f"  Loss: {test_loss:.4f}")
-    logger.info(f"  DSC (Dice Similarity Coefficient): {test_metrics['DSC']:.4f}")
-    logger.info(f"  IoU (Intersection over Union): {test_metrics['IoU']:.4f}")
-    logger.info(f"  SEN (Sensitivity): {test_metrics['SEN']:.4f}")
-    logger.info(f"  PPV (Positive Predictive Value): {test_metrics['PPV']:.4f}")
+    logger.info(f"  Dice: {test_metrics['dice']:.4f}")
+    logger.info(f"  IoU: {test_metrics['iou']:.4f}")
+    logger.info(f"  Recall (Sensitivity): {test_metrics['recall']:.4f}")
+    logger.info(f"  Precision (PPV): {test_metrics['precision']:.4f}")
     logger.info(f"  Specificity: {test_metrics['specificity']:.4f}")
     logger.info(f"  Accuracy: {test_metrics['accuracy']:.4f}")
     logger.info(f"  Hausdorff Distance (95%): {test_metrics['hausdorff_95']:.2f} pixels")

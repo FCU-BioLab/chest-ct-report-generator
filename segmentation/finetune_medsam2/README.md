@@ -173,25 +173,28 @@ python main.py --test --resume best_model.pth
 
 ## �🚀 快速開始
 
-### 使用快取資料訓練（推薦）
+### 基本訓練（使用快取資料）
 
 ```bash
 cd segmentation
 
 # LNDb 資料集訓練 (212 患者, ~60k 切片)
-python finetune_medsam2/main.py --use_cache --cache_dataset_type lndb
+python finetune_medsam2/main.py --cache_dataset_type lndb --epochs 100
+
+# MSD Lung 資料集訓練
+python finetune_medsam2/main.py --cache_dataset_type msd --epochs 100
 
 # 完整資料集 (LNDb + MSD, 275 患者)
-python finetune_medsam2/main.py --use_cache --cache_dataset_type both --augmentation
+python finetune_medsam2/main.py --cache_dataset_type both --augmentation --epochs 100
+
+# 使用增強損失函數（推薦用於高 DSC）
+python finetune_medsam2/main.py --cache_dataset_type lndb --loss_type enhanced --epochs 100
+
+# 使用 MedSAM2 原生損失函數（與 MedSAM2 官方訓練一致）
+python finetune_medsam2/main.py --cache_dataset_type lndb --loss_type native --epochs 100
 
 # 快速測試
-python finetune_medsam2/main.py --use_cache --data_fraction 0.1 --epochs 5
-```
-
-### 使用原始資料訓練
-
-```bash
-python finetune_medsam2/main.py --data_dir path/to/LNDb
+python finetune_medsam2/main.py --data_fraction 0.1 --epochs 5
 ```
 
 ## ⚙️ 配置系統
@@ -212,20 +215,25 @@ print(config.training.learning_rate)  # 5e-6
 ### 資料參數
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
-| `--use_cache` | False | 啟用快取模式 |
 | `--cache_dir` | `cache` | 快取目錄 |
-| `--cache_dataset_type` | `both` | `lndb` / `msd` / `both` |
+| `--cache_dataset_type` | `lndb` | `lndb` / `msd` / `both` |
 | `--data_fraction` | `1.0` | 資料使用比例 |
+| `--use_2_5d` | `True` | 使用 2.5D 輸入 (Z-1, Z, Z+1) |
+| `--no_2_5d` | - | 禁用 2.5D，使用傳統 2D |
 
 ### 訓練參數
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
 | `--epochs` | `100` | 訓練輪數 |
-| `--batch_size` | `16` | 批次大小 |
+| `--batch_size` | `32` | 批次大小 |
 | `--lr` | `5e-6` | 學習率 (SAM 需低 LR) |
 | `--weight_decay` | `1e-6` | 權重衰減 |
-| `--early_stopping_patience` | `20` | 早停容忍 epochs |
-| `--loss_type` | `combined` | 損失函數 (Dice+BCE) |
+| `--early_stopping_patience` | `10` | 早停容忍 epochs |
+| `--loss_type` | `combined` | 損失函數: `combined`/`enhanced`/`native`/`tversky`/`focal` |
+| `--warmup_epochs` | `5` | Warmup epochs |
+| `--accumulation_steps` | `1` | 梯度累積步數 |
+| `--augmentation` | - | 啟用基本資料增強 |
+| `--strong_augmentation` | - | 啟用強資料增強 |
 
 ### 模型參數
 | 參數 | 預設值 | 說明 |
@@ -282,8 +290,20 @@ python finetune_medsam2/main.py --test --extract_features --resume result/.../be
 | `config.py` | 配置 dataclass 定義 |
 | `trainer.py` | 訓練邏輯、驗證、特徵提取 |
 | `dataset.py` | LNDbDataset + CachedSliceDataset |
-| `losses.py` | 損失函數 (Dice, BCE, Combined) |
+| `losses.py` | 損失函數 (使用 MedSAM2 原生 Dice/Focal + 自訂擴充) |
 | `utils.py` | 工具函數、logging |
+
+## 📊 損失函數選項
+
+| 類型 | 說明 | 推薦場景 |
+|------|------|----------|
+| `combined` | Dice + BCE（預設） | 通用訓練 |
+| `enhanced` | Dice + Focal + Tversky + Boundary | 高 DSC 目標 |
+| `native` | MedSAM2 原生 dice_loss + sigmoid_focal_loss | 與官方訓練一致 |
+| `tversky` | Tversky Loss (alpha=0.7, beta=0.3) | 減少漏檢 |
+| `focal` | Focal Loss | 類別不平衡 |
+
+> **注意**: `native`、`enhanced`、`combined` 中的 Dice 和 Focal 損失已使用 MedSAM2 原生實作（來自 `training/loss_fns.py`）
 
 ## 📚 快取資料結構
 
@@ -306,11 +326,23 @@ cache/
 python finetune_medsam2/main.py --resume result/.../best_model.pth
 
 # 使用強資料增強
-python finetune_medsam2/main.py --use_cache --strong_augmentation
+python finetune_medsam2/main.py --strong_augmentation --epochs 100
+
+# 使用增強損失函數（推薦用於小型結節）
+python finetune_medsam2/main.py --loss_type enhanced --epochs 100
 
 # 梯度累積 (模擬更大 batch)
-python finetune_medsam2/main.py --use_cache --accumulation_steps 4
+python finetune_medsam2/main.py --accumulation_steps 4 --batch_size 8
+
+# 過濾小結節 (提高 Dice)
+python finetune_medsam2/main.py --min_nodule_diameter 4 --epochs 100
+
+# 禁用 2.5D 模式（使用傳統 2D）
+python finetune_medsam2/main.py --no_2_5d --epochs 100
 
 # 使用固定資料分割 (復現實驗)
 python finetune_medsam2/main.py --split_file result/.../dataset_split.json
+
+# 只評估模型
+python finetune_medsam2/main.py --eval_only --resume result/.../best_model.pth
 ```

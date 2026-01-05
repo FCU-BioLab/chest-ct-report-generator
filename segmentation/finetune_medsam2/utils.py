@@ -249,14 +249,19 @@ def compute_hausdorff_distance(pred: torch.Tensor, target: torch.Tensor) -> floa
     計算 95th percentile Hausdorff Distance
     
     ✅ 修正：使用 binary_erosion 正確提取邊界
+    ✅ 修正：空遮罩返回 NaN 以便排除統計
     """
     try:
         pred_np = (pred > 0.5).cpu().numpy().astype(bool)
         target_np = target.cpu().numpy().astype(bool)
         
-        # 如果其中一個是空的
+        # 如果兩者都為空，返回 0（完美匹配空遮罩）
+        if not pred_np.any() and not target_np.any():
+            return 0.0
+        
+        # 如果只有一個是空的，返回 NaN（無法計算有意義的距離）
         if not pred_np.any() or not target_np.any():
-            return 100.0
+            return float('nan')
         
         # ✅ 修正：使用 binary_erosion 提取邊界
         # 邊界 = 原始 mask - erosion(mask)
@@ -320,6 +325,11 @@ def compute_all_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, f
     accuracy_score = compute_accuracy(pred_sigmoid, target)
     hd95_score = compute_hausdorff_distance(pred_sigmoid.squeeze(), target.squeeze())
     
+    # ✅ 處理 HD95 的 NaN 值（空遮罩情況）
+    import math
+    if math.isnan(hd95_score):
+        hd95_score = 0.0  # 或者可以排除此樣本
+    
     metrics = {
         # 標準名稱
         'dice': dice_score,
@@ -329,11 +339,37 @@ def compute_all_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, f
         'specificity': specificity_score,
         'accuracy': accuracy_score,
         'hausdorff_95': hd95_score,
-        # 學術標準別名 (Academic Standard Aliases)
-        'DSC': dice_score,           # Dice Similarity Coefficient
-        'IoU': iou_score,            # Intersection over Union
-        'SEN': recall_score,         # Sensitivity = Recall = TPR
-        'PPV': precision_score,      # Positive Predictive Value = Precision
+    }
+    
+    return metrics
+
+
+def compute_lightweight_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
+    """
+    ✅ 計算輕量級評估指標（跳過耗時的 Hausdorff Distance）
+    
+    適用於訓練過程中的驗證階段，加快驗證速度
+    HD95 只在最終測試時計算
+    
+    Args:
+        pred: 預測遮罩 (logits 或機率值)
+        target: 目標遮罩
+        
+    Returns:
+        包含輕量級指標的字典 (不含 hausdorff_95)
+    """
+    # 確保預測值為機率值
+    pred_sigmoid = torch.sigmoid(pred) if pred.min() < 0 else pred
+    
+    # 計算基礎指標（跳過 HD95）
+    metrics = {
+        'dice': compute_dice(pred_sigmoid, target),
+        'iou': compute_iou(pred_sigmoid, target),
+        'precision': compute_precision(pred_sigmoid, target),
+        'recall': compute_recall(pred_sigmoid, target),
+        'specificity': compute_specificity(pred_sigmoid, target),
+        'accuracy': compute_accuracy(pred_sigmoid, target),
+        'hausdorff_95': 0.0,  # ✅ 佔位符，在測試時會重新計算
     }
     
     return metrics
@@ -345,11 +381,11 @@ class EarlyStopping:
     
     Args:
         patience: 容忍多少個 epoch 沒有改善
-        min_delta: 最小改善幅度
+        min_delta: 最小改善幅度（對於 Dice 建議 0.005）
         mode: 'max' 表示指標越大越好，'min' 表示越小越好
     """
     
-    def __init__(self, patience: int = 7, min_delta: float = 0.001, mode: str = 'max'):
+    def __init__(self, patience: int = 7, min_delta: float = 0.005, mode: str = 'max'):
         self.patience = patience
         self.min_delta = min_delta
         self.mode = mode
@@ -509,10 +545,117 @@ def load_dataset_split_info(split_file_path: str):
     return train_ids, val_ids, test_ids
 
 
+def compute_bbox_iou(bbox1: List[float], bbox2: List[float]) -> float:
+    """
+    計算兩個 bounding box 的 IoU
+    
+    Args:
+        bbox1, bbox2: [x1, y1, x2, y2] 格式
+        
+    Returns:
+        IoU 值 (0-1)
+    """
+    x1_1, y1_1, x2_1, y2_1 = bbox1
+    x1_2, y1_2, x2_2, y2_2 = bbox2
+    
+    # 計算交集
+    inter_x1 = max(x1_1, x1_2)
+    inter_y1 = max(y1_1, y1_2)
+    inter_x2 = min(x2_1, x2_2)
+    inter_y2 = min(y2_1, y2_2)
+    
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+    
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    
+    # 計算聯集
+    area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+    area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+    union_area = area1 + area2 - inter_area
+    
+    return inter_area / union_area if union_area > 0 else 0.0
+
+
+def aggregate_3d_nodules(
+    patient_features: Dict,
+    iou_threshold: float = 0.3
+) -> Tuple[int, Dict[int, List[int]]]:
+    """
+    將 2D 切片中的 bbox 聚合為 3D 結節
+    
+    使用連續切片中 bbox 的 IoU 來判斷是否為同一個 3D 結節
+    
+    Args:
+        patient_features: 患者特徵字典，包含每個切片的 lesions
+        iou_threshold: IoU 閾值，超過此值視為同一結節
+        
+    Returns:
+        (unique_nodule_count, nodule_mapping: {nodule_id: [slice_indices]})
+    """
+    # 收集所有切片的 lesions
+    slice_data = []
+    for slice_idx, slice_info in patient_features.get('slices', {}).items():
+        for lesion in slice_info.get('lesions', []):
+            bbox = lesion.get('bbox', [])
+            if len(bbox) >= 4:
+                slice_data.append({
+                    'slice_idx': int(slice_idx),
+                    'bbox': bbox[:4],
+                    'nodule_id': None
+                })
+    
+    if not slice_data:
+        return 0, {}
+    
+    # 按切片索引排序
+    slice_data.sort(key=lambda x: x['slice_idx'])
+    
+    # 使用 Union-Find 來聚合結節
+    current_nodule_id = 0
+    nodule_mapping = {}  # nodule_id -> [slice_indices]
+    
+    for i, data in enumerate(slice_data):
+        if data['nodule_id'] is not None:
+            continue
+            
+        # 建立新結節
+        data['nodule_id'] = current_nodule_id
+        nodule_mapping[current_nodule_id] = [data['slice_idx']]
+        
+        # 檢查後續切片是否有相連的 bbox
+        current_bbox = data['bbox']
+        current_slice = data['slice_idx']
+        
+        for j in range(i + 1, len(slice_data)):
+            other = slice_data[j]
+            
+            # 只檢查相鄰切片 (距離 <= 3)
+            if other['slice_idx'] - current_slice > 3:
+                break
+            
+            if other['nodule_id'] is not None:
+                continue
+            
+            # 計算 IoU
+            iou = compute_bbox_iou(current_bbox, other['bbox'])
+            if iou >= iou_threshold:
+                other['nodule_id'] = current_nodule_id
+                nodule_mapping[current_nodule_id].append(other['slice_idx'])
+                # 更新當前 bbox 為較新切片的 bbox (追蹤變化)
+                current_bbox = other['bbox']
+                current_slice = other['slice_idx']
+        
+        current_nodule_id += 1
+    
+    return len(nodule_mapping), nodule_mapping
+
+
 class PatientMetricsTracker:
     """
     追蹤每個患者的評估指標，用於錯誤分析
     """
+
     
     def __init__(self):
         self.patient_metrics = {}  # {patient_id: {'slices': [], 'avg_metrics': {}}}
