@@ -14,16 +14,13 @@ import json
 
 @dataclass
 class DataConfig:
-    """資料相關配置"""
-    # 快取模式設定
-    use_cache: bool = True
+    """資料相關配置（僅支援快取模式）"""
+    # 快取目錄設定
     cache_dir: str = "cache"
-    cache_dataset_type: str = "both"  # lndb/msd/both
+    cache_dataset_type: str = "lndb"  # lndb/msd/both
     
-    # 原始資料路徑 (非快取模式)
-    data_dir: str = "../datasets/aLL_patients_data/LNDb"
-    rad_id: str = "consensus"
-    axis: int = 2  # 0=sagittal, 1=coronal, 2=axial
+    # 2.5D 模式設定
+    use_2_5d: bool = True  # 使用 2.5D 輸入 (Z-1, Z, Z+1)，提升上下文資訊
     
     # 資料比例
     data_fraction: float = 1.0
@@ -39,7 +36,8 @@ class ModelConfig:
     """模型相關配置"""
     # SAM2 配置
     config: str = "sam2.1_hiera_t512.yaml"
-    checkpoint: str = "MedSAM2/checkpoints/MedSAM2_CTLesion.pt"
+    # checkpoint: str = "MedSAM2/checkpoints/MedSAM2_CTLesion.pt"
+    checkpoint: str = "MedSAM2/checkpoints/MedSAM2_latest.pt"
     
     # 影像設定
     target_size: int = 512  # SAM 設計規格
@@ -51,7 +49,7 @@ class TrainingConfig:
     """訓練相關配置"""
     # 基本參數
     epochs: int = 100
-    batch_size: int = 16
+    batch_size: int = 32
     
     # 優化器
     learning_rate: float = 5e-6  # SAM 需要較低的學習率
@@ -61,13 +59,14 @@ class TrainingConfig:
     warmup_epochs: int = 5
     
     # 早停
-    early_stopping_patience: int = 20
+    early_stopping_patience: int = 10
     
     # 梯度累積
     accumulation_steps: int = 1
     
     # 損失函數
-    loss_type: str = "combined"  # combined/enhanced/tversky/focal
+    # ✅ 新增 'native' 選項：使用 MedSAM2 原生損失函數
+    loss_type: str = "combined"  # combined/enhanced/native/tversky/focal
     
     # 資料增強
     use_augmentation: bool = False
@@ -78,10 +77,15 @@ class TrainingConfig:
 class InferenceConfig:
     """推論相關配置"""
     # 閾值
-    prediction_threshold: float = 0.5
+    prediction_threshold: float = 0.7
     
     # 最小結節過濾
     min_nodule_diameter: float = 0.0
+    
+    # 測試過濾參數
+    min_area: int = 0  # 最小病灶面積（像素），0 表示不過濾
+    min_confidence: float = 0.7  # 最小置信度（SAM2 IoU prediction）
+    min_dice: float = 0.0  # 最小 Dice 分數（與 GT 的匹配度）
 
 
 @dataclass
@@ -95,7 +99,7 @@ class Config:
     # 實驗設定
     experiment_name: str = "medsam2_finetune"
     seed: int = 42
-    num_workers: int = 4
+    num_workers: int = 8
     device: str = "cuda"
     output_dir: Optional[str] = None
     
@@ -167,11 +171,12 @@ class Config:
         
         # Model config
         config.model.config = getattr(args, 'config', 'sam2.1_hiera_t512.yaml')
-        config.model.checkpoint = getattr(args, 'checkpoint', 'MedSAM2/checkpoints/MedSAM2_CTLesion.pt')
+        # config.model.checkpoint = getattr(args, 'checkpoint', 'MedSAM2/checkpoints/MedSAM2_CTLesion.pt')
+        config.model.checkpoint = getattr(args, 'checkpoint', 'MedSAM2/checkpoints/MedSAM2_latest.pt')
         
         # Training config
         config.training.epochs = getattr(args, 'epochs', 100)
-        config.training.batch_size = getattr(args, 'batch_size', 16)
+        config.training.batch_size = getattr(args, 'batch_size', 32)
         config.training.learning_rate = getattr(args, 'lr', 5e-6)
         config.training.weight_decay = getattr(args, 'weight_decay', 1e-6)
         config.training.warmup_epochs = getattr(args, 'warmup_epochs', 5)

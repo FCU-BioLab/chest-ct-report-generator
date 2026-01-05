@@ -5,7 +5,7 @@ llm/RAG/dist
 llm/RAG/model
 llm/Fine_Tune/fine_tune_data
 llm/Fine_Tune/google_gemma_3/output
-segmentation/MedSAM2
+# segmentation/MedSAM2
 segmentation/segmentation_result
 segmentation/result
 segmentation/cache

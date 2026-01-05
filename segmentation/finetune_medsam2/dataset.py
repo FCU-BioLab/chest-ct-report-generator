@@ -162,12 +162,32 @@ class DataAugmentation:
                 image[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = scaled_image
                 mask[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = scaled_mask
             
+            # ✅ 優化：先更新 bbox，再驗證有效性
             if len(bboxes) > 0:
                 if scale > 1:
                     bboxes = (bboxes * scale) - np.array([start_w, start_h, start_w, start_h])
                 else:
                     bboxes = (bboxes * scale) + np.array([pad_w, pad_h, pad_w, pad_h])
-                bboxes = np.clip(bboxes, 0, [w, h, w, h])
+                
+                # ✅ 先 clip 到有效範圍
+                bboxes[:, 0] = np.clip(bboxes[:, 0], 0, w - 1)
+                bboxes[:, 1] = np.clip(bboxes[:, 1], 0, h - 1)
+                bboxes[:, 2] = np.clip(bboxes[:, 2], 1, w)
+                bboxes[:, 3] = np.clip(bboxes[:, 3], 1, h)
+                
+                # ✅ 確保 bbox 有效（寬高 > 0）
+                invalid_mask = (bboxes[:, 2] <= bboxes[:, 0]) | (bboxes[:, 3] <= bboxes[:, 1])
+                if invalid_mask.any():
+                    # 對於無效 bbox，從 mask 重新計算
+                    from skimage import measure
+                    labeled_mask = measure.label(mask > 0)
+                    regions = measure.regionprops(labeled_mask)
+                    if regions:
+                        new_bboxes = []
+                        for region in regions:
+                            minr, minc, maxr, maxc = region.bbox
+                            new_bboxes.append([minc, minr, maxc, maxr])
+                        bboxes = np.array(new_bboxes)
             
         # Bounding Box 擾動
         if len(bboxes) > 0 and self.bbox_shift_limit > 0:
@@ -229,7 +249,8 @@ class LNDbDataset(Dataset):
         transform: Optional[Callable] = None,
         cache_data: bool = False,
         rad_id: str = 'consensus',
-        min_nodule_diameter: float = 0.0
+        min_nodule_diameter: float = 0.0,
+        use_2_5d: bool = True  # ✅ 新增：2.5D 模式
     ):
         self.data_dir = Path(data_dir)
         self.patient_ids = patient_ids
@@ -238,6 +259,7 @@ class LNDbDataset(Dataset):
         self.cache_data = cache_data
         self.rad_id = rad_id
         self.min_nodule_diameter = min_nodule_diameter
+        self.use_2_5d = use_2_5d  # ✅ 儲存 2.5D 模式設定
         
         self.logger = logging.getLogger(__name__)
         
@@ -251,6 +273,7 @@ class LNDbDataset(Dataset):
         
         self.logger.info(f"🔧 使用 LNDb 資料集 (專家分割遮罩)")
         self.logger.info(f"🔧 放射科醫師選擇: {rad_id}")
+        self.logger.info(f"🔧 輸入模式: {'2.5D (Z-1, Z, Z+1)' if use_2_5d else '2D (單一切片)'}")  # ✅ 顯示模式
         if min_nodule_diameter > 0:
             self.logger.info(f"🔍 過濾小於 {min_nodule_diameter}mm 的結節")
         
@@ -470,7 +493,7 @@ class LNDbDataset(Dataset):
         return sorted(list(kept_ids))
     
     def _load_sample(self, idx: int) -> Dict:
-        """載入單個樣本"""
+        """載入單個樣本（支援 2D 和 2.5D 模式）"""
         sample_info = self.samples[idx]
         lndb_id = sample_info['lndb_id']
         ct_file = sample_info['ct_file']
@@ -479,13 +502,41 @@ class LNDbDataset(Dataset):
         ct_image = sitk.ReadImage(str(ct_file))
         ct_array = sitk.GetArrayFromImage(ct_image)
         
-        if self.axis == 2:
-            ct_slice = ct_array[slice_idx, :, :]
-        elif self.axis == 1:
-            ct_slice = ct_array[:, slice_idx, :]
+        # ✅ 2.5D 模式：載入 Z-1, Z, Z+1 三個切片
+        if self.use_2_5d:
+            # 獲取總切片數
+            if self.axis == 2:
+                num_slices = ct_array.shape[0]
+            elif self.axis == 1:
+                num_slices = ct_array.shape[1]
+            else:
+                num_slices = ct_array.shape[2]
+            
+            # 計算相鄰切片索引（邊界處理）
+            z_prev = max(0, slice_idx - 1)
+            z_next = min(num_slices - 1, slice_idx + 1)
+            
+            # 載入 3 個相鄰切片
+            slices = []
+            for z in [z_prev, slice_idx, z_next]:
+                if self.axis == 2:
+                    ct_slice = ct_array[z, :, :]
+                elif self.axis == 1:
+                    ct_slice = ct_array[:, z, :]
+                else:
+                    ct_slice = ct_array[:, :, z]
+                slices.append(ct_slice)
         else:
-            ct_slice = ct_array[:, :, slice_idx]
+            # ✅ 2D 模式：只載入單一切片
+            if self.axis == 2:
+                ct_slice = ct_array[slice_idx, :, :]
+            elif self.axis == 1:
+                ct_slice = ct_array[:, slice_idx, :]
+            else:
+                ct_slice = ct_array[:, :, slice_idx]
+            slices = [ct_slice]  # 包裝成列表以統一處理
         
+        # 載入 mask（只需要中間切片的 mask）
         mask_volume = self._load_mask_volume(lndb_id)
         if mask_volume is not None:
             if self.axis == 2:
@@ -495,23 +546,43 @@ class LNDbDataset(Dataset):
             else:
                 mask_slice = mask_volume[:, :, slice_idx]
         else:
-            mask_slice = np.zeros_like(ct_slice, dtype=np.uint8)
+            mask_slice = np.zeros_like(slices[0] if self.use_2_5d else ct_slice, dtype=np.uint8)
         
         # Resize 到固定尺寸 (512x512)
         target_size = (512, 512)
-        orig_h, orig_w = ct_slice.shape
+        import cv2
         
-        if (orig_h, orig_w) != target_size:
-            import cv2
-            ct_slice = cv2.resize(ct_slice.astype(np.float32), target_size, interpolation=cv2.INTER_LINEAR)
-            mask_slice = cv2.resize(mask_slice.astype(np.uint8), target_size, interpolation=cv2.INTER_NEAREST)
+        # Resize 所有切片
+        slices_resized = []
+        for s in slices:
+            if s.shape != target_size:
+                s_resized = cv2.resize(s.astype(np.float32), target_size, 
+                                      interpolation=cv2.INTER_LINEAR)
+            else:
+                s_resized = s.astype(np.float32)
+            slices_resized.append(s_resized)
         
-        # CT 值裁剪與標準化
+        # Resize mask
+        if mask_slice.shape != target_size:
+            mask_slice = cv2.resize(mask_slice.astype(np.uint8), target_size, 
+                                   interpolation=cv2.INTER_NEAREST)
+        
+        # CT 值裁剪與標準化（對每個切片）
         hu_min, hu_max = -1000, 800
-        ct_clipped = np.clip(ct_slice, hu_min, hu_max)
-        ct_normalized = ((ct_clipped - hu_min) / (hu_max - hu_min) * 255).astype(np.uint8)
+        normalized_slices = []
+        for s in slices_resized:
+            ct_clipped = np.clip(s, hu_min, hu_max)
+            ct_normalized = ((ct_clipped - hu_min) / (hu_max - hu_min) * 255).astype(np.uint8)
+            normalized_slices.append(ct_normalized)
         
-        ct_rgb = np.stack([ct_normalized, ct_normalized, ct_normalized], axis=-1)
+        # ✅ 組合為 RGB 格式
+        if self.use_2_5d:
+            # 2.5D: 三個通道分別是 Z-1, Z, Z+1
+            ct_rgb = np.stack(normalized_slices, axis=-1)  # [H, W, 3]
+        else:
+            # 2D: 三個通道都是同一張切片
+            ct_rgb = np.stack([normalized_slices[0]] * 3, axis=-1)  # [H, W, 3]
+        
         bboxes = self._extract_bboxes(mask_slice)
         
         return {
@@ -521,6 +592,7 @@ class LNDbDataset(Dataset):
             'patient_id': f"LNDb-{lndb_id:04d}",
             'slice_index': slice_idx
         }
+    
     
     def _extract_bboxes(self, mask: np.ndarray) -> np.ndarray:
         """從遮罩提取 bounding boxes"""
@@ -597,13 +669,15 @@ class CachedSliceDataset(Dataset):
         dataset_type: str = 'both',
         patient_ids: Optional[List] = None,
         transform: Optional[Callable] = None,
-        target_size: tuple = (512, 512)
+        target_size: tuple = (512, 512),
+        use_2_5d: bool = True  # ✅ 新增：2.5D 模式
     ):
         self.cache_dir = Path(cache_dir)
         self.dataset_type = dataset_type.lower()
         self.patient_ids = patient_ids
         self.transform = transform
         self.target_size = target_size
+        self.use_2_5d = use_2_5d  # ✅ 儲存 2.5D 模式設定
         
         self.logger = logging.getLogger(__name__)
         
@@ -620,7 +694,7 @@ class CachedSliceDataset(Dataset):
         self._build_sample_index()
         
         self.logger.info(f"✅ CachedSliceDataset: {len(self.samples)} 個切片 "
-                        f"(類型: {dataset_type})")
+                        f"(類型: {dataset_type}, 模式: {'2.5D' if use_2_5d else '2D'})")  # ✅ 顯示模式
     
     def _build_sample_index(self):
         """建立所有有效切片的索引"""
@@ -683,39 +757,89 @@ class CachedSliceDataset(Dataset):
         return sorted(list(kept_ids))
     
     def _load_sample(self, idx: int) -> Dict:
-        """載入單個樣本"""
+        """載入單個樣本（支援 2D 和 2.5D 模式）"""
         import cv2
         
         sample_info = self.samples[idx]
         npz_path = sample_info['npz_path']
+        patient_id = sample_info['patient_id']
+        slice_idx = sample_info['slice_index']
         
-        # 載入 .npz 檔案
-        data = np.load(str(npz_path))
-        image = data['image']  # 2D array
-        mask = data['mask']    # 2D array
+        # ✅ 2.5D 模式：載入相鄰切片
+        if self.use_2_5d:
+            # 獲取患者目錄和 meta 資訊
+            patient_dir = npz_path.parent
+            meta_path = patient_dir / 'meta.json'
+            
+            if meta_path.exists():
+                import json
+                with open(meta_path, 'r') as f:
+                    meta = json.load(f)
+                num_slices = meta.get('num_slices', slice_idx + 1)
+            else:
+                num_slices = slice_idx + 1
+            
+            # 計算相鄰切片索引
+            z_prev = max(0, slice_idx - 1)
+            z_next = min(num_slices - 1, slice_idx + 1)
+            
+            # 載入 3 個切片
+            slices = []
+            for z in [z_prev, slice_idx, z_next]:
+                slice_path = patient_dir / f"slice_{z:04d}.npz"
+                if slice_path.exists():
+                    data = np.load(str(slice_path))
+                    img = data['image']  # 2D array
+                else:
+                    # 如果切片不存在，使用零填充
+                    img = np.zeros(self.target_size, dtype=np.float32)
+                slices.append(img)
+            
+            # 載入中間切片的 mask
+            data = np.load(str(npz_path))
+            mask = data['mask']
+        else:
+            # ✅ 2D 模式：只載入單一切片
+            data = np.load(str(npz_path))
+            image = data['image']  # 2D array
+            mask = data['mask']    # 2D array
+            slices = [image]
         
-        # Resize 到目標尺寸
-        if image.shape != self.target_size:
-            image = cv2.resize(image.astype(np.float32), self.target_size, 
-                              interpolation=cv2.INTER_LINEAR)
+        # Resize 所有切片到目標尺寸
+        slices_resized = []
+        for img in slices:
+            if img.shape != self.target_size:
+                img = cv2.resize(img.astype(np.float32), self.target_size, 
+                                interpolation=cv2.INTER_LINEAR)
+            slices_resized.append(img)
+        
+        # Resize mask
+        if mask.shape != self.target_size:
             mask = cv2.resize(mask.astype(np.uint8), self.target_size, 
                              interpolation=cv2.INTER_NEAREST)
         
-        # 標準化到 0-255 (如果尚未標準化)
-        if image.max() > 255 or image.min() < -1000:
-            # 假設是 HU 值，進行 CT 視窗處理
-            hu_min, hu_max = -1000, 800
-            image = np.clip(image, hu_min, hu_max)
-            image = ((image - hu_min) / (hu_max - hu_min) * 255).astype(np.uint8)
-        elif image.max() <= 1.0:
-            # 已經 normalize 到 0-1
-            image = (image * 255).astype(np.uint8)
-        else:
-            image = image.astype(np.uint8)
+        # 標準化到 0-255（對每個切片）
+        normalized_slices = []
+        for img in slices_resized:
+            if img.max() > 255 or img.min() < -1000:
+                # 假設是 HU 值，進行 CT 視窗處理
+                hu_min, hu_max = -1000, 800
+                img = np.clip(img, hu_min, hu_max)
+                img = ((img - hu_min) / (hu_max - hu_min) * 255).astype(np.uint8)
+            elif img.max() <= 1.0:
+                # 已經 normalize 到 0-1
+                img = (img * 255).astype(np.uint8)
+            else:
+                img = img.astype(np.uint8)
+            normalized_slices.append(img)
         
-        # 轉換為 RGB (3 通道)
-        if len(image.shape) == 2:
-            image = np.stack([image, image, image], axis=-1)
+        # ✅ 組合為 RGB 格式
+        if self.use_2_5d:
+            # 2.5D: 三個通道分別是 Z-1, Z, Z+1
+            image_rgb = np.stack(normalized_slices, axis=-1)  # [H, W, 3]
+        else:
+            # 2D: 三個通道都是同一張切片
+            image_rgb = np.stack([normalized_slices[0]] * 3, axis=-1)  # [H, W, 3]
         
         # 確保 mask 是二值的
         mask = (mask > 0).astype(np.uint8)
@@ -724,11 +848,11 @@ class CachedSliceDataset(Dataset):
         bboxes = self._extract_bboxes(mask)
         
         return {
-            'image': image,
+            'image': image_rgb,
             'mask': mask,
             'bboxes': bboxes,
-            'patient_id': sample_info['patient_id'],
-            'slice_index': sample_info['slice_index']
+            'patient_id': patient_id,
+            'slice_index': slice_idx
         }
     
     def _extract_bboxes(self, mask: np.ndarray) -> np.ndarray:
