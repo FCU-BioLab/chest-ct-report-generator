@@ -658,9 +658,10 @@ class PatientMetricsTracker:
 
     
     def __init__(self):
-        self.patient_metrics = {}  # {patient_id: {'slices': [], 'avg_metrics': {}}}
+        self.patient_metrics = {}  # {patient_id: {'slices': [], 'avg_metrics': {}, 'volume_metrics': {}}}
     
-    def add_slice_metrics(self, patient_id: str, slice_idx: int, metrics: Dict[str, float]):
+    def add_slice_metrics(self, patient_id: str, slice_idx: int, metrics: Dict[str, float], 
+                         vol_stats: Optional[Dict[str, float]] = None):
         """
         記錄單個切片的指標
         
@@ -668,28 +669,68 @@ class PatientMetricsTracker:
             patient_id: 患者 ID
             slice_idx: 切片索引
             metrics: 評估指標字典
+            vol_stats: (Optional) 體積統計 {'intersection': float, 'pred_area': float, 'gt_area': float}
         """
         if patient_id not in self.patient_metrics:
-            self.patient_metrics[patient_id] = {'slices': []}
+            self.patient_metrics[patient_id] = {'slices': [], 'vol_stats': {'intersection': 0.0, 'pred_area': 0.0, 'gt_area': 0.0, 'union': 0.0}}
         
         slice_data = {'slice_index': slice_idx, **metrics}
         self.patient_metrics[patient_id]['slices'].append(slice_data)
+        
+        # 累積體積統計
+        if vol_stats:
+            p_stats = self.patient_metrics[patient_id]['vol_stats']
+            p_stats['intersection'] += vol_stats.get('intersection', 0.0)
+            p_stats['pred_area'] += vol_stats.get('pred_area', 0.0)
+            p_stats['gt_area'] += vol_stats.get('gt_area', 0.0)
+            p_stats['union'] += vol_stats.get('union', 0.0)
     
     def compute_patient_averages(self):
         """
-        計算每個患者的平均指標
+        計算每個患者的平均指標和體積指標
         """
         for patient_id, data in self.patient_metrics.items():
             if not data['slices']:
                 continue
             
-            # 計算平均值
+            # 1. 計算 slice-average metrics (原有機制)
             metric_names = [k for k in data['slices'][0].keys() if k != 'slice_index']
             avg_metrics = {}
             
             for metric in metric_names:
                 values = [s[metric] for s in data['slices'] if metric in s]
                 avg_metrics[metric] = sum(values) / len(values) if values else 0.0
+            
+            # 2. 計算 Volume Metrics (更準確的 3D 指標)
+            vol_stats = data.get('vol_stats', {})
+            intersection = vol_stats.get('intersection', 0.0)
+            pred_area = vol_stats.get('pred_area', 0.0)
+            gt_area = vol_stats.get('gt_area', 0.0)
+            union = vol_stats.get('union', 0.0)
+            
+            smooth = 1e-6
+            
+            # Volume Dice
+            vol_dice = (2.0 * intersection + smooth) / (pred_area + gt_area + smooth)
+            
+            # Volume IoU
+            vol_iou = (intersection + smooth) / (union + smooth) if union > 0 else 0.0
+            
+            # Volume Recall / Precision
+            vol_recall = (intersection + smooth) / (gt_area + smooth)
+            vol_precision = (intersection + smooth) / (pred_area + smooth)
+            
+            # 將 Volume Metrics 加入 avg_metrics，並覆寫 Dice/IoU 為 Volume 版本 (因為這才是使用者關心的)
+            # 或者使用前綴 'vol_' 來區分
+            avg_metrics['vol_dice'] = vol_dice
+            avg_metrics['vol_iou'] = vol_iou
+            avg_metrics['vol_recall'] = vol_recall
+            avg_metrics['vol_precision'] = vol_precision
+            
+            # ✅ 重要變更：將主 Dice/IoU 更新為 Volume Dice，這樣報告會顯示更合理的數值
+            avg_metrics['slice_avg_dice'] = avg_metrics['dice'] # 保留舊的 slice avg 作為參考
+            avg_metrics['dice'] = vol_dice
+            avg_metrics['iou'] = vol_iou
             
             data['avg_metrics'] = avg_metrics
             data['num_slices'] = len(data['slices'])

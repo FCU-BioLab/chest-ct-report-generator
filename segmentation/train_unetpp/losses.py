@@ -5,7 +5,8 @@ UNet++ 肺結節分割訓練 - 損失函數模組
 
 提供損失函數：
 1. BCEDiceLoss - Val/Test 評估用 (BCE + Dice)
-2. AdaptiveLoss - Training 用 (GT=0: FocalBCE, GT>0: BCE+Dice)
+2. DiceFocalLoss - Training 用 (Dice + Focal, MedSAM2 風格)
+3. AdaptiveLoss - 舊版 Training 用
 """
 
 import torch
@@ -20,7 +21,7 @@ class BCEDiceLoss(nn.Module):
     用於 Validation/Testing 的 patch-level 和 lesion-level loss
     """
     
-    def __init__(self, dice_weight: float = 0.5, bce_weight: float = 1.0, eps: float = 1e-6):
+    def __init__(self, dice_weight: float = 0.5, bce_weight: float = 1.0, eps: float = 1e-5):
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
@@ -41,6 +42,49 @@ class BCEDiceLoss(nn.Module):
         dice_loss = 1 - dice.mean()
         
         return self.dice_weight * dice_loss + self.bce_weight * bce_loss
+
+
+class DiceFocalLoss(nn.Module):
+    """
+    Dice + Focal Loss (MedSAM2 風格)
+    
+    結合 Dice Loss (優化重疊度) 和 Focal Loss (解決類別不平衡)
+    比 Tversky 更適合無 Prompt 的自動分割任務
+    """
+    
+    def __init__(
+        self,
+        dice_weight: float = 1.0,
+        focal_weight: float = 1.0,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
+        smooth: float = 1e-5
+    ):
+        super().__init__()
+        self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
+        self.smooth = smooth
+    
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # === Dice Loss ===
+        probs = torch.sigmoid(logits)
+        probs_flat = probs.contiguous().view(-1)
+        target_flat = target.contiguous().view(-1)
+        
+        intersection = (probs_flat * target_flat).sum()
+        union = probs_flat.sum() + target_flat.sum()
+        dice_score = (2. * intersection + self.smooth) / (union + self.smooth)
+        dice_loss = 1.0 - dice_score
+        
+        # === Focal Loss (Binary) ===
+        # 使用 BCEWithLogitsLoss 的 reduction='none' 來手動計算 focal term
+        bce_loss = F.binary_cross_entropy_with_logits(logits, target, reduction='none')
+        pt = torch.exp(-bce_loss)  # pt is the probability of being classified correctly
+        focal_loss = (self.focal_alpha * (1-pt)**self.focal_gamma * bce_loss).mean()
+        
+        return self.dice_weight * dice_loss + self.focal_weight * focal_loss
 
 
 class AdaptiveLoss(nn.Module):
@@ -108,25 +152,49 @@ class AdaptiveLoss(nn.Module):
         return total_loss / batch_size
 
 
+class TverskyLoss(nn.Module):
+    """
+    Tversky Loss - 可調控 FP 和 FN 的權重
+    """
+    
+    def __init__(self, alpha: float = 0.7, beta: float = 0.3, smooth: float = 1.0):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+    
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        probs_flat = probs.contiguous().view(-1)
+        target_flat = target.contiguous().view(-1)
+        
+        TP = (probs_flat * target_flat).sum()
+        FP = ((1 - target_flat) * probs_flat).sum()
+        FN = (target_flat * (1 - probs_flat)).sum()
+        
+        tversky = (TP + self.smooth) / (TP + self.alpha * FN + self.beta * FP + self.smooth)
+        
+        return 1 - tversky
+
+
 def get_loss_function(config) -> nn.Module:
     """
     根據配置獲取損失函數
-    
-    Args:
-        config: 配置物件
-        
-    Returns:
-        損失函數
     """
     loss_type = config.training.loss_type
-    dice_weight = config.training.dice_weight  # 從 config 讀取
+    dice_weight = config.training.dice_weight
     
-    if loss_type == "adaptive":
+    if loss_type == "dice_focal":
+        return DiceFocalLoss(dice_weight=1.0, focal_weight=1.0)
+    elif loss_type == "adaptive":
         return AdaptiveLoss(dice_weight=dice_weight)
     elif loss_type == "bce_dice":
         return BCEDiceLoss(dice_weight=dice_weight, bce_weight=1.0)
+    elif loss_type == "tversky":
+        return TverskyLoss(alpha=0.7, beta=0.3)
     else:
-        raise ValueError(f"未知的損失函數類型: {loss_type}。支援: 'adaptive', 'bce_dice'")
+        # Default fallback
+        return DiceFocalLoss(dice_weight=1.0, focal_weight=1.0)
 
 
 if __name__ == "__main__":
@@ -136,8 +204,8 @@ if __name__ == "__main__":
     
     print("損失函數測試:")
     
+    dice_focal = DiceFocalLoss()
+    print(f"DiceFocalLoss: {dice_focal(pred, target):.4f}")
+    
     bce_dice = BCEDiceLoss()
     print(f"BCEDiceLoss: {bce_dice(pred, target):.4f}")
-    
-    adaptive = AdaptiveLoss()
-    print(f"AdaptiveLoss: {adaptive(pred, target):.4f}")

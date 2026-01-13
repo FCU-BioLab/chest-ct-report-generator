@@ -8,7 +8,8 @@ llm/Fine_Tune/google_gemma_3/output
 segmentation/MedSAM2
 segmentation/segmentation_result
 segmentation/result
-segmentation/cache
+segmentation/video_result
+cache
 datasets
 detection/__pycache__
 detection/Faster_RCNN_Detection*
@@ -19,6 +20,7 @@ detection/yolo_detection/yolov11_*
 detection/yolo_detection/yolo_runs
 detection/yolo_detection/yolov11_models/dataset_exports
 detection/yolo_detection/docs/temp
+models
 *.pt
 temp
 **/*pycache*/

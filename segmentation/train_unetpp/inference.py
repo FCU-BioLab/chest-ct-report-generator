@@ -30,10 +30,12 @@ import sys
 try:
     from .config import Config
     from .preprocess import CTPreprocessor
+    from .postprocess import MaskPostProcessor, PostProcessConfig
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from train_unetpp.config import Config
     from train_unetpp.preprocess import CTPreprocessor
+    from train_unetpp.postprocess import MaskPostProcessor, PostProcessConfig
 
 
 logger = logging.getLogger(__name__)
@@ -149,6 +151,26 @@ class Inferencer:
             hu_window_center=config.data.hu_window_center,
             hu_window_width=config.data.hu_window_width
         )
+        
+        # 初始化後處理器
+        self.postprocessor = self._create_postprocessor()
+    
+    def _create_postprocessor(self) -> MaskPostProcessor:
+        """創建後處理器"""
+        inf_cfg = self.config.inference
+        pp_config = PostProcessConfig(
+            threshold=inf_cfg.prediction_threshold,
+            use_lung_mask=inf_cfg.use_lung_mask,
+            lung_mask_dilate_mm=inf_cfg.lung_mask_dilate_mm,
+            min_size_mm3=inf_cfg.min_volume_mm3,
+            max_size_mm3=inf_cfg.max_volume_mm3,
+            closing_radius_mm=inf_cfg.closing_radius_mm,
+            fill_holes=inf_cfg.fill_holes,
+            fill_holes_3d=inf_cfg.fill_holes_3d,
+            remove_edge_nodules=inf_cfg.remove_edge_nodules,
+            min_solidity=inf_cfg.min_solidity
+        )
+        return MaskPostProcessor(pp_config)
     
     @torch.no_grad()
     def predict_volume(
@@ -216,6 +238,13 @@ class Inferencer:
         """
         後處理預測結果
         
+        流程：
+        1. Model output (probability) → Threshold (0.5)
+        2. Lung mask 限制
+        3. Connected component filtering (min/max size)
+        4. Small closing / fill holes
+        5. Final mask
+        
         Args:
             pred_mask: 預測機率遮罩
             lung_mask: 肺野遮罩
@@ -224,39 +253,29 @@ class Inferencer:
         Returns:
             後處理後的二值遮罩
         """
-        # 1. 閾值化
-        binary_mask = (pred_mask > self.threshold).astype(np.uint8)
+        # 使用新的後處理模組
+        self.postprocessor.set_spacing(spacing if spacing is not None else np.array([1.0, 1.0, 1.0]))
+        return self.postprocessor(pred_mask, lung_mask)
+    
+    def postprocess_with_details(
+        self,
+        pred_mask: np.ndarray,
+        lung_mask: Optional[np.ndarray] = None,
+        spacing: np.ndarray = None
+    ) -> Dict[str, np.ndarray]:
+        """
+        後處理並返回中間結果（用於調試/視覺化）
         
-        # 2. 肺野過濾
-        if self.config.inference.use_lung_mask and lung_mask is not None:
-            binary_mask = binary_mask * lung_mask.astype(np.uint8)
-        
-        # 3. 連通區域過濾
-        if spacing is not None:
-            voxel_volume = np.prod(spacing)
-            min_voxels = int(self.config.inference.min_volume_mm3 / voxel_volume)
-        else:
-            min_voxels = 5
-        
-        labels = measure.label(binary_mask)
-        regions = measure.regionprops(labels)
-        
-        filtered_mask = np.zeros_like(binary_mask)
-        for region in regions:
-            if region.area >= min_voxels:
-                filtered_mask[labels == region.label] = 1
-        
-        # 4. 形態學平滑
-        if self.config.inference.use_morphology:
-            # 閉運算填充小孔
-            struct = morphology.ball(1)
-            if filtered_mask.ndim == 3:
-                filtered_mask = morphology.binary_closing(filtered_mask, struct)
-            else:
-                struct = morphology.disk(1)
-                filtered_mask = morphology.binary_closing(filtered_mask, struct)
-        
-        return filtered_mask.astype(np.uint8)
+        Args:
+            pred_mask: 預測機率遮罩
+            lung_mask: 肺野遮罩
+            spacing: 體素間距
+            
+        Returns:
+            包含各步驟結果的字典
+        """
+        self.postprocessor.set_spacing(spacing if spacing is not None else np.array([1.0, 1.0, 1.0]))
+        return self.postprocessor(pred_mask, lung_mask, return_intermediate=True)
     
     def run_inference(
         self,
@@ -365,9 +384,10 @@ def load_model_for_inference(
         from train_unetpp.model import get_model
     
     device = device or config.device
+    logger.info(f"Loading model from {checkpoint_path}")
     model = get_model(config)
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()

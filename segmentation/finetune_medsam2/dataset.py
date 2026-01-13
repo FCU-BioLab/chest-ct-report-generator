@@ -47,9 +47,12 @@ def classify_nodule_size(diameter_mm: float) -> str:
 
 class DataAugmentation:
     """
-    資料增強類別
+    資料增強類別（專為 CT 肺結節分割優化）
     
-    提供隨機旋轉、翻轉、gamma 調整等增強方法
+    提供多種增強方法：
+    - 幾何變換：旋轉、翻轉、縮放、彈性形變
+    - 強度變換：Gamma、對比度、亮度、高斯噪音
+    - CT 專用：模擬 CT 偽影、局部遮擋
     
     Args:
         rotation_prob: 旋轉機率
@@ -59,6 +62,11 @@ class DataAugmentation:
         noise_prob: 高斯噪音機率
         contrast_prob: 對比度調整機率
         scale_prob: 縮放增強機率
+        elastic_prob: 彈性形變機率
+        brightness_prob: 亮度調整機率
+        blur_prob: 模糊機率
+        cutout_prob: 隨機遮擋機率
+        mixup_prob: MixUp 機率（需要額外處理）
     """
     
     def __init__(
@@ -69,7 +77,12 @@ class DataAugmentation:
         bbox_shift_limit: int = 10,
         noise_prob: float = 0.2,
         contrast_prob: float = 0.3,
-        scale_prob: float = 0.3
+        scale_prob: float = 0.3,
+        elastic_prob: float = 0.0,
+        brightness_prob: float = 0.2,
+        blur_prob: float = 0.1,
+        cutout_prob: float = 0.1,
+        fine_rotation_prob: float = 0.3
     ):
         self.rotation_prob = rotation_prob
         self.flip_prob = flip_prob
@@ -78,6 +91,115 @@ class DataAugmentation:
         self.noise_prob = noise_prob
         self.contrast_prob = contrast_prob
         self.scale_prob = scale_prob
+        self.elastic_prob = elastic_prob
+        self.brightness_prob = brightness_prob
+        self.blur_prob = blur_prob
+        self.cutout_prob = cutout_prob
+        self.fine_rotation_prob = fine_rotation_prob
+    
+    def _apply_elastic_transform(self, image: np.ndarray, mask: np.ndarray, 
+                                  alpha: float = 50, sigma: float = 5) -> tuple:
+        """彈性形變（模擬組織變形）"""
+        from scipy.ndimage import gaussian_filter, map_coordinates
+        
+        shape = image.shape[:2]
+        dx = gaussian_filter((np.random.rand(*shape) * 2 - 1), sigma) * alpha
+        dy = gaussian_filter((np.random.rand(*shape) * 2 - 1), sigma) * alpha
+        
+        x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+        indices = (y + dy).flatten(), (x + dx).flatten()
+        
+        # 對影像的每個通道進行變形
+        if len(image.shape) == 3:
+            transformed_image = np.zeros_like(image)
+            for c in range(image.shape[2]):
+                transformed_image[:, :, c] = map_coordinates(
+                    image[:, :, c], indices, order=1, mode='reflect'
+                ).reshape(shape)
+        else:
+            transformed_image = map_coordinates(
+                image, indices, order=1, mode='reflect'
+            ).reshape(shape)
+        
+        # 對 mask 使用最近鄰插值
+        transformed_mask = map_coordinates(
+            mask.astype(np.float32), indices, order=0, mode='reflect'
+        ).reshape(shape)
+        
+        return transformed_image.astype(np.uint8), transformed_mask.astype(mask.dtype)
+    
+    def _apply_fine_rotation(self, image: np.ndarray, mask: np.ndarray, 
+                              angle_range: tuple = (-15, 15)) -> tuple:
+        """小角度旋轉（更自然的變換）"""
+        from scipy.ndimage import rotate
+        import random
+        
+        angle = random.uniform(*angle_range)
+        
+        if len(image.shape) == 3:
+            rotated_image = rotate(image, angle, axes=(0, 1), reshape=False, 
+                                   order=1, mode='constant', cval=0)
+        else:
+            rotated_image = rotate(image, angle, reshape=False, 
+                                   order=1, mode='constant', cval=0)
+        
+        rotated_mask = rotate(mask.astype(np.float32), angle, reshape=False, 
+                              order=0, mode='constant', cval=0)
+        
+        return rotated_image.astype(np.uint8), rotated_mask.astype(mask.dtype)
+    
+    def _apply_gaussian_blur(self, image: np.ndarray, sigma_range: tuple = (0.5, 1.5)) -> np.ndarray:
+        """高斯模糊（模擬運動或對焦不準）"""
+        from scipy.ndimage import gaussian_filter
+        import random
+        
+        sigma = random.uniform(*sigma_range)
+        
+        if len(image.shape) == 3:
+            blurred = np.zeros_like(image)
+            for c in range(image.shape[2]):
+                blurred[:, :, c] = gaussian_filter(image[:, :, c], sigma)
+        else:
+            blurred = gaussian_filter(image, sigma)
+        
+        return blurred.astype(np.uint8)
+    
+    def _apply_cutout(self, image: np.ndarray, mask: np.ndarray,
+                       num_holes: int = 1, hole_size_ratio: float = 0.1) -> np.ndarray:
+        """隨機遮擋（增加魯棒性，不遮擋病灶區域）"""
+        import random
+        
+        h, w = image.shape[:2]
+        hole_size = int(min(h, w) * hole_size_ratio)
+        
+        image_out = image.copy()
+        
+        for _ in range(num_holes):
+            # 嘗試找到非病灶區域
+            for _ in range(10):  # 最多嘗試 10 次
+                y = random.randint(0, h - hole_size)
+                x = random.randint(0, w - hole_size)
+                
+                # 檢查是否與病灶重疊
+                mask_region = mask[y:y+hole_size, x:x+hole_size]
+                if not np.any(mask_region > 0):
+                    # 用黑色填充
+                    if len(image.shape) == 3:
+                        image_out[y:y+hole_size, x:x+hole_size, :] = 0
+                    else:
+                        image_out[y:y+hole_size, x:x+hole_size] = 0
+                    break
+        
+        return image_out
+    
+    def _apply_brightness(self, image: np.ndarray, 
+                           brightness_range: tuple = (-30, 30)) -> np.ndarray:
+        """亮度調整"""
+        import random
+        
+        delta = random.uniform(*brightness_range)
+        image = image.astype(np.float32) + delta
+        return np.clip(image, 0, 255).astype(np.uint8)
     
     def __call__(self, data: Dict) -> Dict:
         """應用資料增強"""
@@ -87,11 +209,19 @@ class DataAugmentation:
         mask = data['mask']    # [H, W]
         bboxes = data['bboxes']  # [N, 4]
         
+        # ============================================
+        # 幾何變換
+        # ============================================
+        
         # 隨機旋轉 (90, 180, 270 度)
         if random.random() < self.rotation_prob:
             k = random.choice([1, 2, 3])
             image = np.rot90(image, k, axes=(0, 1)).copy()
             mask = np.rot90(mask, k, axes=(0, 1)).copy()
+        
+        # 小角度旋轉 (-15° ~ 15°)
+        if random.random() < self.fine_rotation_prob:
+            image, mask = self._apply_fine_rotation(image, mask)
         
         # 隨機水平翻轉
         if random.random() < self.flip_prob:
@@ -109,6 +239,14 @@ class DataAugmentation:
                 h = image.shape[0]
                 bboxes[:, [1, 3]] = h - bboxes[:, [3, 1]]
         
+        # 彈性形變（模擬組織變形）
+        if random.random() < self.elastic_prob:
+            image, mask = self._apply_elastic_transform(image, mask)
+        
+        # ============================================
+        # 強度變換
+        # ============================================
+        
         # Gamma 調整
         if random.random() < self.gamma_prob:
             gamma = random.uniform(0.8, 1.2)
@@ -122,12 +260,28 @@ class DataAugmentation:
             image = (image - mean_val) * factor + mean_val
             image = np.clip(image, 0, 255).astype(np.uint8)
         
+        # 亮度調整
+        if random.random() < self.brightness_prob:
+            image = self._apply_brightness(image)
+        
         # 高斯噪音
         if random.random() < self.noise_prob:
             noise_std = random.uniform(3, 10)
             noise = np.random.normal(0, noise_std, image.shape)
             image = image.astype(np.float32) + noise
             image = np.clip(image, 0, 255).astype(np.uint8)
+        
+        # 高斯模糊
+        if random.random() < self.blur_prob:
+            image = self._apply_gaussian_blur(image)
+        
+        # ============================================
+        # 正則化增強
+        # ============================================
+        
+        # 隨機遮擋 (Cutout)
+        if random.random() < self.cutout_prob:
+            image = self._apply_cutout(image, mask)
         
         # 隨機縮放
         if random.random() < self.scale_prob:
@@ -188,8 +342,23 @@ class DataAugmentation:
                             minr, minc, maxr, maxc = region.bbox
                             new_bboxes.append([minc, minr, maxc, maxr])
                         bboxes = np.array(new_bboxes)
+        
+        # ============================================
+        # 重新計算 bboxes（確保與 mask 一致）
+        # ============================================
+        # 在幾何變換後從 mask 重新計算 bbox
+        if len(bboxes) > 0:
+            from skimage import measure
+            labeled_mask = measure.label(mask > 0)
+            regions = measure.regionprops(labeled_mask)
+            if regions:
+                new_bboxes = []
+                for region in regions:
+                    minr, minc, maxr, maxc = region.bbox
+                    new_bboxes.append([minc, minr, maxc, maxr])
+                bboxes = np.array(new_bboxes)
             
-        # Bounding Box 擾動
+        # Bounding Box 擾動（最後才做，模擬不完美的檢測）
         if len(bboxes) > 0 and self.bbox_shift_limit > 0:
             h, w = image.shape[:2]
             noise = np.random.randint(-self.bbox_shift_limit, self.bbox_shift_limit, size=bboxes.shape)
@@ -250,7 +419,8 @@ class LNDbDataset(Dataset):
         cache_data: bool = False,
         rad_id: str = 'consensus',
         min_nodule_diameter: float = 0.0,
-        use_2_5d: bool = True  # ✅ 新增：2.5D 模式
+        use_2_5d: bool = True,  # ✅ 新增：2.5D 模式
+        fixed_bbox_size: int = 64  # ✅ 新增：固定 bbox 大小 (0 = 使用動態大小)
     ):
         self.data_dir = Path(data_dir)
         self.patient_ids = patient_ids
@@ -260,6 +430,7 @@ class LNDbDataset(Dataset):
         self.rad_id = rad_id
         self.min_nodule_diameter = min_nodule_diameter
         self.use_2_5d = use_2_5d  # ✅ 儲存 2.5D 模式設定
+        self.fixed_bbox_size = fixed_bbox_size  # ✅ 儲存固定 bbox 大小
         
         self.logger = logging.getLogger(__name__)
         
@@ -273,7 +444,8 @@ class LNDbDataset(Dataset):
         
         self.logger.info(f"🔧 使用 LNDb 資料集 (專家分割遮罩)")
         self.logger.info(f"🔧 放射科醫師選擇: {rad_id}")
-        self.logger.info(f"🔧 輸入模式: {'2.5D (Z-1, Z, Z+1)' if use_2_5d else '2D (單一切片)'}")  # ✅ 顯示模式
+        self.logger.info(f"🔧 輸入模式: {'2.5D (Z-1, Z, Z+1)' if use_2_5d else '2D (單一切片)'}")
+        self.logger.info(f"📦 BBox 大小: {'Fixed ' + str(fixed_bbox_size) + 'x' + str(fixed_bbox_size) + 'px' if fixed_bbox_size > 0 else 'Dynamic (from mask)'}")
         if min_nodule_diameter > 0:
             self.logger.info(f"🔍 過濾小於 {min_nodule_diameter}mm 的結節")
         
@@ -595,17 +767,43 @@ class LNDbDataset(Dataset):
     
     
     def _extract_bboxes(self, mask: np.ndarray) -> np.ndarray:
-        """從遮罩提取 bounding boxes"""
+        """從遮罩提取 bounding boxes
+        
+        如果 fixed_bbox_size > 0，則使用固定大小的 bbox（以病灶中心為中心）
+        否則使用 mask 的實際邊界
+        """
         if mask.sum() == 0:
             return np.array([[0, 0, 1, 1]])
         
+        h, w = mask.shape
         labeled_mask = measure.label(mask > 0)
         regions = measure.regionprops(labeled_mask)
         
         bboxes = []
         for region in regions:
-            minr, minc, maxr, maxc = region.bbox
-            bboxes.append([minc, minr, maxc, maxr])
+            if self.fixed_bbox_size > 0:
+                # 使用固定大小 bbox，以病灶 centroid 為中心
+                cy, cx = region.centroid  # centroid 回傳 (row, col)
+                half_size = self.fixed_bbox_size // 2
+                
+                x1 = int(cx - half_size)
+                y1 = int(cy - half_size)
+                x2 = int(cx + half_size)
+                y2 = int(cy + half_size)
+                
+                # Clip to image bounds
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(w, x2)
+                y2 = min(h, y2)
+                
+                # 確保 bbox 有效
+                if x2 > x1 and y2 > y1:
+                    bboxes.append([x1, y1, x2, y2])
+            else:
+                # 使用 mask 的實際邊界
+                minr, minc, maxr, maxc = region.bbox
+                bboxes.append([minc, minr, maxc, maxr])
         
         return np.array(bboxes) if bboxes else np.array([[0, 0, 1, 1]])
     
@@ -670,7 +868,8 @@ class CachedSliceDataset(Dataset):
         patient_ids: Optional[List] = None,
         transform: Optional[Callable] = None,
         target_size: tuple = (512, 512),
-        use_2_5d: bool = True  # ✅ 新增：2.5D 模式
+        use_2_5d: bool = True,  # ✅ 新增：2.5D 模式
+        fixed_bbox_size: int = 64  # ✅ 新增：固定 bbox 大小 (0 = 使用動態大小)
     ):
         self.cache_dir = Path(cache_dir)
         self.dataset_type = dataset_type.lower()
@@ -678,6 +877,7 @@ class CachedSliceDataset(Dataset):
         self.transform = transform
         self.target_size = target_size
         self.use_2_5d = use_2_5d  # ✅ 儲存 2.5D 模式設定
+        self.fixed_bbox_size = fixed_bbox_size  # ✅ 儲存固定 bbox 大小
         
         self.logger = logging.getLogger(__name__)
         
@@ -694,7 +894,8 @@ class CachedSliceDataset(Dataset):
         self._build_sample_index()
         
         self.logger.info(f"✅ CachedSliceDataset: {len(self.samples)} 個切片 "
-                        f"(類型: {dataset_type}, 模式: {'2.5D' if use_2_5d else '2D'})")  # ✅ 顯示模式
+                        f"(類型: {dataset_type}, 模式: {'2.5D' if use_2_5d else '2D'}, "
+                        f"BBox: {'Fixed ' + str(fixed_bbox_size) + 'x' + str(fixed_bbox_size) if fixed_bbox_size > 0 else 'Dynamic'})")  # ✅ 顯示模式
     
     def _build_sample_index(self):
         """建立所有有效切片的索引"""
@@ -856,17 +1057,43 @@ class CachedSliceDataset(Dataset):
         }
     
     def _extract_bboxes(self, mask: np.ndarray) -> np.ndarray:
-        """從遮罩提取 bounding boxes"""
+        """從遮罩提取 bounding boxes
+        
+        如果 fixed_bbox_size > 0，則使用固定大小的 bbox（以病灶中心為中心）
+        否則使用 mask 的實際邊界
+        """
         if mask.sum() == 0:
             return np.array([[0, 0, 1, 1]])
         
+        h, w = mask.shape
         labeled_mask = measure.label(mask > 0)
         regions = measure.regionprops(labeled_mask)
         
         bboxes = []
         for region in regions:
-            minr, minc, maxr, maxc = region.bbox
-            bboxes.append([minc, minr, maxc, maxr])
+            if self.fixed_bbox_size > 0:
+                # 使用固定大小 bbox，以病灶 centroid 為中心
+                cy, cx = region.centroid  # centroid 回傳 (row, col)
+                half_size = self.fixed_bbox_size // 2
+                
+                x1 = int(cx - half_size)
+                y1 = int(cy - half_size)
+                x2 = int(cx + half_size)
+                y2 = int(cy + half_size)
+                
+                # Clip to image bounds
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(w, x2)
+                y2 = min(h, y2)
+                
+                # 確保 bbox 有效
+                if x2 > x1 and y2 > y1:
+                    bboxes.append([x1, y1, x2, y2])
+            else:
+                # 使用 mask 的實際邊界
+                minr, minc, maxr, maxc = region.bbox
+                bboxes.append([minc, minr, maxc, maxr])
         
         return np.array(bboxes) if bboxes else np.array([[0, 0, 1, 1]])
     
