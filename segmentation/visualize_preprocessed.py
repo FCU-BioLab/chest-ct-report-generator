@@ -31,12 +31,13 @@ plt.rcParams['axes.unicode_minus'] = False
 
 
 class SliceDataLoader:
-    """切片資料載入器"""
+    """切片資料載入器（支援 slice 和 4-patch 格式）"""
     
     def __init__(self, cache_dir: str):
         self.cache_dir = Path(cache_dir)
         self.patients = []
         self.patient_meta = {}
+        self.mode = 'slice'  # 'slice' or '4patch'
         self._find_patients()
     
     def _find_patients(self):
@@ -50,7 +51,16 @@ class SliceDataLoader:
                 with open(patient_dir / "meta.json", 'r') as f:
                     self.patient_meta[patient_dir.name] = json.load(f)
         
-        print(f"找到 {len(self.patients)} 個病人")
+        # 檢測模式
+        if self.patients:
+            meta = self.patient_meta[self.patients[0]]
+            preprocessing = meta.get('preprocessing', {})
+            if preprocessing.get('mode') == '4-patch':
+                self.mode = '4patch'
+            else:
+                self.mode = 'slice'
+        
+        print(f"找到 {len(self.patients)} 個病人 (模式: {self.mode})")
     
     def get_patient_list(self):
         """取得病人列表"""
@@ -60,8 +70,30 @@ class SliceDataLoader:
         """取得病人 meta"""
         return self.patient_meta.get(patient_id, {})
     
+    def get_available_slices(self, patient_id: str):
+        """取得可用的切片索引列表"""
+        patient_dir = self.cache_dir / patient_id
+        if self.mode == '4patch':
+            # 從 patch 檔案名稱解析切片索引
+            slices = set()
+            for f in patient_dir.glob('slice_*_patch_*.npz'):
+                # slice_0044_patch_0.npz -> 44
+                parts = f.stem.split('_')
+                if len(parts) >= 2:
+                    slices.add(int(parts[1]))
+            return sorted(slices)
+        else:
+            # 從 slice 檔案名稱解析
+            slices = []
+            for f in patient_dir.glob('slice_*.npz'):
+                # slice_0044.npz -> 44
+                parts = f.stem.split('_')
+                if len(parts) == 2:
+                    slices.append(int(parts[1]))
+            return sorted(slices)
+    
     def load_slice(self, patient_id: str, slice_idx: int):
-        """載入切片"""
+        """載入切片（slice 模式）"""
         slice_path = self.cache_dir / patient_id / f"slice_{slice_idx:04d}.npz"
         if not slice_path.exists():
             return None
@@ -72,16 +104,36 @@ class SliceDataLoader:
             'mask': data['mask'].astype(np.float32),
             'lung_mask': data['lung_mask']
         }
+    
+    def load_patches(self, patient_id: str, slice_idx: int):
+        """載入 4-patch（4patch 模式）"""
+        patient_dir = self.cache_dir / patient_id
+        patches = []
+        
+        for patch_idx in range(4):
+            patch_path = patient_dir / f"slice_{slice_idx:04d}_patch_{patch_idx}.npz"
+            if patch_path.exists():
+                data = np.load(patch_path, allow_pickle=True)
+                patches.append({
+                    'image': data['image'].astype(np.float32),
+                    'mask': data['mask'].astype(np.float32),
+                    'lung_mask': data['lung_mask'],
+                    'patch_idx': int(data['patch_idx']),
+                    'patch_pos': data['patch_pos']
+                })
+        
+        return patches if patches else None
 
 
 class SliceViewer:
-    """切片互動式檢視器"""
+    """切片互動式檢視器（支援 slice 和 4-patch 格式）"""
     
     def __init__(self, data_loader: SliceDataLoader, initial_patient: str = None):
         self.loader = data_loader
         self.current_patient = None
         self.current_slice = None
         self.meta = None
+        self.available_slices = []  # 可用切片索引列表
         
         self._create_gui()
         
@@ -97,8 +149,9 @@ class SliceViewer:
     def _create_gui(self):
         """建立 GUI"""
         self.root = tk.Tk()
-        self.root.title('預處理切片檢視器 - Lungmask + 2.5D Pipeline')
-        self.root.geometry('1200x800')
+        mode_str = "4-Patch" if self.loader.mode == '4patch' else "Slice"
+        self.root.title(f'預處理檢視器 - {mode_str} 模式')
+        self.root.geometry('1400x900')
         
         # 主框架
         main_frame = tk.Frame(self.root)
@@ -183,18 +236,27 @@ class SliceViewer:
         image_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # 建立 matplotlib 圖形
-        self.fig = plt.figure(figsize=(12, 8))
+        self.fig = plt.figure(figsize=(14, 10))
         
-        # 2x2 佈局
-        self.ax_image = self.fig.add_subplot(221)
-        self.ax_mask = self.fig.add_subplot(222)
-        self.ax_lung = self.fig.add_subplot(223)
-        self.ax_overlay = self.fig.add_subplot(224)
-        
-        self.ax_image.set_title('Image (CT)')
-        self.ax_mask.set_title('Mask (Nodule GT)')
-        self.ax_lung.set_title('Lung Mask')
-        self.ax_overlay.set_title('Overlay')
+        # 根據模式選擇佈局
+        if self.loader.mode == '4patch':
+            # 4-patch 模式: 2x4 佈局 (4 patches, 每個 patch 顯示 image+overlay)
+            self.patch_axes = []
+            for i in range(4):
+                ax_img = self.fig.add_subplot(2, 4, i + 1)
+                ax_overlay = self.fig.add_subplot(2, 4, i + 5)
+                self.patch_axes.append((ax_img, ax_overlay))
+        else:
+            # slice 模式: 2x2 佈局
+            self.ax_image = self.fig.add_subplot(221)
+            self.ax_mask = self.fig.add_subplot(222)
+            self.ax_lung = self.fig.add_subplot(223)
+            self.ax_overlay = self.fig.add_subplot(224)
+            
+            self.ax_image.set_title('Image (CT)')
+            self.ax_mask.set_title('Mask (Nodule GT)')
+            self.ax_lung.set_title('Lung Mask')
+            self.ax_overlay.set_title('Overlay')
         
         plt.tight_layout()
         
@@ -219,25 +281,37 @@ class SliceViewer:
         self.current_patient = patient_id
         self.meta = self.loader.get_meta(patient_id)
         
-        # 更新切片滑桿
-        num_slices = self.meta.get('num_slices', 1)
-        self.z_scale.configure(to=num_slices - 1)
-        self.z_var.set(num_slices // 2)
+        # 取得可用切片列表
+        self.available_slices = self.loader.get_available_slices(patient_id)
+        
+        if not self.available_slices:
+            self.status_var.set(f"無可用切片: {patient_id}")
+            return
+        
+        # 更新切片滑桿（使用索引而非切片號）
+        self.z_scale.configure(to=len(self.available_slices) - 1)
+        self.z_var.set(len(self.available_slices) // 2)
         
         # 更新正樣本列表
         self.positive_listbox.delete(0, tk.END)
         positive = self.meta.get('positive_slices', [])
+        # 只顯示有存檔的正樣本
         for z in positive:
-            self.positive_listbox.insert(tk.END, f"Slice {z:04d}")
+            if z in self.available_slices:
+                self.positive_listbox.insert(tk.END, f"Slice {z:04d}")
         
         # 更新統計
+        mode = self.meta.get('preprocessing', {}).get('mode', 'slice')
         stats_text = f"病人: {patient_id}\n"
-        stats_text += f"切片數: {num_slices}\n"
+        stats_text += f"模式: {mode}\n"
+        stats_text += f"可用切片: {len(self.available_slices)}\n"
         stats_text += f"正樣本: {len(positive)} slices\n"
+        if mode == '4-patch':
+            stats_text += f"Patches: {self.meta.get('saved_patches', 'N/A')}\n"
         stats_text += f"Spacing: {self.meta.get('spacing', 'N/A')}"
         self.stats_label.config(text=stats_text)
         
-        self.status_var.set(f"已載入: {patient_id} ({num_slices} slices, {len(positive)} positive)")
+        self.status_var.set(f"已載入: {patient_id} ({len(self.available_slices)} slices available)")
         
         self._update_display()
     
@@ -259,27 +333,127 @@ class SliceViewer:
         text = self.positive_listbox.get(selection[0])
         # 解析 "Slice 0044" -> 44
         z = int(text.split()[-1])
-        self.z_var.set(z)
-        self._update_display()
+        
+        # 找到對應的索引
+        if z in self.available_slices:
+            idx = self.available_slices.index(z)
+            self.z_var.set(idx)
+            self._update_display()
     
     def _on_mousewheel(self, event):
         """滑鼠滾輪"""
-        if not self.current_patient:
+        if not self.current_patient or not self.available_slices:
             return
         
         delta = -1 if event.delta > 0 else 1
-        new_z = self.z_var.get() + delta
-        num_slices = self.meta.get('num_slices', 1)
-        new_z = max(0, min(new_z, num_slices - 1))
-        self.z_var.set(new_z)
+        new_idx = self.z_var.get() + delta
+        new_idx = max(0, min(new_idx, len(self.available_slices) - 1))
+        self.z_var.set(new_idx)
         self._update_display()
     
     def _update_display(self):
         """更新顯示"""
-        if not self.current_patient:
+        if not self.current_patient or not self.available_slices:
             return
         
-        z = self.z_var.get()
+        # 從索引取得實際切片號
+        idx = self.z_var.get()
+        if idx >= len(self.available_slices):
+            idx = len(self.available_slices) - 1
+        z = self.available_slices[idx]
+        
+        alpha = self.alpha_var.get()
+        
+        if self.loader.mode == '4patch':
+            self._update_display_4patch(z, alpha)
+        else:
+            self._update_display_slice(z, alpha)
+    
+    def _update_display_4patch(self, z: int, alpha: float):
+        """更新 4-patch 顯示"""
+        patches = self.loader.load_patches(self.current_patient, z)
+        
+        if not patches:
+            self.status_var.set(f"無法載入切片 {z} 的 patches")
+            return
+        
+        # 更新切片資訊
+        is_positive = z in self.meta.get('positive_slices', [])
+        is_2_5d = self.meta.get('is_2_5d', False)
+        format_str = "(2.5D)" if is_2_5d else ""
+        self.slice_info_var.set(f"Slice: {z} ({len(patches)} patches) {format_str} {'(+)' if is_positive else ''}")
+        
+        # 清除並重繪
+        patch_names = ['Top-Left', 'Top-Right', 'Bottom-Left', 'Bottom-Right']
+        
+        for i, (ax_img, ax_overlay) in enumerate(self.patch_axes):
+            ax_img.clear()
+            ax_overlay.clear()
+            
+            if i < len(patches):
+                patch = patches[i]
+                image_raw = patch['image']
+                mask = patch['mask']
+                lung_mask = patch['lung_mask']
+                
+                # Handle 2.5D format: (d, H, W) -> extract middle slice
+                if image_raw.ndim == 3:
+                    # 2.5D: use middle slice (index // 2)
+                    mid_idx = image_raw.shape[0] // 2
+                    image = image_raw[mid_idx]  # (H, W)
+                else:
+                    image = image_raw  # Already (H, W)
+                
+                # Image
+                ax_img.imshow(image, cmap='gray')
+                mask_area = (mask > 0).sum()
+                title = f'{patch_names[i]}\n[{image.min():.2f}, {image.max():.2f}]'
+                if mask_area > 0:
+                    title += f' ⚫{mask_area}px'
+                ax_img.set_title(title, fontsize=9)
+                ax_img.axis('off')
+                
+                # Overlay - for 2.5D, show as pseudo-RGB using middle 3 channels
+                if image_raw.ndim == 3 and image_raw.shape[0] >= 3:
+                    # Select middle 3 channels for RGB
+                    mid_idx = image_raw.shape[0] // 2
+                    rgb_indices = [mid_idx-1, mid_idx, mid_idx+1]
+                    
+                    # Normalize each channel
+                    overlay = np.stack([image_raw[k] for k in rgb_indices], axis=-1)  # (H, W, 3)
+                    for c in range(3):
+                        ch = overlay[:, :, c]
+                        overlay[:, :, c] = (ch - ch.min()) / (ch.max() - ch.min() + 1e-6)
+                else:
+                    overlay = np.stack([image, image, image], axis=-1)
+                    overlay = (overlay - overlay.min()) / (overlay.max() - overlay.min() + 1e-6)
+                
+                if self.show_lung_var.get():
+                    lung_overlay = np.zeros_like(overlay)
+                    lung_overlay[:, :, 2] = (lung_mask > 0).astype(float) * 0.3
+                    overlay = np.clip(overlay + lung_overlay, 0, 1)
+                
+                if self.show_mask_var.get():
+                    nodule_overlay = np.zeros_like(overlay)
+                    nodule_overlay[:, :, 0] = (mask > 0).astype(float) * alpha
+                    overlay = np.clip(overlay + nodule_overlay, 0, 1)
+                
+                ax_overlay.imshow(overlay)
+                overlay_title = f'Overlay {patch_names[i]}'
+                if image_raw.ndim == 3 and image_raw.shape[0] == 3:
+                    overlay_title += '\n(R=z-1, G=z, B=z+1)'
+                ax_overlay.set_title(overlay_title, fontsize=9)
+                ax_overlay.axis('off')
+            else:
+                ax_img.set_title(f'{patch_names[i]}\n(N/A)', fontsize=9)
+                ax_img.axis('off')
+                ax_overlay.axis('off')
+        
+        self.fig.tight_layout()
+        self.canvas.draw()
+    
+    def _update_display_slice(self, z: int, alpha: float):
+        """更新 slice 顯示"""
         data = self.loader.load_slice(self.current_patient, z)
         
         if data is None:
@@ -293,8 +467,6 @@ class SliceViewer:
         # 更新切片資訊
         is_positive = z in self.meta.get('positive_slices', [])
         self.slice_info_var.set(f"Slice: {z} / {self.meta.get('num_slices', 0) - 1} {'(+)' if is_positive else ''}")
-        
-        alpha = self.alpha_var.get()
         
         # 清除所有圖
         for ax in [self.ax_image, self.ax_mask, self.ax_lung, self.ax_overlay]:
@@ -346,7 +518,7 @@ def main():
     parser = argparse.ArgumentParser(description='預處理切片檢視器')
     parser.add_argument('--cache_dir', type=str,
                         # default='C:/GitHub/chest-ct-report-generator/segmentation/cache/msd_lung_slices',
-                        default='C:/GitHub/chest-ct-report-generator/segmentation/cache/lndb_slices',
+                        default='C:/GitHub/chest-ct-report-generator/segmentation/cache/lndb_patches',
                         help='切片快取目錄')
     parser.add_argument('--patient', type=str, default=None,
                         help='初始載入的病人 ID')

@@ -135,7 +135,7 @@ slice_XXXX.npz
 每個 Epoch 結束:
 ┌─────────────────────────────────────┐
 │ 評估指標:                           │
-│    ├─ Dice Score (主要)             │
+│    ├─ Dice Score (3D Volume Dice)   │
 │    ├─ IoU / Jaccard                 │
 │    ├─ Precision / Recall            │
 │    ├─ Specificity / Accuracy        │
@@ -164,6 +164,10 @@ python main.py --test --resume best_model.pth
 │    ├─ 強度統計特徵                  │
 │    ├─ 深層特徵向量                  │
 │    └─ 病灶分類 (惡性/良性)          │
+│    └─ 模擬點擊 (Click Prompt)       │
+├─────────────────────────────────────┤
+│ 後處理 (Post-processing)            │
+│    └─ NPY → NIfTI (3D Reconstruct)  │
 └─────────────────────────────────────┘
         │
         ▼
@@ -344,5 +348,34 @@ python finetune_medsam2/main.py --no_2_5d --epochs 100
 python finetune_medsam2/main.py --split_file result/.../dataset_split.json
 
 # 只評估模型
-python finetune_medsam2/main.py --eval_only --resume result/.../best_model.pth
+
+# 模擬醫生點擊測試 (Click Simulation)
+python finetune_medsam2/main.py --test --test_prompt_type point --resume result/.../best_model.pth
+
+# 後處理：將預測結果轉換為 NIfTI 格式
+python finetune_medsam2/postprocess.py --result_dir result/segmentation_...
 ```
+
+## 🧠 評估指標說明 (Volume Dice vs Slice Dice)
+
+本專案採用 **Volume Dice** 作為主要評估指標，與傳統 Slice Dice 相比：
+- **Volume Dice** (`2*Intersection / (Vol_Pred + Vol_GT)`): 把整個 3D 結節視為一個整體計算。更符合視覺感受，不會被邊緣小切片的低分影響。
+- **Slice Dice**: 計算每張切片的 Dice 後取平均。容易低估 3D 分割品質。
+
+> ⚠️ 注意: 訓練過程中看到的 Dice 已經修正為 Volume Dice。
+
+## 🛠️ 後處理工具 (Post-processing)
+
+`postprocess.py` 用於將模型預測的 2D 切片 (`.npy`) 重組回原始 3D CT 空間 (`.nii.gz`)。
+
+```bash
+python finetune_medsam2/postprocess.py --result_dir <RESULT_DIR>
+```
+
+**功能:**
+- 自動讀取 `training_config.json` 找到原始 CT 資訊
+- 重組 3D Mask 並還原幾何資訊 (Spacing, Origin, Direction)
+- **LCC (Largest Connected Component)**: 只保留最大連通區 (去除雜訊)
+- **Smoothing**: 形態學平滑處理 (Closing)
+- **Small Object Removal**: 去除小於指定體積的雜訊
+

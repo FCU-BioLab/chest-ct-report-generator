@@ -274,8 +274,8 @@ def main():
         "--loss_type",
         type=str,
         default=_default_config.training.loss_type,
-        choices=["combined", "enhanced", "native", "tversky", "focal"],
-        help="損失函數類型: combined=Dice+BCE(預設), enhanced=多損失組合(推薦高DSC), native=MedSAM2原生(Dice+Focal), tversky=Tversky, focal=Focal"
+        choices=["combined", "enhanced", "native", "tversky", "focal", "precision"],
+        help="損失函數類型: combined=Dice+BCE(預設), enhanced=增強版(推薦高DSC), native=MedSAM2原生, tversky=Tversky, focal=Focal, precision=Precision聚焦"
     )
     parser.add_argument(
         "--warmup_epochs",
@@ -297,14 +297,22 @@ def main():
     parser.add_argument(
         "--use_2_5d",
         action="store_true",
-        default=True,
+        default=_default_config.data.use_2_5d,
         help="使用 2.5D 輸入 (Z-1, Z, Z+1)，提升上下文資訊和分割效果 (預設啟用)"
     )
     parser.add_argument(
-        "--no_2_5d",
-        action="store_false",
-        dest="use_2_5d",
-        help="禁用 2.5D 模式，使用傳統 2D 輸入（三個通道重複同一切片）"
+        "--fixed_bbox_size",
+        type=int,
+        default=0,
+        help="固定 BBox 大小 (像素)，0 = 使用動態大小 (預設 0)"
+    )
+    
+    parser.add_argument(
+        "--test_prompt_type",
+        type=str,
+        default='bbox',
+        choices=['bbox', 'point'],
+        help="測試時的提示類型: 'bbox' (預設) 或 'point' (模擬點擊)"
     )
     
     args = parser.parse_args()
@@ -337,7 +345,7 @@ def main():
                 'accumulation_steps', 'config', 'checkpoint', 'augmentation', 
                 'num_workers', 'cache_data', 'segmentation_method', 'seed', 
                 'loss_type', 'warmup_epochs', 'strong_augmentation',
-                'min_nodule_diameter'
+                'min_nodule_diameter', 'fixed_bbox_size'
             ]
             
             # 取得使用者在命令列中明確指定的參數
@@ -424,25 +432,37 @@ def main():
     transform = None
     if args.augmentation or args.strong_augmentation:
         if args.strong_augmentation:
-            # 強資料增強：更高的增強機率
+            # 強資料增強：適度變換（避免破壞預訓練知識）
             transform = DataAugmentation(
-                rotation_prob=0.5,
+                rotation_prob=0.5,        # 90/180/270 度旋轉
+                fine_rotation_prob=0.2,   # 小角度旋轉 (-10° ~ 10°)
                 flip_prob=0.5,
-                gamma_prob=0.4,
-                noise_prob=0.3,          # 高斯噪聲
-                contrast_prob=0.4,       # 對比度調整
-                scale_prob=0.3,          # 縮放增強
-                elastic_prob=0.3,        # 彈性形變
-                bbox_shift_limit=15      # 更大的 bbox 擾動
+                gamma_prob=0.2,           # 降低強度變換機率
+                noise_prob=0.1,           # 輕微噪聲
+                contrast_prob=0.2,        # 輕微對比度
+                brightness_prob=0.1,      # 輕微亮度
+                scale_prob=0.2,           # 輕微縮放
+                elastic_prob=0.0,         # 關閉彈性形變（破壞預訓練）
+                blur_prob=0.0,            # 關閉模糊（破壞預訓練）
+                cutout_prob=0.0,          # 關閉 cutout
+                bbox_shift_limit=10       # 適度 bbox 擾動
             )
-            logger.info("🔄 已啟用強資料增強（更高機率 + 更多變換）")
+            logger.info("🔄 已啟用強資料增強（適度調整版）")
+            logger.info("   ├─ 幾何變換: 旋轉, 小角度旋轉, 翻轉, 縮放")
+            logger.info("   ├─ 強度變換: Gamma, 對比度, 亮度, 噪聲（輕微）")
+            logger.info("   └─ 已關閉: 彈性形變, 模糊, Cutout（避免破壞預訓練）")
         else:
             transform = DataAugmentation(
                 rotation_prob=0.5,
+                fine_rotation_prob=0.0,   # 關閉小角度旋轉
                 flip_prob=0.5,
-                gamma_prob=0.3
+                gamma_prob=0.2,
+                noise_prob=0.1,
+                contrast_prob=0.15,
+                brightness_prob=0.1,
+                bbox_shift_limit=5
             )
-            logger.info("🔄 已啟用基本資料增強")
+            logger.info("🔄 已啟用基本資料增強（翻轉 + 旋轉 + 輕微強度調整）")
     
     # 建立資料集（僅快取模式）
     logger.info("🔧 建立資料集...")
@@ -499,21 +519,24 @@ def main():
         dataset_type=args.cache_dataset_type,
         patient_ids=train_ids,
         transform=transform,
-        use_2_5d=getattr(args, 'use_2_5d', True)  # ✅ 2.5D 模式
+        use_2_5d=getattr(args, 'use_2_5d', True),
+        fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
     )
     val_dataset = CachedSliceDataset(
         str(cache_path),
         dataset_type=args.cache_dataset_type,
         patient_ids=val_ids,
         transform=None,
-        use_2_5d=getattr(args, 'use_2_5d', True)  # ✅ 2.5D 模式
+        use_2_5d=getattr(args, 'use_2_5d', True),
+        fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
     )
     test_dataset = CachedSliceDataset(
         str(cache_path),
         dataset_type=args.cache_dataset_type,
         patient_ids=test_ids,
         transform=None,
-        use_2_5d=getattr(args, 'use_2_5d', True)  # ✅ 2.5D 模式
+        use_2_5d=getattr(args, 'use_2_5d', True),
+        fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
     )
     
     # 儲存分割資訊
@@ -677,7 +700,8 @@ def main():
             spacing=(1.0, 1.0),  # 可以從 DICOM metadata 讀取
             min_area=_default_config.inference.min_area,  # ✅ 從 config 讀取
             min_confidence=_default_config.inference.min_confidence,  # ✅ 從 config 讀取
-            min_dice=_default_config.inference.min_dice  # ✅ 從 config 讀取
+            min_dice=_default_config.inference.min_dice,  # ✅ 從 config 讀取
+            prompt_type=args.test_prompt_type  # ✅ 加入提示類型
         )
         
         # 保存測試配置
@@ -789,7 +813,8 @@ def main():
         output_dir=str(feature_output_dir),
         extract_deep_features=args.extract_features,  # 深層特徵提取是可選的
         save_predictions=True,
-        save_visualizations=save_vis
+        save_visualizations=save_vis,
+        prompt_type=args.test_prompt_type  # ✅ 加入提示類型
     )
         
     # 同時使用 validate 獲取標準化的測試指標和患者追蹤

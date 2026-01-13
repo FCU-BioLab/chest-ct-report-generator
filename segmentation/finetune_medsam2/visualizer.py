@@ -4,11 +4,13 @@
 提供 GT 和 Prediction 對比圖生成功能
 """
 
+import gc
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+from PIL import Image
 
 
 class SegmentationVisualizer:
@@ -18,10 +20,11 @@ class SegmentationVisualizer:
     生成 Ground Truth 和 Prediction 的對比圖片
     """
     
-    def __init__(self, output_dir: str, dpi: int = 150):
+    def __init__(self, output_dir: str, dpi: int = 100):
         self.output_dir = Path(output_dir)
         self.dpi = dpi
         self.logger = logging.getLogger(__name__)
+        self._gc_counter = 0  # 垃圾回收計數器
         
         # 直接使用傳入的目錄作為可視化目錄
         self.vis_dir = self.output_dir
@@ -30,6 +33,63 @@ class SegmentationVisualizer:
         # 儲存每個患者的切片結果（用於生成摘要圖）
         self.patient_slice_results: Dict[str, List[Dict]] = {}
     
+    def _draw_bbox_with_size(self, ax, bbox, color='cyan', linewidth=2, linestyle='--'):
+        """
+        Draw a bounding box with size annotation
+        
+        Args:
+            ax: matplotlib axis
+            bbox: [x1, y1, x2, y2] coordinates
+            color: box color
+            linewidth: line width
+            linestyle: line style
+        """
+        import matplotlib.pyplot as plt
+        
+        if len(bbox) != 4:
+            return
+        
+        x1, y1, x2, y2 = bbox
+        width = x2 - x1
+        height = y2 - y1
+        
+        # Draw rectangle
+        rect = plt.Rectangle((x1, y1), width, height,
+                             fill=False, edgecolor=color, linewidth=linewidth, linestyle=linestyle)
+        ax.add_patch(rect)
+        
+        # Add size label at top-left corner of bbox
+        size_text = f'{int(width)}x{int(height)}px'
+        ax.text(x1, y1 - 3, size_text, fontsize=9, color=color, 
+                fontweight='bold', ha='left', va='bottom',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='none'))
+    
+    def _draw_points(self, ax, points, labels, marker_size=10):
+        """
+        Draw point prompts
+        
+        Args:
+            ax: matplotlib axis
+            points: [N, 2] coordinates (x, y)
+            labels: [N] labels (1=positive, 0=negative)
+            marker_size: size of markers
+        """
+        if points is None or len(points) == 0:
+            return
+            
+        points = np.array(points)
+        labels = np.array(labels)
+        
+        # Positive points
+        pos_points = points[labels == 1]
+        if len(pos_points) > 0:
+            ax.scatter(pos_points[:, 0], pos_points[:, 1], color='lime', marker='*', s=marker_size*15, edgecolors='black', linewidth=1.5, zorder=10)
+            
+        # Negative points
+        neg_points = points[labels == 0]
+        if len(neg_points) > 0:
+            ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='x', s=marker_size*10, linewidth=2, zorder=10)
+
     def save_slice_comparison(
         self,
         image: np.ndarray,
@@ -39,7 +99,9 @@ class SegmentationVisualizer:
         slice_idx: int,
         dice_score: float = None,
         iou_score: float = None,
-        bboxes: np.ndarray = None
+        bboxes: np.ndarray = None,
+        points: np.ndarray = None,   # [N, 2]
+        point_labels: np.ndarray = None # [N]
     ) -> Dict:
         """
         保存單個切片的 GT 和 Prediction 對比圖
@@ -53,6 +115,8 @@ class SegmentationVisualizer:
             dice_score: Dice 分數（可選）
             iou_score: IoU 分數（可選）
             bboxes: Bounding boxes（可選）
+            points: Point prompts (x, y)
+            point_labels: Point labels
             
         Returns:
             包含圖片路徑和指標的字典
@@ -90,12 +154,11 @@ class SegmentationVisualizer:
         
         if bboxes is not None and len(bboxes) > 0:
             for bbox in bboxes:
-                if len(bbox) == 4:
-                    x1, y1, x2, y2 = bbox
-                    rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
-                                         fill=False, edgecolor='cyan', linewidth=2, linestyle='--')
-                    ax1.add_patch(rect)
+                self._draw_bbox_with_size(ax1, bbox, color='cyan', linewidth=2, linestyle='--')
         
+        if points is not None:
+             self._draw_points(ax1, points, point_labels)
+
         ax1.set_title(f'Ground Truth\nPatient: {patient_id[:30]}...\nSlice: {slice_idx}', fontsize=12)
         ax1.axis('off')
         
@@ -115,12 +178,11 @@ class SegmentationVisualizer:
         
         if bboxes is not None and len(bboxes) > 0:
             for bbox in bboxes:
-                if len(bbox) == 4:
-                    x1, y1, x2, y2 = bbox
-                    rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
-                                         fill=False, edgecolor='cyan', linewidth=2, linestyle='--')
-                    ax2.add_patch(rect)
+                self._draw_bbox_with_size(ax2, bbox, color='cyan', linewidth=2, linestyle='--')
         
+        if points is not None:
+             self._draw_points(ax2, points, point_labels)
+
         title = f'Prediction\nPatient: {patient_id[:30]}...\nSlice: {slice_idx}'
         if dice_score is not None:
             title += f'\nDice: {dice_score:.4f}'
@@ -143,6 +205,11 @@ class SegmentationVisualizer:
         gt_overlay[gt_binary > 0] = [0, 1, 0, 0.4]
         axes[0].imshow(gt_overlay)
         axes[0].contour(gt_binary, levels=[0.5], colors=['lime'], linewidths=2)
+        if bboxes is not None and len(bboxes) > 0:
+            for bbox in bboxes:
+                self._draw_bbox_with_size(axes[0], bbox, color='cyan', linewidth=2, linestyle='--')
+        if points is not None:
+             self._draw_points(axes[0], points, point_labels)
         axes[0].set_title('Ground Truth', fontsize=14, color='lime')
         axes[0].axis('off')
         
@@ -152,6 +219,11 @@ class SegmentationVisualizer:
         pred_overlay[pred_binary > 0] = [1, 0, 0, 0.4]
         axes[1].imshow(pred_overlay)
         axes[1].contour(pred_binary, levels=[0.5], colors=['red'], linewidths=2)
+        if bboxes is not None and len(bboxes) > 0:
+            for bbox in bboxes:
+                self._draw_bbox_with_size(axes[1], bbox, color='cyan', linewidth=2, linestyle='--')
+        if points is not None:
+             self._draw_points(axes[1], points, point_labels)
         axes[1].set_title('Prediction', fontsize=14, color='red')
         axes[1].axis('off')
         
@@ -171,6 +243,13 @@ class SegmentationVisualizer:
         axes[2].contour(gt_binary, levels=[0.5], colors=['lime'], linewidths=1.5, linestyles='--')
         axes[2].contour(pred_binary, levels=[0.5], colors=['red'], linewidths=1.5)
         
+        # Draw bbox on comparison panel
+        if bboxes is not None and len(bboxes) > 0:
+            for bbox in bboxes:
+                self._draw_bbox_with_size(axes[2], bbox, color='yellow', linewidth=2, linestyle='-')
+        if points is not None:
+             self._draw_points(axes[2], points, point_labels)
+        
         title_overlap = 'Comparison (Green=GT, Red=Pred, Yellow=Overlap)'
         if dice_score is not None:
             title_overlap += f'\nDice: {dice_score:.4f}'
@@ -185,6 +264,11 @@ class SegmentationVisualizer:
         comparison_path = patient_vis_dir / f"slice_{slice_idx:04d}_comparison.png"
         plt.savefig(comparison_path, dpi=self.dpi, bbox_inches='tight', facecolor='black')
         plt.close(fig3)
+        plt.close('all')  # 確保所有圖形都關閉
+        
+        # 清理大型陣列
+        del overlap_rgb, gt_overlay, pred_overlay
+        del overlap, gt_only, pred_only
         
         result = {
             'gt_path': str(gt_path),
@@ -199,6 +283,11 @@ class SegmentationVisualizer:
         if safe_patient_id not in self.patient_slice_results:
             self.patient_slice_results[safe_patient_id] = []
         self.patient_slice_results[safe_patient_id].append(result)
+        
+        # 定期垃圾回收以防止記憶體累積
+        self._gc_counter += 1
+        if self._gc_counter % 10 == 0:
+            gc.collect()
         
         return result
     
@@ -238,7 +327,7 @@ class SegmentationVisualizer:
         cols = min(4, n_slices)
         rows = (n_slices + cols - 1) // cols
         
-        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 5*rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows), dpi=80)
         if rows == 1 and cols == 1:
             axes = np.array([[axes]])
         elif rows == 1:
@@ -253,12 +342,22 @@ class SegmentationVisualizer:
             
             comparison_path = result.get('comparison_path')
             if comparison_path and Path(comparison_path).exists():
-                img = plt.imread(comparison_path)
-                ax.imshow(img)
+                # Use PIL to load image (more memory efficient than plt.imread)
+                try:
+                    with Image.open(comparison_path) as pil_img:
+                        # Resize if too large to save memory
+                        max_size = 400
+                        if pil_img.width > max_size or pil_img.height > max_size:
+                            pil_img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                        img = np.array(pil_img)
+                    ax.imshow(img)
+                    del img
+                except Exception as e:
+                    ax.text(0.5, 0.5, 'Load Error', ha='center', va='center', transform=ax.transAxes)
             
             slice_idx = result.get('slice_idx', idx)
             dice = result.get('dice', 0)
-            ax.set_title(f'Slice {slice_idx}\nDice: {dice:.3f}', fontsize=10)
+            ax.set_title(f'Slice {slice_idx}\nDice: {dice:.3f}', fontsize=9)
             ax.axis('off')
         
         for idx in range(n_slices, rows * cols):
@@ -266,12 +365,15 @@ class SegmentationVisualizer:
             col = idx % cols
             axes[row, col].axis('off')
         
-        fig.suptitle(f'Patient Summary: {patient_id[:50]}...', fontsize=14, y=1.02)
+        fig.suptitle(f'Patient: {patient_id[:30]}', fontsize=12, y=1.01)
         plt.tight_layout()
         
         summary_path = patient_vis_dir / "patient_summary.png"
-        plt.savefig(summary_path, dpi=100, bbox_inches='tight', facecolor='white')
+        plt.savefig(summary_path, dpi=80, bbox_inches='tight', facecolor='white')
         plt.close(fig)
+        
+        # Force garbage collection to free memory
+        gc.collect()
         
         self.logger.info(f"📊 患者摘要圖已保存: {summary_path}")
     

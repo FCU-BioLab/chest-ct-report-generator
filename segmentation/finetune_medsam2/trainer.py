@@ -28,10 +28,11 @@ import matplotlib.pyplot as plt
 from .losses import (
     CombinedLoss, 
     EnhancedCombinedLoss, 
-    TverskyLoss, 
+    TverskyLoss,
     FocalLoss,
-    MedSAM2NativeLoss,
-    NATIVE_LOSS_AVAILABLE
+    MedSAM2NativeLoss, 
+    NATIVE_LOSS_AVAILABLE,
+    PrecisionFocusedLoss
 )
 from .utils import compute_all_metrics, compute_lightweight_metrics, EarlyStopping, PatientMetricsTracker, convert_to_serializable
 from .visualizer import SegmentationVisualizer
@@ -100,6 +101,8 @@ class MedSAM2Trainer:
             'val_specificity': [],
             'val_accuracy': [],
             'val_hausdorff_95': [],
+            'val_lesion_dice': [],  # ✅ 新增：只有病灶切片的 Dice
+            'val_lesion_iou': [],   # ✅ 新增：只有病灶切片的 IoU
             'learning_rate': [],
             'epoch_time': [],
             'inference_time_per_sample': []
@@ -141,10 +144,15 @@ class MedSAM2Trainer:
                 - 'native': MedSAM2 原生損失 (Dice + Focal，與 MedSAM2 訓練一致)
                 - 'tversky': Tversky Loss (減少漏檢)
                 - 'focal': Focal Loss (處理類別不平衡)
+                - 'precision': Precision Focused Loss (減少過度分割)
         
         Returns:
             損失函數實例
         """
+        if loss_type == 'precision':
+            self.logger.info("📊 使用 Precision 聚焦損失: Tversky Loss (alpha=0.2, beta=0.8)")
+            return PrecisionFocusedLoss(alpha=0.2, beta=0.8)
+            
         if loss_type == 'native':
             if NATIVE_LOSS_AVAILABLE:
                 self.logger.info("📊 使用 MedSAM2 原生損失函數: dice_loss + sigmoid_focal_loss")
@@ -328,8 +336,8 @@ class MedSAM2Trainer:
                     image_embedding, high_res_feats = self._prepare_image_features(image)
                     bbox_tensor = bbox_tensor.to(self.device)
                     
-                    sample_loss = 0.0
-                    valid_boxes = 0
+                    # ✅ 修正：收集所有 bbox 的預測，合併後再計算 loss
+                    all_pred_logits = []  # 收集所有預測的 logits
                     
                     for bbox in bbox_tensor:
                         if bbox.sum() == 0:
@@ -359,18 +367,23 @@ class MedSAM2Trainer:
                             align_corners=False
                         )
                         
-                        # ✅ 修正：統一 squeeze 維度
-                        pred_mask = pred_mask.squeeze()
+                        all_pred_logits.append(pred_mask.squeeze())
+                    
+                    # ✅ 合併所有預測（取 max，因為是 logits）
+                    if len(all_pred_logits) > 0:
+                        if len(all_pred_logits) == 1:
+                            combined_pred = all_pred_logits[0]
+                        else:
+                            # 多個 bbox：合併預測（取 logits 的 max）
+                            stacked = torch.stack(all_pred_logits, dim=0)  # [N, H, W]
+                            combined_pred = torch.max(stacked, dim=0)[0]   # [H, W]
+                        
                         gt_mask_squeezed = gt_mask.squeeze()
                         
-                        loss = self.criterion(pred_mask, gt_mask_squeezed)
-                        sample_loss += loss
-                        valid_boxes += 1
-                
-                if valid_boxes > 0:
-                    sample_loss = sample_loss / valid_boxes
-                    batch_loss += sample_loss
-                    batch_samples += 1
+                        # ✅ 只計算一次 loss（使用合併後的預測）
+                        sample_loss = self.criterion(combined_pred, gt_mask_squeezed)
+                        batch_loss += sample_loss
+                        batch_samples += 1
             
             # 反向傳播（支援梯度累積 + AMP）
             if batch_samples > 0:
@@ -597,14 +610,20 @@ class MedSAM2Trainer:
             
             axes[3].imshow(overlay)
             
-            # 畫 BBox
+            # 畫 BBox with size annotation
             if bboxes is not None and len(bboxes[i]) > 0:
                 for bbox in bboxes[i]:
                     if bbox.sum() > 0:
                         x1, y1, x2, y2 = bbox.cpu().numpy()
-                        rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                        width, height = x2 - x1, y2 - y1
+                        rect = plt.Rectangle((x1, y1), width, height, 
                                              linewidth=2, edgecolor='lime', facecolor='none')
                         axes[3].add_patch(rect)
+                        # Add size label
+                        size_text = f'{int(width)}x{int(height)}px'
+                        axes[3].text(x1, y1 - 3, size_text, fontsize=8, color='lime', 
+                                    fontweight='bold', ha='left', va='bottom',
+                                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='none'))
             
             axes[3].set_title('Overlay + BBox')
             axes[3].axis('off')
@@ -677,14 +696,20 @@ class MedSAM2Trainer:
             
             axes[3].imshow(overlay)
             
-            # 畫 BBox
+            # 畫 BBox with size annotation
             if bboxes is not None and len(bboxes) > 0:
                 for bbox in bboxes:
                     if bbox.sum() > 0:
                         x1, y1, x2, y2 = bbox.cpu().numpy()
-                        rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                        width, height = x2 - x1, y2 - y1
+                        rect = plt.Rectangle((x1, y1), width, height, 
                                              linewidth=2, edgecolor='lime', facecolor='none')
                         axes[3].add_patch(rect)
+                        # Add size label
+                        size_text = f'{int(width)}x{int(height)}px'
+                        axes[3].text(x1, y1 - 3, size_text, fontsize=8, color='lime', 
+                                    fontweight='bold', ha='left', va='bottom',
+                                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7, edgecolor='none'))
             
             axes[3].set_title('Overlay + BBox')
             axes[3].axis('off')
@@ -729,6 +754,15 @@ class MedSAM2Trainer:
         }
         num_samples = 0
         
+        # ✅ 新增：只統計有病灶切片的指標
+        lesion_metrics_sum = {
+            'dice': 0.0,
+            'iou': 0.0,
+            'precision': 0.0,
+            'recall': 0.0,
+        }
+        num_lesion_samples = 0
+        
         # ✅ FIX: 清空 batch 緩存
         self._current_batch_cache.clear()
         
@@ -757,9 +791,8 @@ class MedSAM2Trainer:
                     image_embedding, high_res_feats = self._prepare_image_features(image)
                     bbox_tensor = bbox_tensor.to(self.device)
                     
-                    sample_metrics = {k: 0.0 for k in metrics_sum.keys()}
-                    sample_loss = 0.0
-                    valid_boxes = 0
+                    # ✅ 修正：收集所有 bbox 的預測，合併後再計算指標
+                    all_pred_logits = []
                     
                     for bbox in bbox_tensor:
                         if bbox.sum() == 0:
@@ -790,40 +823,65 @@ class MedSAM2Trainer:
                             align_corners=False
                         )
                         
-                        # ✅ 修正：統一 squeeze 維度
-                        pred_mask = pred_mask.squeeze()
+                        all_pred_logits.append(pred_mask.squeeze())
+                    
+                    # ✅ 合併所有預測（取 max）
+                    if len(all_pred_logits) > 0:
+                        if len(all_pred_logits) == 1:
+                            combined_pred = all_pred_logits[0]
+                        else:
+                            stacked = torch.stack(all_pred_logits, dim=0)
+                            combined_pred = torch.max(stacked, dim=0)[0]
+                        
                         gt_mask_squeezed = gt_mask.squeeze()
                         
-                        # 損失計算
-                        loss = self.criterion(pred_mask, gt_mask_squeezed)
-                        sample_loss += loss.item()
-                        valid_boxes += 1
+                        # ✅ 只計算一次 loss 和指標（使用合併後的預測）
+                        loss = self.criterion(combined_pred, gt_mask_squeezed)
+                        total_loss += loss.item()
                         
-                        # ✅ 指標計算：使用輕量級版本（跳過 HD95 加快驗證）
-                        batch_metrics = compute_lightweight_metrics(pred_mask, gt_mask_squeezed)
-                        for key, value in batch_metrics.items():
-                            sample_metrics[key] += value
-                    
-                    if valid_boxes > 0:
-                        normalized_loss = sample_loss / valid_boxes
-                        total_loss += normalized_loss
-                        
-                        # 計算樣本平均指標
-                        sample_avg_metrics = {k: v / valid_boxes for k, v in sample_metrics.items()}
+                        # ✅ 指標計算：使用合併後的預測
+                        sample_metrics = compute_lightweight_metrics(combined_pred, gt_mask_squeezed)
                         
                         for key in metrics_sum.keys():
-                            metrics_sum[key] += sample_avg_metrics[key]
+                            if key in sample_metrics:
+                                metrics_sum[key] += sample_metrics[key]
                         
                         num_samples += 1
+                        
+                        # ✅ 新增：只統計有病灶切片的指標
+                        # 檢查 gt_mask 是否有病灶
+                        if gt_mask.sum().item() > 0:
+                            for key in lesion_metrics_sum.keys():
+                                if key in sample_metrics:
+                                    lesion_metrics_sum[key] += sample_metrics[key]
+                            num_lesion_samples += 1
                         
                         # ✅ 新增：記錄患者級別指標
                         if metrics_tracker is not None:
                             patient_id = patient_ids[i]
                             slice_idx = slice_indices[i]
+                            
+                            # 計算體積統計 (用於 Volume Dice)
+                            pred_binary = (torch.sigmoid(combined_pred) > 0.5).float()
+                            gt_binary = (gt_mask_squeezed > 0.5).float()
+                            
+                            intersection = (pred_binary * gt_binary).sum().item()
+                            pred_area = pred_binary.sum().item()
+                            gt_area = gt_binary.sum().item()
+                            union = pred_area + gt_area - intersection
+                            
+                            vol_stats = {
+                                'intersection': intersection,
+                                'pred_area': pred_area,
+                                'gt_area': gt_area,
+                                'union': union
+                            }
+                            
                             metrics_tracker.add_slice_metrics(
                                 patient_id=patient_id,
                                 slice_idx=slice_idx,
-                                metrics=sample_avg_metrics
+                                metrics=sample_metrics,
+                                vol_stats=vol_stats
                             )
                         
                         # ✅ 修改：顯示累積平均指標，而非當前 Batch 指標
@@ -844,6 +902,48 @@ class MedSAM2Trainer:
         avg_loss = total_loss / num_samples if num_samples > 0 else 0.0
         avg_metrics = {k: v / num_samples if num_samples > 0 else 0.0 
                       for k, v in metrics_sum.items()}
+        
+        # ✅ 新增：計算只有病灶切片的平均指標
+        avg_lesion_metrics = {k: v / num_lesion_samples if num_lesion_samples > 0 else 0.0 
+                              for k, v in lesion_metrics_sum.items()}
+        
+        # ✅ 計算 Global Volume Dice (全資料集)
+        # 需在 loop 中累積，但為了避免修改 loop 太多，這裡暫時使用 slice average 的 dice 作為默認
+        # 若要精確計算 Global Volume Dice，需要在 loop 中累積 global_vol_stats
+        # 鑑於 metrics_tracker 已經有完整記錄，我們可以從 metrics_tracker 聚合（如果有傳入）
+        
+        global_vol_dice = avg_metrics['dice'] # fallback
+        
+        if metrics_tracker is not None:
+             # 從 tracker 聚合所有患者的 Volume Stats
+            t_inter = 0.0
+            t_pred = 0.0
+            t_gt = 0.0
+            
+            # 確保計算過 averages (雖然 add_slice 沒觸發，但可以直接存取 vol_stats)
+            for pid, data in metrics_tracker.patient_metrics.items():
+                v = data.get('vol_stats', {})
+                t_inter += v.get('intersection', 0.0)
+                t_pred += v.get('pred_area', 0.0)
+                t_gt += v.get('gt_area', 0.0)
+            
+            if t_pred + t_gt > 0:
+                global_vol_dice = (2.0 * t_inter + 1e-6) / (t_pred + t_gt + 1e-6)
+                
+                # ✅ 覆寫主要的 Dice 為 Global Volume Dice
+                avg_metrics['slice_avg_dice'] = avg_metrics['dice']
+                avg_metrics['dice'] = global_vol_dice
+                
+                # 更新 lesion_dice 也使用 volume dice (如果有辦法區分的話... 這裡簡單假設 lesion_dice 也可以用 global volume 近似，或者保留 slice avg)
+                # 這裡保留 avg_lesion_metrics 為 slice avg 以呈現差異
+        
+        # ✅ 將有病灶切片指標加入結果（使用 lesion_ 前綴）
+        avg_metrics['lesion_dice'] = avg_lesion_metrics['dice']
+        avg_metrics['lesion_iou'] = avg_lesion_metrics['iou']
+        avg_metrics['lesion_precision'] = avg_lesion_metrics['precision']
+        avg_metrics['lesion_recall'] = avg_lesion_metrics['recall']
+        avg_metrics['num_lesion_samples'] = num_lesion_samples
+        avg_metrics['lesion_ratio'] = num_lesion_samples / num_samples if num_samples > 0 else 0.0
         
         val_time = time.time() - start_time
         return avg_loss, avg_metrics, val_time
@@ -952,34 +1052,44 @@ class MedSAM2Trainer:
             self.train_history['val_specificity'].append(val_metrics['specificity'])
             self.train_history['val_accuracy'].append(val_metrics['accuracy'])
             self.train_history['val_hausdorff_95'].append(val_metrics['hausdorff_95'])
+            self.train_history['val_lesion_dice'].append(val_metrics.get('lesion_dice', 0.0))  # ✅ 新增
+            self.train_history['val_lesion_iou'].append(val_metrics.get('lesion_iou', 0.0))    # ✅ 新增
             self.train_history['learning_rate'].append(optimizer.param_groups[0]['lr'])
             self.train_history['epoch_time'].append(epoch_time)
             self.train_history['inference_time_per_sample'].append(inference_time_per_sample)
             
             # 輸出結果
+            lesion_ratio_pct = val_metrics.get('lesion_ratio', 0) * 100
+            num_lesion = val_metrics.get('num_lesion_samples', 0)
             self.logger.info(
                 f"Epoch {epoch+1}/{epochs} - "
                 f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}\n"
                 f"  Time: {epoch_time:.1f}s ({epoch_time/len(train_loader):.3f}s/batch), "
                 f"Inference: {inference_time_per_sample:.1f}ms/sample\n"
-                f"  Dice: {val_metrics['dice']:.4f}, IoU: {val_metrics['iou']:.4f}, "
+                f"  📊 全切片 Dice: {val_metrics['dice']:.4f}, IoU: {val_metrics['iou']:.4f}, "
                 f"Acc: {val_metrics['accuracy']:.4f}\n"
+                f"  🎯 有病灶 Dice: {val_metrics.get('lesion_dice', 0):.4f}, "
+                f"IoU: {val_metrics.get('lesion_iou', 0):.4f} "
+                f"({num_lesion} 切片, {lesion_ratio_pct:.1f}%)\n"
                 f"  Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}, "
                 f"Specificity: {val_metrics['specificity']:.4f}\n"
                 f"  Hausdorff95: {val_metrics['hausdorff_95']:.2f}, "
                 f"LR: {optimizer.param_groups[0]['lr']:.2e}"
             )
             
-            # 保存最佳模型
-            if val_metrics['dice'] > self.best_val_dice:
-                self.best_val_dice = val_metrics['dice']
+            # 保存最佳模型（✅ 使用有病灶切片的 Dice 作為判斷標準）
+            lesion_dice = val_metrics.get('lesion_dice', val_metrics['dice'])
+            if lesion_dice > self.best_val_dice:
+                self.best_val_dice = lesion_dice
                 self.best_epoch = epoch + 1
                 # 記錄所有 best validation 指標
                 self.best_val_metrics = {
                     'epoch': epoch + 1,
                     'loss': val_loss,
                     'dice': val_metrics['dice'],
+                    'lesion_dice': lesion_dice,  # ✅ 新增
                     'iou': val_metrics['iou'],
+                    'lesion_iou': val_metrics.get('lesion_iou', 0),  # ✅ 新增
                     'recall': val_metrics['recall'],
                     'precision': val_metrics['precision'],
                     'specificity': val_metrics['specificity'],
@@ -988,12 +1098,12 @@ class MedSAM2Trainer:
                     'inference_time_ms': inference_time_per_sample
                 }
                 self.save_checkpoint('best_model.pth', is_best=True)
-                self.logger.info(f"✅ 保存最佳模型 (Dice: {val_metrics['dice']:.4f})")
+                self.logger.info(f"✅ 保存最佳模型 (有病灶 Dice: {lesion_dice:.4f})")
                 # 保存最佳指標到 JSON
                 self._save_best_metrics()
             
-            # 早停檢查
-            if early_stopping(epoch, val_metrics['dice']):
+            # 早停檢查（✅ 使用有病灶切片的 Dice）
+            if early_stopping(epoch, lesion_dice):
                 self.logger.info(f"🛑 早停：訓練在 Epoch {epoch+1} 停止")
                 break
             
@@ -1077,17 +1187,17 @@ class MedSAM2Trainer:
         """繪製訓練曲線（包含所有評估指標）"""
         try:
             import matplotlib
-            matplotlib.use('Agg')  # 無顯示後端
+            matplotlib.use('Agg')  # Non-display backend
             import matplotlib.pyplot as plt
         except ImportError:
-            self.logger.warning("matplotlib 未安裝，無法繪製訓練曲線")
+            self.logger.warning("matplotlib not installed, cannot plot training curves")
             return
         
-        fig, axes = plt.subplots(3, 3, figsize=(20, 15))
+        fig, axes = plt.subplots(3, 4, figsize=(24, 15))  # 3x4 layout for more charts
         
         epochs = range(1, len(self.train_history['train_loss']) + 1)
         
-        # 1. Loss 曲線
+        # 1. Loss Curves
         axes[0, 0].plot(epochs, self.train_history['train_loss'], label='Train Loss', color='blue')
         axes[0, 0].plot(epochs, self.train_history['val_loss'], label='Val Loss', color='red')
         axes[0, 0].set_xlabel('Epoch')
@@ -1096,25 +1206,36 @@ class MedSAM2Trainer:
         axes[0, 0].legend()
         axes[0, 0].grid(True)
         
-        # 2. Dice & IoU
-        axes[0, 1].plot(epochs, self.train_history['val_dice'], label='Dice', color='green')
-        axes[0, 1].plot(epochs, self.train_history['val_iou'], label='IoU', color='orange')
+        # 2. All Slices Dice & IoU (including empty masks)
+        axes[0, 1].plot(epochs, self.train_history['val_dice'], label='All Dice', color='green', alpha=0.5)
+        axes[0, 1].plot(epochs, self.train_history['val_iou'], label='All IoU', color='orange', alpha=0.5)
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel('Score')
-        axes[0, 1].set_title('Dice & IoU')
+        axes[0, 1].set_title('All Slices Dice & IoU (incl. empty)')
         axes[0, 1].legend()
         axes[0, 1].grid(True)
         
-        # 3. Precision & Recall
-        axes[0, 2].plot(epochs, self.train_history['val_precision'], label='Precision', color='purple')
-        axes[0, 2].plot(epochs, self.train_history['val_recall'], label='Recall', color='brown')
+        # 3. Lesion Slices Dice & IoU (key metrics)
+        lesion_dice = self.train_history.get('val_lesion_dice', [0] * len(epochs))
+        lesion_iou = self.train_history.get('val_lesion_iou', [0] * len(epochs))
+        axes[0, 2].plot(epochs, lesion_dice, label='Lesion Dice', color='green', linewidth=2)
+        axes[0, 2].plot(epochs, lesion_iou, label='Lesion IoU', color='orange', linewidth=2)
         axes[0, 2].set_xlabel('Epoch')
         axes[0, 2].set_ylabel('Score')
-        axes[0, 2].set_title('Precision & Recall')
+        axes[0, 2].set_title('Lesion Slices Dice & IoU (Key Metrics)')
         axes[0, 2].legend()
         axes[0, 2].grid(True)
         
-        # 4. Specificity & Accuracy
+        # 4. Precision & Recall
+        axes[0, 3].plot(epochs, self.train_history['val_precision'], label='Precision', color='purple')
+        axes[0, 3].plot(epochs, self.train_history['val_recall'], label='Recall', color='brown')
+        axes[0, 3].set_xlabel('Epoch')
+        axes[0, 3].set_ylabel('Score')
+        axes[0, 3].set_title('Precision & Recall')
+        axes[0, 3].legend()
+        axes[0, 3].grid(True)
+        
+        # 5. Specificity & Accuracy
         axes[1, 0].plot(epochs, self.train_history['val_specificity'], label='Specificity', color='cyan')
         axes[1, 0].plot(epochs, self.train_history['val_accuracy'], label='Accuracy', color='magenta')
         axes[1, 0].set_xlabel('Epoch')
@@ -1123,7 +1244,7 @@ class MedSAM2Trainer:
         axes[1, 0].legend()
         axes[1, 0].grid(True)
         
-        # 5. Hausdorff Distance
+        # 6. Hausdorff Distance
         axes[1, 1].plot(epochs, self.train_history['val_hausdorff_95'], label='HD95', color='black')
         axes[1, 1].set_xlabel('Epoch')
         axes[1, 1].set_ylabel('Pixels')
@@ -1131,7 +1252,7 @@ class MedSAM2Trainer:
         axes[1, 1].legend()
         axes[1, 1].grid(True)
         
-        # 6. Learning Rate
+        # 7. Learning Rate
         axes[1, 2].plot(epochs, self.train_history['learning_rate'], label='LR', color='gray')
         axes[1, 2].set_xlabel('Epoch')
         axes[1, 2].set_ylabel('LR')
@@ -1140,7 +1261,16 @@ class MedSAM2Trainer:
         axes[1, 2].legend()
         axes[1, 2].grid(True)
         
-        # 7. Training Time (新增)
+        # 8. All Slices vs Lesion Slices Dice comparison
+        axes[1, 3].plot(epochs, self.train_history['val_dice'], label='All Dice', color='blue', linestyle='--', alpha=0.7)
+        axes[1, 3].plot(epochs, lesion_dice, label='Lesion Dice', color='red', linewidth=2)
+        axes[1, 3].set_xlabel('Epoch')
+        axes[1, 3].set_ylabel('Dice Score')
+        axes[1, 3].set_title('Dice: All vs Lesion Slices')
+        axes[1, 3].legend()
+        axes[1, 3].grid(True)
+        
+        # 9. Training Time
         axes[2, 0].plot(epochs, self.train_history['epoch_time'], label='Epoch Time (s)', color='blue')
         axes[2, 0].set_xlabel('Epoch')
         axes[2, 0].set_ylabel('Seconds')
@@ -1148,7 +1278,7 @@ class MedSAM2Trainer:
         axes[2, 0].legend()
         axes[2, 0].grid(True)
         
-        # 8. Inference Time (新增)
+        # 10. Inference Time
         axes[2, 1].plot(epochs, self.train_history['inference_time_per_sample'], label='Inference (ms)', color='red')
         axes[2, 1].set_xlabel('Epoch')
         axes[2, 1].set_ylabel('Milliseconds')
@@ -1156,34 +1286,46 @@ class MedSAM2Trainer:
         axes[2, 1].legend()
         axes[2, 1].grid(True)
         
-        # 9. 摘要統計
+        # 11-12. Summary Statistics (merged two cells)
         axes[2, 2].axis('off')
+        axes[2, 3].axis('off')
+        
+        # Get lesion metrics
+        final_lesion_dice = lesion_dice[-1] if lesion_dice else 0
+        final_lesion_iou = lesion_iou[-1] if lesion_iou else 0
+        
         summary_text = f"""
 Training Summary
 ================
 
-Best Val Dice: {self.best_val_dice:.4f}
-Final Metrics:
-  Dice: {self.train_history['val_dice'][-1]:.4f}
-  IoU: {self.train_history['val_iou'][-1]:.4f}
-  Precision: {self.train_history['val_precision'][-1]:.4f}
-  Recall: {self.train_history['val_recall'][-1]:.4f}
+Best Lesion Dice: {self.best_val_dice:.4f}
+   (for model selection & early stopping)
+
+Final Metrics (Lesion Slices):
+  Lesion Dice: {final_lesion_dice:.4f}
+  Lesion IoU:  {final_lesion_iou:.4f}
+
+Final Metrics (All Slices):
+  All Dice:    {self.train_history['val_dice'][-1]:.4f}
+  All IoU:     {self.train_history['val_iou'][-1]:.4f}
+  Precision:   {self.train_history['val_precision'][-1]:.4f}
+  Recall:      {self.train_history['val_recall'][-1]:.4f}
   Specificity: {self.train_history['val_specificity'][-1]:.4f}
-  HD95: {self.train_history['val_hausdorff_95'][-1]:.2f}
+  HD95:        {self.train_history['val_hausdorff_95'][-1]:.2f}
 
 Efficiency:
   Avg Epoch Time: {np.mean(self.train_history['epoch_time']):.1f}s
-  Avg Inference: {np.mean(self.train_history['inference_time_per_sample']):.1f}ms
+  Avg Inference:  {np.mean(self.train_history['inference_time_per_sample']):.1f}ms
 
 Total Epochs: {len(epochs)}
         """
-        axes[2, 2].text(0.1, 0.5, summary_text, fontsize=11, family='monospace', verticalalignment='center')
+        axes[2, 2].text(0.0, 0.5, summary_text, fontsize=11, family='monospace', verticalalignment='center')
         
         plt.tight_layout()
         
         plot_path = self.output_dir / 'training_curves.png'
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-        self.logger.info(f"📊 訓練曲線已保存: {plot_path}")
+        self.logger.info(f"Training curves saved: {plot_path}")
         plt.close()
     
     @torch.no_grad()
@@ -1196,8 +1338,9 @@ Total Epochs: {len(epochs)}
         save_visualizations: bool = True,
         spacing: Tuple[float, float] = (1.0, 1.0),
         min_area: int = 0,
-        min_confidence: float = 0.5,
-        min_dice: float = 0.3
+        min_confidence: float = 0.0,
+        min_dice: float = 0.0,
+        prompt_type: str = 'bbox'  # 'bbox' or 'point'
     ) -> Dict:
         """
         測試模型並提取病灶特徵用於 LLM Fine-Tuning
@@ -1210,8 +1353,9 @@ Total Epochs: {len(epochs)}
             save_visualizations: 是否保存可視化 PNG 圖片（GT mask、Pred mask、對比圖）
             spacing: 像素間距 (mm)
             min_area: 最小病灶面積閾值（像素），預設 0（不過濾）
-            min_confidence: SAM2 IoU 預測的最小置信度閾值（預設 0.5，過濾低質量預測）
-            min_dice: 預測與 GT 的最小 Dice 分數閾值（預設 0.3，過濾錯誤預測）
+            min_confidence: SAM2 IoU 預測的最小置信度閾值，預設 0（不過濾）
+            min_dice: 預測與 GT 的最小 Dice 分數閾值，預設 0（不過濾）
+            prompt_type: 提示類型 ('bbox' or 'point')，預設 'bbox'
         
         Returns:
             包含所有測試結果和特徵的字典
@@ -1243,6 +1387,7 @@ Total Epochs: {len(epochs)}
             'model_info': {
                 'best_val_dice': self.best_val_dice,
                 'current_epoch': self.current_epoch,
+                'prompt_type': prompt_type
             },
             'test_metrics': {
                 'dice': [], 'iou': [], 'precision': [], 'recall': [],
@@ -1266,6 +1411,9 @@ Total Epochs: {len(epochs)}
         self.logger.info(f"測試樣本數: {len(test_loader.dataset)}")
         self.logger.info(f"輸出目錄: {output_dir}")
         self.logger.info(f"提取深層特徵: {extract_deep_features}")
+        self.logger.info(f"提示類型 (Prompt Type): {prompt_type}")
+        if prompt_type == 'point':
+            self.logger.info(f"   - 模擬使用者點擊 (Click Simulation): 使用 BBox 中心點作為提示")
         self.logger.info(f"📊 過濾閾值:")
         self.logger.info(f"   - 最小面積: {min_area} px")
         self.logger.info(f"   - 最小置信度 (IoU prediction): {min_confidence:.2f}")
@@ -1313,6 +1461,10 @@ Total Epochs: {len(epochs)}
                 
                 # 處理每個 bbox（病灶）
                 all_pred_masks = []
+                # 收集可視化用的點
+                vis_points = []
+                vis_labels = []
+                
                 lesion_idx = 0
                 
                 for bbox in bbox_tensor:
@@ -1321,14 +1473,39 @@ Total Epochs: {len(epochs)}
                     if bbox.sum() == 0:
                         continue
                     
-                    box_torch = bbox.unsqueeze(0)
+                    # 準備 Prompt (支援 BBox 或 Point)
+                    sparse_embeddings, dense_embeddings = None, None
                     
-                    # Prompt Encoder
-                    sparse_embeddings, dense_embeddings = self.model.sam_prompt_encoder(
-                        points=None,
-                        boxes=box_torch,
-                        masks=None,
-                    )
+                    if prompt_type == 'point':
+                        # 模擬使用者點擊：計算 BBox 中心點
+                        x1, y1, x2, y2 = bbox
+                        cx = (x1 + x2) / 2.0
+                        cy = (y1 + y2) / 2.0
+                        
+                        # Point format: [B, N, 2] -> [1, 1, 2] (here B=1, N=1 point per lesion prompt)
+                        # 注意：我們是逐個 lesion 處理，所以 batch size=1
+                        point_coords = torch.tensor([[[cx, cy]]], device=self.device)
+                        # Label format: [B, N] -> [1, 1] (1=positive)
+                        point_labels = torch.tensor([[1]], device=self.device)
+                        
+                        sparse_embeddings, dense_embeddings = self.model.sam_prompt_encoder(
+                            points=(point_coords, point_labels),
+                            boxes=None,
+                            masks=None,
+                        )
+                        
+                        # 記錄用於可視化
+                        vis_points.append([cx.item(), cy.item()])
+                        vis_labels.append(1)
+                        
+                    else: # 'bbox' (default)
+                        box_torch = bbox.unsqueeze(0)
+                        
+                        sparse_embeddings, dense_embeddings = self.model.sam_prompt_encoder(
+                            points=None,
+                            boxes=box_torch,
+                            masks=None,
+                        )
                     
                     # Mask Decoder
                     low_res_masks, iou_predictions, _, _ = self.model.sam_mask_decoder(
@@ -1421,6 +1598,8 @@ Total Epochs: {len(epochs)}
                     lesion_feature['lesion_id'] = lesion_idx
                     lesion_feature['bbox'] = bbox.cpu().numpy().tolist()
                     lesion_feature['metrics'] = metrics
+                    # 如果是點擊模式，記錄點擊座標
+                    lesion_feature['click_point'] = [cx.item(), cy.item()] if prompt_type == 'point' else None
                     
                     slice_features['lesions'].append(lesion_feature)
                     lesion_idx += 1
@@ -1454,20 +1633,22 @@ Total Epochs: {len(epochs)}
                     
                     np.save(pred_save_dir / f"slice_{slice_idx:04d}_pred.npy", combined_mask)
                 
-                # 保存可視化圖片（可選 - 只保存有預測結果的切片）
-                # ✅ 優化：只保存 prediction 有內容的 case
-                has_positive_prediction = any(pm.sum() > 0 for pm in all_pred_masks) if all_pred_masks else False
-                
-                if visualizer is not None and all_pred_masks and has_positive_prediction:
+                # 保存可視化圖片（可選 - 保存所有有 BBox 的切片，包括 False Negatives）
+                # ✅ 優化：應使用者要求，保存所有有 predict 的結果 (即使是全黑的)
+                if visualizer is not None:
                     # 準備原始影像（歸一化到 0-1）
                     original_image_np = image[0].cpu().numpy()  # 取第一個通道
                     if original_image_np.max() > 1.0:
                         original_image_np = (original_image_np - original_image_np.min()) / (original_image_np.max() - original_image_np.min() + 1e-8)
                     
                     # 合併所有預測遮罩
-                    combined_pred = np.zeros_like(all_pred_masks[0], dtype=np.float32)
-                    for pm in all_pred_masks:
-                        combined_pred = np.maximum(combined_pred, pm.astype(np.float32))
+                    if all_pred_masks:
+                        combined_pred = np.zeros_like(all_pred_masks[0], dtype=np.float32)
+                        for pm in all_pred_masks:
+                            combined_pred = np.maximum(combined_pred, pm.astype(np.float32))
+                    else:
+                        # 如果沒有預測結果（被過濾或無預測），則是全黑 mask
+                        combined_pred = np.zeros((gt_mask.shape[-2], gt_mask.shape[-1]), dtype=np.float32)
                     
                     # GT mask
                     gt_mask_np = gt_mask.squeeze().cpu().numpy()
@@ -1476,6 +1657,13 @@ Total Epochs: {len(epochs)}
                     slice_dice = slice_features['metrics'].get('dice', 0.0)
                     slice_iou = slice_features['metrics'].get('iou', 0.0)
                     
+                    # 準備 bboxes 用於可視化
+                    bboxes_np = bbox_tensor.cpu().numpy() if bbox_tensor is not None else None
+                    
+                    # 準備 points 用於可視化
+                    points_np = np.array(vis_points) if vis_points else None
+                    labels_np = np.array(vis_labels) if vis_labels else None
+                    
                     visualizer.save_slice_comparison(
                         image=original_image_np,
                         gt_mask=gt_mask_np,
@@ -1483,7 +1671,10 @@ Total Epochs: {len(epochs)}
                         patient_id=patient_id,
                         slice_idx=slice_idx,
                         dice_score=slice_dice,
-                        iou_score=slice_iou
+                        iou_score=slice_iou,
+                        bboxes=bboxes_np,
+                        points=points_np,
+                        point_labels=labels_np
                     )
                 
                 # 更新進度條 (slice_detections = 2D 切片級別檢測數，3D 結節聚合在測試結束後計算)

@@ -36,11 +36,13 @@ try:
     from .config import Config
     from .model import get_model, count_parameters
     from .losses import get_loss_function, BCEDiceLoss
+    from .postprocess import PatchPostProcessor, PostProcessConfig
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from train_unetpp.config import Config
     from train_unetpp.model import get_model, count_parameters
     from train_unetpp.losses import get_loss_function, BCEDiceLoss
+    from train_unetpp.postprocess import PatchPostProcessor, PostProcessConfig
 
 
 logger = logging.getLogger(__name__)
@@ -408,9 +410,23 @@ class UNetPPTrainer:
         # 指標計算器
         self.metrics_calc = MetricsCalculator(
             threshold=config.inference.prediction_threshold,
-            target_threshold=0.5,  # binary GT (CSEA-Net 論文標準)
-            min_area_px=5  # 2D lesion-wise 過濾碎片
+            target_threshold=config.inference.target_threshold,
+            min_area_px=config.inference.min_area_px
         )
+        
+        # 後處理器（用於驗證時計算後處理後的 metrics）
+        pp_config = PostProcessConfig(
+            threshold=config.inference.prediction_threshold,
+            use_lung_mask=False,  # patch 級別無需 lung mask
+            min_size_mm3=config.inference.patch_min_size_mm3,
+            max_size_mm3=config.inference.patch_max_size_mm3,
+            closing_radius_mm=config.inference.patch_closing_radius_mm,
+            fill_holes=config.inference.patch_fill_holes,
+            fill_holes_3d=False
+        )
+        # 從 config 讀取 patch spacing
+        patch_spacing = config.inference.patch_spacing_mm
+        self.postprocessor = PatchPostProcessor(pp_config, spacing=np.array([patch_spacing, patch_spacing]))
         
         # 混合精度訓練
         self.use_amp = config.training.use_amp
@@ -424,6 +440,11 @@ class UNetPPTrainer:
             'val_iou': [],
             'val_precision': [],
             'val_recall': [],
+            # Post-processed metrics
+            'val_pp_dice': [],
+            'val_pp_iou': [],
+            'val_pp_precision': [],
+            'val_pp_recall': [],
             'lr': []
         }
         
@@ -433,6 +454,11 @@ class UNetPPTrainer:
             'val_iou': 0.0,
             'val_precision': 0.0,
             'val_recall': 0.0,
+            # Post-processed
+            'val_pp_dice': 0.0,
+            'val_pp_iou': 0.0,
+            'val_pp_precision': 0.0,
+            'val_pp_recall': 0.0,
             'epoch': 0
         }
         
@@ -527,6 +553,20 @@ class UNetPPTrainer:
             json.dump(_convert_to_json_serializable(self.best_metrics), f, indent=2, ensure_ascii=False)
         logger.info(f"Best metrics saved: {metrics_path}")
 
+    def _compute_loss(self, outputs, targets, criterion):
+        """計算損失（支援 Deep Supervision）"""
+        if isinstance(outputs, (list, tuple)):
+            loss = 0
+            # Weighted sum for deep supervision
+            # Weights: [1.0, 0.5, 0.25, 0.125] or just average?
+            # MrGiovanni usually sums them up. Average keeps scale similar.
+            for output in outputs:
+                loss += criterion(output, targets)
+            loss /= len(outputs)
+            return loss
+        else:
+            return criterion(outputs, targets)
+
     def train_epoch(self, dataloader: DataLoader, log_first_batch: bool = False) -> float:
         """訓練一個 epoch"""
         self.model.train()
@@ -543,20 +583,30 @@ class UNetPPTrainer:
             if self.use_amp:
                 with autocast('cuda'):
                     outputs = self.model(images)
-                    loss = self.criterion(outputs, masks)
+                    loss = self._compute_loss(outputs, masks, self.criterion)
                 
                 self.scaler.scale(loss).backward()
+                
+                # Gradient Clipping
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.grad_clip)
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 outputs = self.model(images)
                 loss = self.criterion(outputs, masks)
                 loss.backward()
+                
+                # Gradient Clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.grad_clip)
+                
                 self.optimizer.step()
             
             # === Debug 記錄：首批次 shape ===
             if log_first_batch and num_batches == 0:
-                logger.info(f"[DEBUG] First batch - input shape: {images.shape}, output shape: {outputs.shape}, mask shape: {masks.shape}")
+                out_shape = outputs[0].shape if isinstance(outputs, (list, tuple)) else outputs.shape
+                logger.info(f"[DEBUG] First batch - input shape: {images.shape}, output shape: {out_shape} (List len: {len(outputs) if isinstance(outputs, (list, tuple)) else 0}), mask shape: {masks.shape}")
                 logger.info(f"[DEBUG] Input channels: {images.shape[1]} ({'2D' if images.shape[1] == 1 else '2.5D' if images.shape[1] == 3 else 'other'})")
             
             total_loss += loss.item()
@@ -590,18 +640,23 @@ class UNetPPTrainer:
             if self.use_amp:
                 with autocast('cuda'):
                     outputs = self.model(images)
-                    loss = self.val_criterion(outputs, masks)
+                    # For validation, use only the final output (first element in our NestedUNet list)
+                    val_output = outputs[0] if isinstance(outputs, (list, tuple)) else outputs
+                    loss = self.val_criterion(val_output, masks)
             else:
                 outputs = self.model(images)
-                loss = self.val_criterion(outputs, masks)
+                val_output = outputs[0] if isinstance(outputs, (list, tuple)) else outputs
+                loss = self.val_criterion(val_output, masks)
             
             val_loss_sum += loss.item() * images.shape[0]
             val_loss_n += images.shape[0]
             
             # 收集預測結果
-            preds = torch.sigmoid(outputs).cpu().numpy()
+            preds = torch.sigmoid(val_output).cpu().numpy()
             targets = masks.cpu().numpy()
-            imgs = images[:, 1, :, :].cpu().numpy()  # 取中間 channel
+            # 動態計算中心 channel（支援 3 或 5 channel）
+            c_mid = images.shape[1] // 2
+            imgs = images[:, c_mid, :, :].cpu().numpy()
             
             for i in range(images.shape[0]):
                 all_preds.append(preds[i])
@@ -612,7 +667,8 @@ class UNetPPTrainer:
                 id_key = 'patient_id' if 'patient_id' in batch else 'case_id'
                 sample_info.append({
                     'id': batch[id_key][i] if isinstance(batch[id_key], list) else str(batch[id_key][i]),
-                    'slice_idx': batch['slice_idx'][i] if isinstance(batch['slice_idx'], list) else int(batch['slice_idx'][i])
+                    'slice_idx': batch['slice_idx'][i] if isinstance(batch['slice_idx'], list) else int(batch['slice_idx'][i]),
+                    'patch_idx': int(batch['patch_idx'][i]) if 'patch_idx' in batch else -1
                 })
             
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
@@ -634,19 +690,86 @@ class UNetPPTrainer:
             total_target_sum += target_binary.sum()
             total_union += pred_binary.sum() + target_binary.sum() - intersection
         
-        # Pixel-level Segmentation Metrics
+        # Pixel-level Segmentation Metrics (raw threshold)
         smooth = 1e-6
         dice = (2 * total_intersection + smooth) / (total_pred_sum + total_target_sum + smooth)
         iou = (total_intersection + smooth) / (total_union + smooth)
         precision = total_intersection / (total_pred_sum + smooth)
         recall = total_intersection / (total_target_sum + smooth)
         
+        # === Post-processed Metrics ===
+        # 後處理流程: threshold → CC filter → closing → fill holes
+        pp_intersection = 0.0
+        pp_pred_sum = 0.0
+        pp_target_sum = 0.0
+        pp_union = 0.0
+        
+        for pred, target in zip(all_preds, all_targets):
+            # 後處理預測結果
+            pred_2d = pred[0] if len(pred.shape) == 3 else pred
+            pp_pred = self.postprocessor.process_patch(pred_2d).astype(np.float32)
+            
+            target_binary = (target > self.metrics_calc.target_threshold).astype(np.float32)
+            target_2d = target_binary[0] if len(target_binary.shape) == 3 else target_binary
+            
+            intersection = (pp_pred * target_2d).sum()
+            pp_intersection += intersection
+            pp_pred_sum += pp_pred.sum()
+            pp_target_sum += target_2d.sum()
+            pp_union += pp_pred.sum() + target_2d.sum() - intersection
+        
+        pp_dice = (2 * pp_intersection + smooth) / (pp_pred_sum + pp_target_sum + smooth)
+        pp_iou = (pp_intersection + smooth) / (pp_union + smooth)
+        pp_precision = pp_intersection / (pp_pred_sum + smooth)
+        pp_recall = pp_intersection / (pp_target_sum + smooth)
+        
+        # === Positive-only Metrics ===
+        # 只在有結節的 patch 上計算，避免被大量負樣本稀釋
+        pos_intersection = 0.0
+        pos_pred_sum = 0.0
+        pos_target_sum = 0.0
+        pos_union = 0.0
+        pos_patch_count = 0
+        
+        for pred, target in zip(all_preds, all_targets):
+            target_binary = (target > self.metrics_calc.target_threshold).astype(np.float32)
+            # 只計算 GT > 0 的 patch
+            if target_binary.sum() > 0:
+                pos_patch_count += 1
+                pred_binary = (pred > self.metrics_calc.threshold).astype(np.float32)
+                intersection = (pred_binary * target_binary).sum()
+                pos_intersection += intersection
+                pos_pred_sum += pred_binary.sum()
+                pos_target_sum += target_binary.sum()
+                pos_union += pred_binary.sum() + target_binary.sum() - intersection
+        
+        if pos_patch_count > 0:
+            dice_pos = (2 * pos_intersection + smooth) / (pos_pred_sum + pos_target_sum + smooth)
+            iou_pos = (pos_intersection + smooth) / (pos_union + smooth)
+            recall_pos = pos_intersection / (pos_target_sum + smooth)
+        else:
+            dice_pos = 0.0
+            iou_pos = 0.0
+            recall_pos = 0.0
+        
         metrics = {
             'loss': val_loss_sum / max(val_loss_n, 1),
+            # Raw metrics (threshold only)
             'dice': dice,
             'iou': iou,
             'precision': precision,
             'recall': recall,
+            # Positive-only metrics (更貼近結節分割)
+            'dice_pos': dice_pos,
+            'iou_pos': iou_pos,
+            'recall_pos': recall_pos,
+            'pos_patch_count': pos_patch_count,
+            # Post-processed metrics
+            'pp_dice': pp_dice,
+            'pp_iou': pp_iou,
+            'pp_precision': pp_precision,
+            'pp_recall': pp_recall,
+            # Stats
             'total_patches': total_patches,
             'avg_pred_area': float(total_pred_sum / total_patches) if total_patches > 0 else 0,
             'avg_gt_area': float(total_target_sum / total_patches) if total_patches > 0 else 0
@@ -744,16 +867,13 @@ class UNetPPTrainer:
         logger.info(f"[DEBUG] MetricsCalculator - pred_threshold: {self.metrics_calc.threshold}, target_threshold: {self.metrics_calc.target_threshold}, min_area_px: {self.metrics_calc.min_area_px}")
         logger.info("[CSEA-Net Alignment] Evaluation: Binary GT (threshold=0.5), Global Dice, Boundary IoU (d=2)")
         
-        # === Sanity Check: Val loader 4-patch 驗證 ===
-        logger.info(f"[4-Patch Sanity] Train samples: {len(train_loader.dataset)}, Val samples: {len(val_loader.dataset)}")
+        # === Sanity Check: Patch-level 驗證 ===
+        logger.info(f"[Patch-level] Train samples: {len(train_loader.dataset)}, Val samples: {len(val_loader.dataset)}")
         val_first_batch = next(iter(val_loader))
-        if 'images_4patch' in val_first_batch:
-            logger.info(f"[4-Patch Sanity] Val batch: images_4patch={val_first_batch['images_4patch'].shape}, full_mask=list[{len(val_first_batch['full_mask'])}]")
-            logger.info("[4-Patch Sanity] ✓ Val dataset is slice-level with 4-patch format")
-        elif 'image' in val_first_batch:
-            logger.warning("[4-Patch Sanity] Val dataset is still patch-level! Stitch may not work.")
+        if 'image' in val_first_batch and 'mask' in val_first_batch:
+            logger.info(f"[Patch-level Sanity] Val batch OK: image={val_first_batch['image'].shape}, mask={val_first_batch['mask'].shape}")
         else:
-            logger.error("[4-Patch Sanity] Unknown val batch format!")
+            logger.error(f"[Patch-level Sanity] Unexpected val batch keys: {list(val_first_batch.keys())}")
         
         for epoch in range(self.config.training.epochs):
             epoch_start = time.time()
@@ -781,17 +901,27 @@ class UNetPPTrainer:
             self.history['val_iou'].append(val_metrics['iou'])
             self.history['val_precision'].append(val_metrics['precision'])
             self.history['val_recall'].append(val_metrics['recall'])
+            # Post-processed metrics
+            self.history['val_pp_dice'].append(val_metrics['pp_dice'])
+            self.history['val_pp_iou'].append(val_metrics['pp_iou'])
+            self.history['val_pp_precision'].append(val_metrics['pp_precision'])
+            self.history['val_pp_recall'].append(val_metrics['pp_recall'])
             self.history['lr'].append(current_lr)
             
-            # 保存最佳模型（使用 Dice 作為 model selection 指標）
-            if val_metrics['dice'] > best_dice:
-                best_dice = val_metrics['dice']
+            # 保存最佳模型（使用後處理後的 Dice 作為 model selection 指標）
+            pp_dice = val_metrics['pp_dice']
+            if pp_dice > best_dice:
+                best_dice = pp_dice
                 # 更新最佳指標
                 self.best_metrics = {
                     'val_dice': val_metrics['dice'],
                     'val_iou': val_metrics['iou'],
                     'val_precision': val_metrics['precision'],
                     'val_recall': val_metrics['recall'],
+                    'val_pp_dice': val_metrics['pp_dice'],
+                    'val_pp_iou': val_metrics['pp_iou'],
+                    'val_pp_precision': val_metrics['pp_precision'],
+                    'val_pp_recall': val_metrics['pp_recall'],
                     'val_loss': val_metrics['loss'],
                     'epoch': epoch + 1
                 }
@@ -801,10 +931,10 @@ class UNetPPTrainer:
                     val_metrics
                 )
                 self._save_best_metrics()
-                logger.info(f"New best model saved! Dice: {val_metrics['dice']:.4f}")
+                logger.info(f"New best model saved! PP Dice: {pp_dice:.4f} (Raw Dice: {val_metrics['dice']:.4f})")
             
-            # Early Stopping (使用 Dice)
-            if self.early_stopping(val_metrics['dice']):
+            # Early Stopping (使用後處理後的 Dice)
+            if self.early_stopping(pp_dice):
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
             
@@ -816,8 +946,12 @@ class UNetPPTrainer:
                 f"LR: {current_lr:.2e}, Time: {epoch_time:.1f}s"
             )
             logger.info(
-                f"  Dice: {val_metrics['dice']:.4f}, IoU: {val_metrics['iou']:.4f}, "
-                f"Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}"
+                f"  Raw  - Dice: {val_metrics['dice']:.4f}, IoU: {val_metrics['iou']:.4f}, "
+                f"Prec: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}"
+            )
+            logger.info(
+                f"  PP   - Dice: {val_metrics['pp_dice']:.4f}, IoU: {val_metrics['pp_iou']:.4f}, "
+                f"Prec: {val_metrics['pp_precision']:.4f}, Recall: {val_metrics['pp_recall']:.4f}"
             )
             
             # 每 epoch 繪製訓練曲線
@@ -837,7 +971,7 @@ class UNetPPTrainer:
         # 保存最佳指標
         self._save_best_metrics()
         
-        logger.info(f"訓練完成！最佳 Dice: {best_dice:.4f} (Epoch {self.best_metrics['epoch']})")
+        logger.info(f"訓練完成！最佳 PP Dice: {best_dice:.4f} (Epoch {self.best_metrics['epoch']})")
         
         return self.history
     

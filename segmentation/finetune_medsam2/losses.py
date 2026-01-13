@@ -435,17 +435,38 @@ class MedSAM2NativeLoss(nn.Module):
         Returns:
             加權組合損失
         """
-        # 確保維度正確
-        if pred.dim() == 2:
-            pred = pred.unsqueeze(0).unsqueeze(0)
-            target = target.unsqueeze(0).unsqueeze(0)
-        elif pred.dim() == 3:
-            pred = pred.unsqueeze(1)
-            target = target.unsqueeze(1)
-        
+        # 確保維度至少是 2D: [N, H*W] 以符合 MedSAM2 loss 預期
+        if pred.dim() == 2:  # [H, W]
+            pred = pred.flatten().unsqueeze(0)        # [1, H*W]
+            target = target.flatten().unsqueeze(0)    # [1, H*W]
+        elif pred.dim() == 3:  # [N, H, W] or [1, H, W]
+            N = pred.shape[0]
+            pred = pred.view(N, -1)                   # [N, H*W]
+            target = target.view(N, -1)               # [N, H*W]
+        elif pred.dim() == 4:  # [N, C, H, W]
+            N = pred.shape[0]
+            pred = pred.view(N, -1)                   # [N, C*H*W]
+            target = target.view(N, -1)               # [N, C*H*W]
+            
         target = target.float()
         
+        # Dice Loss (inputs needs to be logits if sigmoid=True inside loss, but medsam2_dice_loss usually expects sigmoid inputs or handles it?
+        # 根據 DiceLoss 的實作，如果是 logits，這裡先轉換比較安全，或者確認 medsam2_dice_loss 行為
+        # MedSAM2 原生 dice_loss:
+        #   inputs = inputs.sigmoid()
+        #   inputs = inputs.flatten(1)
+        #   numerator = 2 * (inputs * targets).sum(1)
+        #   ...
+        # 它是設計給 4D tensor [N, C, H, W] 的，但這裡我們手動 flatten 了
+        # 如果我們傳入 [N, H*W]，它 flatten(1) 後還是 [N, H*W]
+        # 但它期待 prediction 是 logits (因為它會做 sigmoid)
+        
+        # 所以這裡保持 pred 是 logits
         dice = medsam2_dice_loss(pred, target, num_objects=1, loss_on_multimask=False)
+        
+        # Focal Loss
+        # MedSAM2 sigmoid_focal_loss 預期 [N, C, ...]
+        # 如果我們傳入 [N, L]，它會計算 element-wise focal loss
         focal = medsam2_focal_loss(
             pred, target, num_objects=1,
             alpha=self.focal_alpha, gamma=self.focal_gamma,
@@ -453,3 +474,19 @@ class MedSAM2NativeLoss(nn.Module):
         )
         
         return self.dice_weight * dice + self.focal_weight * focal
+
+
+class PrecisionFocusedLoss(TverskyLoss):
+    """
+    專注於提升 Precision 的 Tversky Loss
+    
+    透過權重調整 (alpha < beta) 來懲罰 False Positives (過度分割)
+    適用於 Recall 很高但 Precision 偏低的情況
+    
+    Args:
+        alpha: FN 權重 (預設 0.2，降低對漏檢的敏感度)
+        beta: FP 權重 (預設 0.8，大幅增加對誤檢的懲罰)
+    """
+    def __init__(self, alpha: float = 0.2, beta: float = 0.8, smooth: float = 1.0):
+        super().__init__(alpha=alpha, beta=beta, smooth=smooth)
+

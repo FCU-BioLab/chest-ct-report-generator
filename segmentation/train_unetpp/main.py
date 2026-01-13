@@ -89,13 +89,13 @@ def parse_args():
     parser.add_argument('--model_path', type=str, default=None, help='模型路徑（用於推論/測試/恢復訓練）')
     
     # 訓練參數
-    parser.add_argument('--epochs', type=int, default=100, help='訓練 epochs')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-4, help='學習率')
-    parser.add_argument('--patch_size', type=int, default=224, help='Patch 大小')
-    
+    parser.add_argument('--epochs', type=int, default=None, help='訓練 epochs')
+    parser.add_argument('--batch_size', type=int, default=None, help='Batch size')
+    parser.add_argument('--lr', type=float, default=None, help='學習率')
+    parser.add_argument('--patch_size', type=int, default=None, help='Patch 大小')
+
     # 模型參數
-    parser.add_argument('--encoder', type=str, default='efficientnet-b4', help='編碼器名稱')
+    parser.add_argument('--encoder', type=str, default=None, help='編碼器名稱')
     
     # 其他
     parser.add_argument('--data_fraction', type=float, default=1.0, help='使用的資料比例（用於快速測試）')
@@ -110,27 +110,35 @@ def create_config(args) -> Config:
     """根據命令列參數建立配置"""
     config = get_default_config()
     
-    # 更新訓練參數
-    config.training.epochs = args.epochs
-    config.training.batch_size = args.batch_size
-    config.training.learning_rate = args.lr
-    config.data.patch_size = args.patch_size
-    config.model.encoder_name = args.encoder
-    config.model.in_channels = 3  # 2.5D
-    config.seed = args.seed
-    config.num_workers = args.num_workers
-    config.device = args.device
-    
+    # 只有 args 有指定時才覆蓋 config
+    if args.epochs is not None:
+        config.training.epochs = args.epochs
+    if args.batch_size is not None:
+        config.training.batch_size = args.batch_size
+    if args.lr is not None:
+        config.training.learning_rate = args.lr
+    if args.patch_size is not None:
+        config.data.patch_size = args.patch_size
+    if args.encoder is not None:
+        config.model.encoder_name = args.encoder
+    # in_channels 使用 config 預設值 (5 for 2.5D: z-2, z-1, z, z+1, z+2)
+    if args.seed is not None:
+        config.seed = args.seed
+    if args.num_workers is not None:
+        config.num_workers = args.num_workers
+    if args.device is not None:
+        config.device = args.device
+
     # CV 設定
     config.training.use_cv = args.cv
     config.training.cv_fold = args.fold
-    
+
     # 覆蓋路徑（如果有指定）
     if args.data_dir:
         config.data.data_dir = args.data_dir
     if args.output_dir:
         config.data.output_dir = args.output_dir
-    
+
     return config
 
 
@@ -158,27 +166,34 @@ def run_lndb_preprocess(config: Config):
 
 def run_lndb_training(config: Config, args, run_dir: Path):
     """執行 LNDb 訓練"""
-    from train_unetpp.dataset import LNDbSliceDataset, get_patient_split, get_fold_split
+    from train_unetpp.dataset import CachedPatchDataset, get_cached_patch_split, get_patient_split
     
-    slice_cache_dir = str(Path(config.data.cache_dir).parent / "lndb_slices")
+    # 使用 config 中設定的 cache_dir (cache/lndb_patches)
+    cache_dir = config.data.cache_dir
     
-    if not Path(slice_cache_dir).exists():
-        logger.error(f"切片快取不存在: {slice_cache_dir}")
-        logger.error("請先執行 --preprocess")
+    if not Path(cache_dir).exists():
+        logger.error(f"Patch 快取不存在: {cache_dir}")
+        logger.error("請先執行: python train_unetpp/preprocess.py --mode 4patch")
         return None, None
     
     # 資料分割
-    if args.cv:
-        fold_id = args.fold if args.fold is not None else 0
-        train_ids, val_ids = get_fold_split(config.data.data_dir, fold_id)
-        test_ids = []
-        config.experiment_name = f"unetpp_lndb_fold{fold_id}"
+    # If caching is disabled, we might not have the cache dir structure for get_cached_patch_split
+    # So we use the generic get_patient_split if needed
+    if config.data.cache_preprocessed:
+        train_ids, val_ids, test_ids = get_cached_patch_split(
+            cache_dir,
+            config.data.train_ratio,
+            config.data.val_ratio,
+            config.seed
+        )
     else:
+        # Using slices directly, use the original split logic
+        # Data dir is the RAW data dir, but get_patient_split handles looking into cache too
         train_ids, val_ids, test_ids = get_patient_split(
             config.data.data_dir,
             config.data.train_ratio,
             config.data.val_ratio,
-            config.data.test_ratio,
+            config.data.test_ratio, # Added test ratio
             config.seed
         )
     
@@ -192,8 +207,22 @@ def run_lndb_training(config: Config, args, run_dir: Path):
     logger.info(f"訓練集: {len(train_ids)} 病人, 驗證集: {len(val_ids)} 病人, 測試集: {len(test_ids)} 病人")
     
     # 建立資料集
-    train_dataset = LNDbSliceDataset(slice_cache_dir, train_ids, config, mode="train")
-    val_dataset = LNDbSliceDataset(slice_cache_dir, val_ids, config, mode="val")
+    # Phase 2 Upgrade: Dynamic vs Cached
+    if config.data.cache_preprocessed:
+        logger.info("Using CACHED Patch Dataset (Fixed Size)")
+        train_dataset = CachedPatchDataset(cache_dir, train_ids, config, mode="train")
+        val_dataset = CachedPatchDataset(cache_dir, val_ids, config, mode="val")
+    else:
+        logger.info("Using DYNAMIC Slice Dataset (On-the-fly Cropping for 352x352)")
+        # Point to the SLICE cache (cache/lndb_slices)
+        slice_cache_dir = Path(config.data.cache_dir).parent / "lndb_slices"
+        logger.info(f"Loading slices from: {slice_cache_dir}")
+        
+        # We need to import LNDbSliceDataset inside the function to avoid circular imports if any
+        from train_unetpp.dataset import LNDbSliceDataset
+        
+        train_dataset = LNDbSliceDataset(slice_cache_dir, train_ids, config, mode="train")
+        val_dataset = LNDbSliceDataset(slice_cache_dir, val_ids, config, mode="val")
     
     # DataLoader
     actual_workers = min(4, config.num_workers)
@@ -222,13 +251,165 @@ def run_lndb_training(config: Config, args, run_dir: Path):
     data_split = {'train_ids': train_ids, 'val_ids': val_ids, 'test_ids': test_ids}
     trainer = UNetPPTrainer(config, data_split=data_split, output_dir=run_dir)
     
+    # Check for resume (Load model weights if provided in args.model_path)
+    if args.model_path and Path(args.model_path).exists():
+        logger.info(f"Resuming training from checkpoint: {args.model_path}")
+        checkpoint = torch.load(args.model_path, map_location=config.device)
+        trainer.model.load_state_dict(checkpoint['model_state_dict'])
+        # Consider loading optimizer state if needed, but for now just weights is a good start
+        # trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
     # 訓練
     history = trainer.fit(train_loader, val_loader)
     
-    # 繪製曲線
+    # 匯出訓練歷史
     plot_training_history(history, str(trainer.output_dir / "training_curves_final.png"))
     
+    # === 新增：Test Set 評估 ===
+    if len(test_ids) > 0:
+        logger.info(f"\n{'='*50}")
+        logger.info(f"開始 LNDb Test Set 評估... ({len(test_ids)} 病人)")
+        
+        # 建立 Test DataLoader
+        test_dataset = CachedPatchDataset(cache_dir, test_ids, config, mode="val") # Test 使用 val 模式( deterministic)
+        
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=False,
+            num_workers=actual_workers,
+            pin_memory=True,
+            collate_fn=custom_collate_fn,
+            persistent_workers=actual_workers > 0
+        )
+        
+        # 載入最佳模型
+        best_model_path = run_dir / "best_model.pth"
+        if best_model_path.exists():
+            logger.info(f"載入最佳模型: {best_model_path}")
+            checkpoint = torch.load(best_model_path, map_location=config.device, weights_only=False)
+            trainer.model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            logger.warning("找不到最佳模型，使用目前模型進行測試")
+            
+        # 執行評估
+        test_metrics = trainer.validate(test_loader, epoch=None, save_samples=False)
+        
+        # 保存 Test 結果
+        test_results = {
+            'test_ids': test_ids,
+            'num_test_patients': len(test_ids),
+            'num_test_patches': len(test_dataset),
+            'metrics': {
+                'dice': float(test_metrics['dice']),
+                'iou': float(test_metrics['iou']),
+                'precision': float(test_metrics['precision']),
+                'recall': float(test_metrics['recall']),
+                'pp_dice': float(test_metrics['pp_dice']),
+                'pp_iou': float(test_metrics['pp_iou']),
+                'pp_precision': float(test_metrics['pp_precision']),
+                'pp_recall': float(test_metrics['pp_recall']),
+            }
+        }
+        
+        test_metrics_path = run_dir / "test_metrics.json"
+        with open(test_metrics_path, 'w', encoding='utf-8') as f:
+            json.dump(test_results, f, indent=2, ensure_ascii=False)
+            
+        logger.info("=" * 50)
+        logger.info("LNDb Test 評估結果:")
+        logger.info(f"  Raw Dice: {test_metrics['dice']:.4f}, IoU: {test_metrics['iou']:.4f}")
+        logger.info(f"  PP  Dice: {test_metrics['pp_dice']:.4f}, IoU: {test_metrics['pp_iou']:.4f}")
+        logger.info(f"Test 結果已保存: {test_metrics_path}")
+        logger.info("=" * 50)
+    
     return trainer, history
+
+
+def run_lndb_test_only(config: Config, args, run_dir: Path):
+    """LNDb 只執行測試評估（不訓練）"""
+    from train_unetpp.dataset import CachedPatchDataset, get_cached_patch_split
+    
+    if not args.model_path:
+        logger.error("請指定 --model_path")
+        return
+
+    model_path = Path(args.model_path)
+    if not model_path.exists():
+        logger.error(f"模型不存在: {model_path}")
+        return
+        
+    # 資料準備
+    cache_dir = config.data.cache_dir
+    if not Path(cache_dir).exists():
+        # Fallback
+        project_root = Path(__file__).parent.parent
+        cache_dir = str(project_root / "segmentation" / "cache" / "lndb_patches")
+        
+    _, _, test_ids = get_cached_patch_split(
+        cache_dir,
+        config.data.train_ratio,
+        config.data.val_ratio,
+        config.seed
+    )
+    
+    if args.data_fraction < 1.0:
+        test_ids = test_ids[:max(1, int(len(test_ids) * args.data_fraction))]
+        
+    logger.info(f"開始 LNDb Test Set 評估... ({len(test_ids)} 病人)")
+    
+    # 建立 DataLoader
+    test_dataset = CachedPatchDataset(cache_dir, test_ids, config, mode="val")
+    actual_workers = min(4, config.num_workers)
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        num_workers=actual_workers,
+        pin_memory=True,
+        collate_fn=custom_collate_fn,
+        persistent_workers=actual_workers > 0
+    )
+    
+    # 初始化 Trainer (用於使用其 validate 方法)
+    # 只需要 output_dir 和 config
+    trainer = UNetPPTrainer(config, output_dir=run_dir)
+    
+    # 載入模型
+    logger.info(f"載入模型: {model_path}")
+    checkpoint = torch.load(model_path, map_location=config.device, weights_only=False)
+    trainer.model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # 執行評估
+    test_metrics = trainer.validate(test_loader, epoch=None, save_samples=False)
+    
+    # 保存結果
+    test_results = {
+        'model_path': str(model_path),
+        'test_ids': test_ids,
+        'metrics': {
+            'dice': float(test_metrics['dice']),
+            'iou': float(test_metrics['iou']),
+            'precision': float(test_metrics['precision']),
+            'recall': float(test_metrics['recall']),
+            'pp_dice': float(test_metrics['pp_dice']),
+            'pp_iou': float(test_metrics['pp_iou']),
+            'pp_precision': float(test_metrics['pp_precision']),
+            'pp_recall': float(test_metrics['pp_recall']),
+        }
+    }
+    
+    test_metrics_path = run_dir / "test_only_metrics.json"
+    with open(test_metrics_path, 'w', encoding='utf-8') as f:
+        json.dump(test_results, f, indent=2, ensure_ascii=False)
+        
+    logger.info("=" * 50)
+    logger.info("LNDb Test 評估結果:")
+    logger.info(f"  Raw Dice: {test_metrics['dice']:.4f}, IoU: {test_metrics['iou']:.4f}")
+    logger.info(f"  PP  Dice: {test_metrics['pp_dice']:.4f}, IoU: {test_metrics['pp_iou']:.4f}")
+    logger.info(f"結果已保存: {test_metrics_path}")
+    logger.info("=" * 50)
 
 
 def run_lndb_cv_training(config: Config, args, run_dir: Path):
@@ -845,6 +1026,8 @@ def main():
             run_lndb_inference(config, args)
         elif args.cv:
             run_lndb_cv_training(config, args, run_dir)
+        elif args.test:
+             run_lndb_test_only(config, args, run_dir)
         else:
             run_lndb_training(config, args, run_dir)
     
