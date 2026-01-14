@@ -22,6 +22,7 @@ detection/yolo_detection/yolov11_models/dataset_exports
 detection/yolo_detection/docs/temp
 models
 *.pt
+*.html
 temp
 **/*pycache*/
 **/*results/
