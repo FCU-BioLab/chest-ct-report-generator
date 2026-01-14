@@ -20,6 +20,7 @@ import datetime
 
 from detection.deep_lung.dataset import LungNodule3DDataset, collate_fn
 from detection.deep_lung.model import get_model
+from detection.deep_lung.evaluate import evaluate, compute_froc, compute_map
 from detection.deep_lung.visualize import visualize_sample, plot_training_curves, plot_confusion_matrix
 
 # ... (Config remains)
@@ -138,7 +139,7 @@ def main():
 DATA_DIR = Path(__file__).resolve().parents[2] / "cache/deep_lung_cache/train"
 VAL_DIR = Path(__file__).resolve().parents[2] / "cache/deep_lung_cache/val"
 BATCH_SIZE = 2
-LR = 1e-5 # Lowered for stability
+LR = 1e-4  # Increased from 1e-5 for faster convergence
 EPOCHS = 50
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 EVAL_INTERVAL = 1 # Run eval every N epochs

@@ -72,11 +72,31 @@ def compute_froc(proposals: List[Dict], targets: List[Dict], iou_thresh=0.1):
                 else:
                     # False Positive (Duplicate or Background)
                     detection_list.append({'score': score, 'tp': 0, 'fp': 1})
-            else:
                 # No GT, all are FP
                 detection_list.append({'score': score, 'tp': 0, 'fp': 1})
                 
     return pd.DataFrame(detection_list), total_gt, detection_list
+
+def evaluate(model, loader, device):
+    """
+    Run inference on dataset and collect predictions/targets.
+    """
+    model.eval()
+    
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for images, targets in tqdm(loader, desc="Evaluating"):
+            images = torch.stack(images).to(device)
+            
+            # Model returns detections in eval mode
+            detections = model(images)
+            
+            all_preds.extend(detections)
+            all_targets.extend(targets)
+            
+    return all_preds, all_targets
 
 def compute_map(df, total_gt):
     """

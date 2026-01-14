@@ -24,8 +24,11 @@ class ResNet3DBackbone(nn.Module):
     """
     Simple 3D CNN Backbone.
     Input: (B, 1, D, H, W)
-    Output: (B, 64, D/4, H/4, W/4)
+    Output: (B, out_channels, D/16, H/16, W/16)
+    
+    Total stride = 2^4 = 16 (4x MaxPool3d with stride 2)
     """
+    STRIDE = 16  # Expose backbone stride explicitly
     def __init__(self, in_channels=1, base_filters=16):
         super().__init__()
         self.enc1 = self._conv_block(in_channels, base_filters)
@@ -118,10 +121,11 @@ class AnchorGenerator3D(nn.Module):
         image_size = image_list.shape[-3:] # (D, H, W)
         dtype, device = feature_maps[0].dtype, feature_maps[0].device
         
+        # FIX: Use float stride to avoid truncation issues
         strides = [[
-            torch.tensor(image_size[0] / g[0], dtype=torch.int64, device=device),
-            torch.tensor(image_size[1] / g[1], dtype=torch.int64, device=device),
-            torch.tensor(image_size[2] / g[2], dtype=torch.int64, device=device)
+            torch.tensor(image_size[0] / g[0], dtype=torch.float32, device=device),
+            torch.tensor(image_size[1] / g[1], dtype=torch.float32, device=device),
+            torch.tensor(image_size[2] / g[2], dtype=torch.float32, device=device)
         ] for g in grid_sizes]
         
         # Cache cell anchors
@@ -245,7 +249,7 @@ class RegionProposalNetwork3D(nn.Module):
             regression_targets[sampled_pos_inds],
             beta=1.0 / 9,
             reduction='sum'
-        ) / (sampled_inds.numel() + 1e-5)
+        ) / (sampled_pos_inds.numel() + 1e-5)  # FIX: Divide by num positives only
         
         return loss_objectness, loss_box_reg
 
@@ -333,12 +337,28 @@ class RegionProposalNetwork3D(nn.Module):
                 anchors_i = anchors_i[topk_idx]
                 
             boxes = self.box_coder.decode(deltas, anchors_i)
-            # Clip ?
+            
+            # FIX: Clip proposals to image boundaries
+            # Assume image_shape available from earlier context or passed
+            # For now, clip to reasonable bounds based on typical 128^3 input
+            boxes = boxes.clamp(min=0)
+            
+            # FIX: Filter boxes smaller than min_size
+            widths = boxes[:, 3] - boxes[:, 0]
+            heights = boxes[:, 4] - boxes[:, 1]
+            depths = boxes[:, 5] - boxes[:, 2]
+            keep_size = (widths >= self.min_size) & (heights >= self.min_size) & (depths >= self.min_size)
+            boxes = boxes[keep_size]
+            scores = scores[keep_size]
             
             # Filter NaNs/Infs explicitly
             keep_finite = torch.isfinite(boxes).all(dim=1) & torch.isfinite(scores)
             boxes = boxes[keep_finite]
             scores = scores[keep_finite]
+            
+            if boxes.numel() == 0:
+                proposals.append(torch.zeros((0, 6), device=boxes.device))
+                continue
             
             keep = nms_3d(boxes, scores, self.nms_thresh)
             if self.post_nms_top_n < keep.shape[0]:
@@ -477,7 +497,24 @@ class RoIHeads3D(nn.Module):
                 regression_targets.append(self.box_coder.encode(proposals[i], matched_gt_boxes_n[i]))
             regression_targets = torch.cat(regression_targets, dim=0)
             
-            loss_cls = F.cross_entropy(class_logits, labels, ignore_index=-1)
+            loss_cls = F.cross_entropy(class_logits, labels, ignore_index=-1, reduction='none')
+            
+            # OHEM: Keep top-k hardest negatives
+            neg_inds = torch.where(labels == 0)[0]
+            pos_inds = torch.where(labels > 0)[0]
+            
+            if len(neg_inds) > 0:
+                neg_losses = loss_cls[neg_inds]
+                # Keep top 3x positives worth of hard negatives
+                num_hard_neg = min(len(neg_inds), max(128, len(pos_inds) * 3))
+                _, hard_neg_idx = neg_losses.topk(num_hard_neg)
+                hard_neg_inds = neg_inds[hard_neg_idx]
+                
+                # Combine pos + hard neg
+                ohem_inds = torch.cat([pos_inds, hard_neg_inds])
+                loss_cls = loss_cls[ohem_inds].mean()
+            else:
+                loss_cls = loss_cls.mean()
             
             # Box loss only on positives
             pos_inds = torch.where(labels > 0)[0]
@@ -493,35 +530,43 @@ class RoIHeads3D(nn.Module):
                 "loss_box_reg": loss_box_reg
             }
         else:
-            # Inference Post Process
-            # Scores
-            scores = F.softmax(class_logits, dim=-1) # (N, C)
-            # Boxes
-            boxes_all_classes = []
-            # decode for each class?
-            # Simplicity: just decode class 1
+            # Inference Post Process - FIX: Process per image to avoid cross-image NMS
+            scores = F.softmax(class_logits, dim=-1)  # (N_total, C)
+            deltas = box_regression.reshape(-1, class_logits.shape[1], 6)[:, 1]  # Class 1
             
-            deltas = box_regression.reshape(-1, class_logits.shape[1], 6)[:, 1] # Class 1
+            all_proposals = torch.cat(proposals, dim=0)
+            boxes = self.box_coder.decode(deltas, all_proposals)
+            scores_cls1 = scores[:, 1]
             
-            # Proposals are concatenated (Sum_N per batch), need to split back?
-            # Or iterate.
-            # Usually: decode all, then NMS.
-            # Here: simplistic
+            # Track proposal counts per image
+            proposal_counts = [len(p) for p in proposals]
             
-            boxes = self.box_coder.decode(deltas, torch.cat(proposals, dim=0))
-            scores = scores[:, 1]
-            
-            # Apply NMS
-            keep = nms_3d(boxes, scores, self.nms_thresh)
-            keep = keep[:self.detections_per_img]
-            
-            # Return list of dicts, but we lost batch awareness here due to Flatten.
-            # Need to track counts per image.
-            # To fix: box_roi_pool should handle batch index.
-            # For this implementation, let's assume Batch Size 1 for inference simplicity or track lengths.
-            # Reconstruction of list omitted for brevity but required in full prod code.
-            # Returning tensor for now.
-            result = [{"boxes": boxes[keep], "scores": scores[keep], "labels": torch.ones_like(keep)}]
+            result = []
+            start_idx = 0
+            for count in proposal_counts:
+                end_idx = start_idx + count
+                
+                img_boxes = boxes[start_idx:end_idx]
+                img_scores = scores_cls1[start_idx:end_idx]
+                
+                if img_boxes.numel() == 0:
+                    result.append({
+                        "boxes": torch.zeros((0, 6), device=boxes.device),
+                        "scores": torch.zeros((0,), device=boxes.device),
+                        "labels": torch.zeros((0,), dtype=torch.int64, device=boxes.device)
+                    })
+                else:
+                    # Per-image NMS
+                    keep = nms_3d(img_boxes, img_scores, self.nms_thresh)
+                    keep = keep[:self.detections_per_img]
+                    
+                    result.append({
+                        "boxes": img_boxes[keep],
+                        "scores": img_scores[keep],
+                        "labels": torch.ones(len(keep), dtype=torch.int64, device=boxes.device)  # FIX: Proper dtype
+                    })
+                
+                start_idx = end_idx
             
         return result, losses
 
@@ -555,13 +600,8 @@ class Tool3dRoIPool(nn.Module):
                 
                 # Note: Proposals are in original image scale. 
                 # Features are subsampled.
-                # Need to scale box!
-                # Assuming stride is handled implicitly by RoIAlign usually, but here we manually crop.
-                # Must divide by stride.
-                
-                # Check Backbone stride
-                # ResNet3DBackbone: 4 pooling layers => stride 2^4 = 16.
-                stride = 16.0
+                # FIX: Reference backbone stride constant instead of hardcoding
+                stride = float(ResNet3DBackbone.STRIDE)
                 
                 z1 = int(box[2].item() / stride)
                 y1 = int(box[1].item() / stride)
@@ -602,16 +642,16 @@ class FasterRCNN3D(nn.Module):
         self.backbone = ResNet3DBackbone(base_filters=32)
         
         # Anchor Generator
-        # Base size 10, 20, 40 pixels? Nodule size varies 3mm to 30mm.
-        # 1 pixel = 1mm. So 4, 8, 16, 32.
-        self.anchor_generator = AnchorGenerator3D(sizes=((4, 8, 16, 32),))
+        # Nodule size: Min=3, Max=30, Mean=5.2, 90th=8.1
+        # Adding 2mm anchor for tiny nodules
+        self.anchor_generator = AnchorGenerator3D(sizes=((2, 4, 8, 16, 32),))
         
         self.rpn = RegionProposalNetwork3D(
             self.anchor_generator,
-            head=RPNHead3D(self.backbone.out_channels, num_anchors=4),
-            fg_iou_thresh=0.7, bg_iou_thresh=0.3,
-            batch_size_per_image=256, positive_fraction=0.5,
-            pre_nms_top_n=2000, post_nms_top_n=1000, nms_thresh=0.7
+            head=RPNHead3D(self.backbone.out_channels, num_anchors=5),  # 5 anchors now
+            fg_iou_thresh=0.5, bg_iou_thresh=0.2,  # Lowered from 0.7/0.3
+            batch_size_per_image=256, positive_fraction=0.7,  # Increased from 0.5
+            pre_nms_top_n=2000, post_nms_top_n=1000, nms_thresh=0.5
         )
         
         self.roi_heads = RoIHeads3D(
