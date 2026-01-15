@@ -176,8 +176,11 @@ def train_one_epoch(model, optimizer, loader, device, epoch):
         
         loss_dict = model(images, targets)
         
-        # Loss Dict contains rpn and roi losses
-        loss = sum(loss for loss in loss_dict.values())
+        # CenterNet returns 'loss' key with total, or sum all losses for older models
+        if 'loss' in loss_dict:
+            loss = loss_dict['loss']
+        else:
+            loss = sum(loss for loss in loss_dict.values())
         
         loss_val = loss.item()
         if not math.isfinite(loss_val):
@@ -190,7 +193,12 @@ def train_one_epoch(model, optimizer, loader, device, epoch):
         optimizer.step()
         
         total_loss += loss.item()
-        pbar.set_postfix({'loss': loss.item()})
+        
+        # Show detailed losses in progress bar
+        postfix = {'loss': f'{loss.item():.3f}'}
+        if 'loss_hm' in loss_dict:
+            postfix['hm'] = f'{loss_dict["loss_hm"].item():.3f}'
+        pbar.set_postfix(postfix)
         
 
     return total_loss / len(loader)
