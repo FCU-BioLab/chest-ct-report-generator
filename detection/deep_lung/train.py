@@ -52,15 +52,16 @@ def run_validation(model, loader, device, epoch, output_dir):
         fp_per_scan = df['fp'].sum() / num_scans
         
         # YOLO Metrics
-        ap, best_f1, best_prec, best_rec = compute_map(df, total_gt)
+        ap, best_f1, best_prec, best_rec, optimal_thresh = compute_map(df, total_gt)
         
         logger.info(f"Epoch {epoch} Eval Results:")
         logger.info(f"  [LUNA] Sensitivity: {sensitivity:.4f} | FP/Scan: {fp_per_scan:.2f}")
         logger.info(f"  [YOLO] AP@0.1: {ap:.4f} | F1: {best_f1:.4f} | Prec: {best_prec:.4f} | Rec: {best_rec:.4f}")
+        logger.info(f"  [Optimal] Score Threshold: {optimal_thresh:.4f}")
         
         # Save metrics to text file
         with open(os.path.join(output_dir, "metrics.txt"), "a") as f:
-            f.write(f"Epoch {epoch}: Sens={sensitivity:.4f}, FP/Scan={fp_per_scan:.4f}, AP={ap:.4f}, F1={best_f1:.4f}\n")
+            f.write(f"Epoch {epoch}: Sens={sensitivity:.4f}, FP/Scan={fp_per_scan:.4f}, AP={ap:.4f}, F1={best_f1:.4f}, OptThresh={optimal_thresh:.4f}\n")
             
         # Plot Confusion Matrix (for this epoch)
         tp_total = df['tp'].sum()
@@ -139,8 +140,8 @@ def main():
 DATA_DIR = Path(__file__).resolve().parents[2] / "cache/deep_lung_cache/train"
 VAL_DIR = Path(__file__).resolve().parents[2] / "cache/deep_lung_cache/val"
 BATCH_SIZE = 2
-LR = 1e-4  # Increased from 1e-5 for faster convergence
-EPOCHS = 50
+LR = 1e-4  # Reverted from 1e-3 - too high caused no detections
+EPOCHS = 100  # Increased from 50
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 EVAL_INTERVAL = 1 # Run eval every N epochs
 
@@ -220,7 +221,7 @@ def run_validation(model, loader, device, epoch, output_dir):
         fp_per_scan = df['fp'].sum() / num_scans
         
         # YOLO Metrics
-        ap, best_f1, best_prec, best_rec = compute_map(df, total_gt)
+        ap, best_f1, best_prec, best_rec, optimal_thresh = compute_map(df, total_gt)
         
         logger.info(f"Epoch {epoch} Eval Results:")
         logger.info(f"  [LUNA] Sensitivity: {sensitivity:.4f} | FP/Scan: {fp_per_scan:.2f}")
@@ -292,8 +293,9 @@ def main():
     model = get_model(num_classes=2)
     model.to(DEVICE)
     
-    # 3. Optimizer
-    optimizer = optim.AdamW(model.parameters(), lr=LR)
+    # 3. Optimizer and Scheduler
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
     
     # 4. Results Dir
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -306,7 +308,9 @@ def main():
     
     for epoch in range(1, EPOCHS + 1):
         avg_loss = train_one_epoch(model, optimizer, train_loader, DEVICE, epoch)
-        logger.info(f"Epoch {epoch} - Avg Loss: {avg_loss:.4f}")
+        scheduler.step()  # Update learning rate
+        current_lr = scheduler.get_last_lr()[0]
+        logger.info(f"Epoch {epoch} - Avg Loss: {avg_loss:.4f} - LR: {current_lr:.2e}")
         
         HISTORY['loss'].append(avg_loss)
         

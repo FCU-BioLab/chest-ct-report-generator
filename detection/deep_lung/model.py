@@ -200,7 +200,7 @@ def offset_loss(pred_offset, target_offset, mask):
 # 4. Ground Truth Generation
 # -----------------------------------------------------------------------------
 
-def generate_heatmap_target(gt_boxes, output_size, stride, min_overlap=0.3):
+def generate_heatmap_target(gt_boxes, output_size, stride, device, min_overlap=0.3):
     """
     Generate ground truth heatmap and size targets.
     
@@ -208,6 +208,7 @@ def generate_heatmap_target(gt_boxes, output_size, stride, min_overlap=0.3):
         gt_boxes: (N, 6) tensor - (x1, y1, z1, x2, y2, z2)
         output_size: (D, H, W) of the output feature map
         stride: backbone stride
+        device: torch device to create tensors on
         min_overlap: minimum fraction of Gaussian to cover object
         
     Returns:
@@ -217,7 +218,6 @@ def generate_heatmap_target(gt_boxes, output_size, stride, min_overlap=0.3):
         mask: (1, D, H, W) binary mask of center points
     """
     D, H, W = output_size
-    device = gt_boxes.device if len(gt_boxes) > 0 else 'cpu'
     
     heatmap = torch.zeros((1, D, H, W), dtype=torch.float32, device=device)
     size_map = torch.zeros((3, D, H, W), dtype=torch.float32, device=device)
@@ -431,7 +431,7 @@ class CenterNet3D(nn.Module):
             for i in range(B):
                 gt_boxes = targets[i]['boxes']
                 hm_t, size_t, offset_t, mask = generate_heatmap_target(
-                    gt_boxes, (D_fm, H_fm, W_fm), self.stride
+                    gt_boxes, (D_fm, H_fm, W_fm), self.stride, device=images.device
                 )
                 hm_targets.append(hm_t)
                 size_targets.append(size_t)
