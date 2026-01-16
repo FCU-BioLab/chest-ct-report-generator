@@ -177,6 +177,24 @@ class LungNodule3DDataset(Dataset):
             shift = random.uniform(-0.1, 0.1)
             image = image * scale + shift
             image = np.clip(image, 0, 1)
+        
+        # 4. Gaussian Noise
+        if random.random() < 0.3:
+            noise_std = random.uniform(0.01, 0.05)
+            noise = np.random.normal(0, noise_std, image.shape).astype(np.float32)
+            image = np.clip(image + noise, 0, 1)
+        
+        # 5. Gaussian Blur (simulates motion/resolution variation)
+        if random.random() < 0.2:
+            from scipy.ndimage import gaussian_filter
+            sigma = random.uniform(0.3, 1.0)
+            image = gaussian_filter(image, sigma=sigma)
+        
+        # 6. Random Gamma Correction
+        if random.random() < 0.3:
+            gamma = random.uniform(0.8, 1.2)
+            image = np.power(image + 1e-8, gamma)
+            image = np.clip(image, 0, 1)
 
         return image, boxes
 

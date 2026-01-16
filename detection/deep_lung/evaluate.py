@@ -143,8 +143,9 @@ def compute_map(df, total_gt):
     df['f1'] = 2 * df['precision'] * df['recall'] / (df['precision'] + df['recall'] + 1e-6)
     best_f1 = df['f1'].max()
     best_row = df.loc[df['f1'].idxmax()]
+    optimal_thresh = best_row['score']  # Score threshold that gives best F1
     
-    return ap, best_f1, best_row['precision'], best_row['recall']
+    return ap, best_f1, best_row['precision'], best_row['recall'], optimal_thresh
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -184,7 +185,7 @@ if __name__ == '__main__':
         print("No detections made.")
     else:
         # Standard YOLO-style Metrics
-        ap, best_f1, best_prec, best_rec = compute_map(df, total_gt)
+        ap, best_f1, best_prec, best_rec, optimal_thresh = compute_map(df, total_gt)
         
         # Mean IoU (of True Positives only, generally)
         # We need to access IoUs again or modify compute_froc to return them.
