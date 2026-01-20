@@ -9,6 +9,7 @@ segmentation/MedSAM2
 segmentation/segmentation_result
 segmentation/result
 segmentation/video_result
+volume_output_unet3d
 cache
 datasets
 detection/__pycache__

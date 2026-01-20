@@ -114,7 +114,16 @@ def cmd_test(args):
     
     trainer = UNet3DTrainer(config)
     trainer.load_checkpoint(args.checkpoint)
-    trainer.evaluate(args.split)
+    results = trainer.evaluate(args.split, use_postprocess=not args.no_postprocess)
+    
+    # Save results to file
+    import json
+    output_path = Path(args.checkpoint).parent / f"eval_results_{args.split}.json"
+    with open(output_path, 'w') as f:
+        # Remove sample_results for cleaner output
+        summary = {k: v for k, v in results.items() if k != 'sample_results'}
+        json.dump(summary, f, indent=2)
+    logging.info(f"📁 Results saved to: {output_path}")
 
 def main():
     parser = argparse.ArgumentParser(description='3D U-Net Video Training')
@@ -160,6 +169,8 @@ def main():
     test.add_argument('--base_filters', type=int, default=32)
     test.add_argument('--image_size', type=int, default=256)
     test.add_argument('--device', default='cuda')
+    test.add_argument('--no_postprocess', action='store_true', 
+                      help='Disable lung mask and postprocessing')
     
     args = parser.parse_args()
     setup_logging(args.log_level)

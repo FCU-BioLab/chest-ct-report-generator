@@ -13,6 +13,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
+import scipy.ndimage
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +92,12 @@ class VolumetricDataset(Dataset):
         frames = frames.astype(np.float32) / 255.0
         
         # To Tensor (1, D, H, W)
+        # Ensure positive strides for torch
+        frames = np.ascontiguousarray(frames)
+        masks = np.ascontiguousarray(masks)
+        
         frames_tensor = torch.from_numpy(frames).unsqueeze(0)
-        masks_tensor = torch.from_numpy(masks).long().unsqueeze(0) # (1, D, H, W) for consistency or (D, H, W)? UNet expects (B, 1, D, H, W) input, Mask (B, D, H, W) or (B, 1, D, H, W).
-        # Standard Loss usually expects (B, D, H, W) for target if indices, or (B, 1, D, H, W) if BceWithLogits.
-        # Let's return masks as (1, D, H, W) to match model output channel 1.
+        masks_tensor = torch.from_numpy(masks).long().unsqueeze(0)
         
         return {
             'image': frames_tensor,
@@ -120,14 +124,98 @@ class VolumetricDataset(Dataset):
         return r_frames, r_masks
 
     def _augment(self, frames, masks):
-        # Simple flip
+        """
+        3D Data Augmentation
+        - Random Flip (H/V)
+        - Random Rotate (-15, 15 degrees)
+        - Random Scale (0.8, 1.2)
+        - Random Intensity Shift
+        """
+        # 1. Flip
         if np.random.rand() > 0.5:
             frames = np.flip(frames, axis=2) # Horizontal
             masks = np.flip(masks, axis=2)
         if np.random.rand() > 0.5:
             frames = np.flip(frames, axis=1) # Vertical
             masks = np.flip(masks, axis=1)
-        return frames.copy(), masks.copy()
+            
+        # 2. Random Rotate (affine on H-W plane)
+        # We rotate the whole volume along the Z-axis (depth)
+        if np.random.rand() > 0.5:
+            angle = np.random.uniform(-15, 15)
+            # scipy.ndimage.rotate rotates in the plane defined by axes. axes=(1,2) is H-W plane
+            # reshape=False to keep original size
+            frames = scipy.ndimage.rotate(frames, angle, axes=(1, 2), reshape=False, mode='nearest')
+            masks = scipy.ndimage.rotate(masks, angle, axes=(1, 2), reshape=False, order=0, mode='constant', cval=0)
+            
+        # 3. Random Scale (Zoom)
+        if np.random.rand() > 0.5:
+            scale = np.random.uniform(0.8, 1.2)
+            # We want to scale H and W, but keep D same usually, or scale all? 
+            # Usually for fixed input size models, scaling is tricky if we don't pad/crop back.
+            # But here we resize AFTER augmentation? No, wait.
+            # The pipeline is: Load -> Crop Depth -> Resize -> Augment -> Normalize.
+            # So frames is (D, 256, 256).
+            # If we zoom, the shape changes. We must crop or pad back to 256x256.
+            
+            # Let's use a simpler approach for now: modifying the resize step or just doing random crop/pad is standard.
+            # But since we already resized, doing affine zoom means we crop center or pad.
+            
+            # Using scipy zoom
+            # Zoom factors: (1, scale, scale) -> Keep depth, scale spatial
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                frames_zoomed = scipy.ndimage.zoom(frames, (1, scale, scale), order=1)
+                masks_zoomed = scipy.ndimage.zoom(masks, (1, scale, scale), order=0)
+            
+            # Crop or Pad back to (D, 256, 256)
+            d, h, w = frames.shape
+            zd, zh, zw = frames_zoomed.shape
+            
+            # Create container
+            new_frames = np.zeros_like(frames)
+            new_masks = np.zeros_like(masks)
+            
+            # Calculate offsets to center
+            dh = (zh - h) // 2
+            dw = (zw - w) // 2
+            
+            # Source slice
+            src_y1 = max(0, dh)
+            src_y2 = min(zh, dh + h)
+            src_x1 = max(0, dw)
+            src_x2 = min(zw, dw + w)
+            
+            # Target slice
+            dst_y1 = max(0, -dh)
+            dst_y2 = min(h, h - dh) # This logic can be tricky, let's simplify:
+            
+            # If zoomed in (scale > 1), crop center.
+            if scale > 1.0:
+                 start_y = (zh - h) // 2
+                 start_x = (zw - w) // 2
+                 new_frames = frames_zoomed[:, start_y:start_y+h, start_x:start_x+w]
+                 new_masks = masks_zoomed[:, start_y:start_y+h, start_x:start_x+w]
+            else:
+                # If zoomed out (scale < 1), pad center
+                start_y = (h - zh) // 2
+                start_x = (w - zw) // 2
+                new_frames[:, start_y:start_y+zh, start_x:start_x+zw] = frames_zoomed
+                new_masks[:, start_y:start_y+zh, start_x:start_x+zw] = masks_zoomed
+                
+            frames = new_frames
+            masks = new_masks
+
+        # 4. Intensity Shift
+        if np.random.rand() > 0.5:
+            shift = np.random.uniform(-0.1, 0.1) * 255.0 # Since it's still 0-255 range here roughly?
+            # Actually input is uint8? No, let's check.
+            # In __getitem__, frames is loaded from npz. Preprocess saves as uint8. 
+            # So frames is uint8 (0-255).
+            frames = frames.astype(np.float32) + shift
+            frames = np.clip(frames, 0, 255) # Keep in range
+        
+        return frames, masks
 
 
 def collate_video_batch(batch: List[Dict]) -> Dict:

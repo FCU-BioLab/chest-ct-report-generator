@@ -1,133 +1,108 @@
 #!/usr/bin/env python3
 """
-3D U-Net Implementation
-=======================
-
-Standard 3D U-Net architecture for volumetric segmentation.
-Input: (B, C, D, H, W)
-Output: (B, Out_Channels, D, H, W)
+3D U-Net Implementation (Refactored)
+====================================
+Based on wolny/pytorch-3dunet
 """
 
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-class DoubleConv(nn.Module):
-    """(Conv3D -> BN -> ReLU) * 2"""
-    def __init__(self, in_channels, out_channels, mid_channels=None):
-        super().__init__()
-        if not mid_channels:
-            mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        return self.double_conv(x)
-
-
-class Down(nn.Module):
-    """Downscaling with maxpool then double conv"""
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool3d(2),
-            DoubleConv(in_channels, out_channels)
-        )
-
-    def forward(self, x):
-        return self.maxpool_conv(x)
-
-
-class Up(nn.Module):
-    """Upscaling then double conv"""
-    def __init__(self, in_channels, out_channels, bilinear=True):
-        super().__init__()
-
-        # if bilinear, use the normal convolutions to reduce the number of channels
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
-        else:
-            self.up = nn.ConvTranspose3d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        # input is CHW
-        diffD = x2.size()[2] - x1.size()[2]
-        diffY = x2.size()[3] - x1.size()[3]
-        diffX = x2.size()[4] - x1.size()[4]
-
-        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-                        diffY // 2, diffY - diffY // 2,
-                        diffD // 2, diffD - diffD // 2])
-        
-        # if you have padding issues, see
-        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
-        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-
-class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(OutConv, self).__init__()
-        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x):
-        return self.conv(x)
-
+from .buildingblocks import (
+    DoubleConv, ResNetBlock, create_encoders, create_decoders, NoUpsampling
+)
 
 class UNet3D(nn.Module):
-    def __init__(self, n_channels, n_classes, bilinear=True, base_filters=32):
-        super(UNet3D, self).__init__()
-        self.n_channels = n_channels
-        self.n_classes = n_classes
-        self.bilinear = bilinear
-        
-        factor = 2 if bilinear else 1
+    """
+    3D U-Net model with flexible configuration.
+    """
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        f_maps=64,
+        layer_order='gcr',
+        num_groups=8,
+        num_levels=4,
+        is_segmentation=True,
+        conv_padding=1,
+        conv_kernel_size=3,
+        conv_upscale=2,
+        dropout_prob=0.1,
+        pool_kernel_size=2,
+        basic_module=DoubleConv,
+        testing=False,
+    ):
+        super().__init__()
 
-        self.inc = DoubleConv(n_channels, base_filters)
-        self.down1 = Down(base_filters, base_filters * 2)
-        self.down2 = Down(base_filters * 2, base_filters * 4)
-        self.down3 = Down(base_filters * 4, base_filters * 8)
-        self.down4 = Down(base_filters * 8, (base_filters * 16) // factor)
-        self.up1 = Up(base_filters * 16, (base_filters * 8) // factor, bilinear)
-        self.up2 = Up(base_filters * 8, (base_filters * 4) // factor, bilinear)
-        self.up3 = Up(base_filters * 4, (base_filters * 2) // factor, bilinear)
-        self.up4 = Up(base_filters * 2, base_filters, bilinear)
-        self.outc = OutConv(base_filters, n_classes)
+        if isinstance(f_maps, int):
+            f_maps = [f_maps * 2 ** k for k in range(num_levels)]
+
+        assert isinstance(f_maps, list) or isinstance(f_maps, tuple)
+        assert len(f_maps) > 1, "Required at least 2 levels in the U-Net"
+
+        # Create Encoders
+        self.encoders = create_encoders(
+            in_channels, f_maps, basic_module, conv_kernel_size, conv_padding, conv_upscale, dropout_prob,
+            layer_order, num_groups, pool_kernel_size, is3d=True
+        )
+
+        # Create Decoders
+        self.decoders = create_decoders(
+            f_maps, basic_module, conv_kernel_size, conv_padding, layer_order, num_groups, upsample="default",
+            dropout_prob=dropout_prob, is3d=True
+        )
+
+        # Final Convolution
+        self.final_conv = nn.Conv3d(f_maps[0], out_channels, 1)
+
+        if is_segmentation and not testing:
+            self.final_activation = nn.Identity() # Sigmoid/Softmax handled in Loss or Training Loop usually
+        else:
+            self.final_activation = nn.Identity()
 
     def forward(self, x):
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
+        # Encoder
+        encoders_features = []
+        for encoder in self.encoders:
+            x = encoder(x)
+            # reverse the encoder outputs to be aligned with the decoder processing
+            encoders_features.insert(0, x)
+
+        # remove the last encoder's output from the list
+        # !!remember: it's the 1st in the list
+        encoders_features = encoders_features[1:]
+
+        # Decoder
+        for decoder, encoder_features in zip(self.decoders, encoders_features):
+            # pass the output from the corresponding encoder and the output
+            # of the previous decoder
+            x = decoder(encoder_features, x)
+
+        x = self.final_conv(x)
+        x = self.final_activation(x)
+        return x
 
 def get_model(config) -> nn.Module:
     """Get model from config"""
+    # Defaults or Config
+    f_maps = [32, 64, 128, 256] # Standard base 32, 4 levels
+    # Optional: check if config has these values
+    if hasattr(config.model, 'f_maps'):
+        f_maps = config.model.f_maps
+    
+    layer_order = 'gcr' # GroupNorm -> Conv -> ReLU (Standard in wolny/3dunet)
+    
     return UNet3D(
-        n_channels=config.model.in_channels,
-        n_classes=config.model.out_channels,
-        base_filters=config.model.base_filters
+        in_channels=config.model.in_channels,
+        out_channels=config.model.out_channels,
+        f_maps=f_maps,
+        layer_order=layer_order,
+        basic_module=DoubleConv # or ResNetBlock
     )
 
 if __name__ == "__main__":
+    import torch
     # Test
-    model = UNet3D(n_channels=1, n_classes=1, base_filters=16)
+    model = UNet3D(in_channels=1, out_channels=1, f_maps=[16, 32, 64, 128])
     print(f"Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     x = torch.randn(1, 1, 32, 128, 128)
     y = model(x)

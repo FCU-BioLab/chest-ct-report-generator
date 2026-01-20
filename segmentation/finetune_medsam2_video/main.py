@@ -29,7 +29,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from finetune_medsam2_video.config import VideoConfig, DataConfig, ModelConfig, TrainingConfig
-from finetune_medsam2_video.npz_converter import NPZConverter
+from finetune_medsam2_video.preprocess import VideoPreprocessor
 from finetune_medsam2_video.video_trainer import MedSAM2VideoTrainer
 from finetune_medsam2_video.video_dataset import VideoLesionDataset
 
@@ -56,7 +56,7 @@ def cmd_convert(args):
     """資料轉換命令"""
     logging.info("🔄 開始資料轉換...")
     
-    converter = NPZConverter(
+    converter = VideoPreprocessor(
         output_dir=args.output_dir,
         context_slices=args.context_slices,
         min_nodule_diameter=args.min_diameter,

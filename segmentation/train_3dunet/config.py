@@ -44,11 +44,13 @@ class ModelConfig:
     name: str = "unet3d"
     in_channels: int = 1
     out_channels: int = 1
-    base_filters: int = 32
-    layer_multipliers: Tuple[int, ...] = (1, 2, 4, 8, 16)
-    use_batchnorm: bool = True
+    # feature maps: [32, 64, 128, 256] -> depth 4
+    f_maps: tuple = (32, 64, 128, 256)
+    layer_order: str = "gcr" # GroupNorm -> Conv -> ReLU
+    num_groups: int = 8
     dropout_rate: float = 0.0
     image_size: int = 256  # Input spatial size (H, W)
+    # base_filters is now implicitly f_maps[0]
 
 
 @dataclass
