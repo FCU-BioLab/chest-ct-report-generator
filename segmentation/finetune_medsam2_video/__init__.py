@@ -20,7 +20,7 @@ MedSAM2 視頻模式微調模組
 
 from .config import VideoConfig, DataConfig, ModelConfig, TrainingConfig
 from .video_dataset import VideoLesionDataset, CTVideoSample
-from .npz_converter import NPZConverter
+from .preprocess import VideoPreprocessor
 from .video_trainer import MedSAM2VideoTrainer
 from .visualizer import VideoVisualizer
 
@@ -32,7 +32,7 @@ __all__ = [
     "TrainingConfig",
     "VideoLesionDataset",
     "CTVideoSample",
-    "NPZConverter",
+    "VideoPreprocessor",
     "MedSAM2VideoTrainer",
     "VideoVisualizer",
 ]

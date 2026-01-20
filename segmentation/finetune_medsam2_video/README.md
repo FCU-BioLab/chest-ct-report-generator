@@ -69,7 +69,7 @@ python finetune_medsam2_video\main.py convert --dataset msd --input_dir D:\Data\
 ### 2. 訓練模型
 
 ```cmd
-python finetune_medsam2_video\main.py train --npz_dir cache\lndb_video_npz --output_dir video_result\lndb_video_output --epochs 50 --learning_rate 1e-5 --propagation_steps 3
+python finetune_medsam2_video\main.py train --npz_dir cache\lndb_video_npz --output_dir segmentation\video_result\lndb_video_output --epochs 50 --learning_rate 1e-5 --propagation_steps 3
 ```
 
 **訓練參數說明**:
