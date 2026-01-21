@@ -55,6 +55,31 @@ class VolumetricDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
     
+    def get_patient_ids(self) -> List[str]:
+        """Extract unique patient IDs from loaded samples"""
+        patient_ids = []
+        for npz_path in self.samples:
+            try:
+                data = np.load(npz_path, allow_pickle=True)
+                pid = str(data.get('patient_id', npz_path.stem))
+                patient_ids.append(pid)
+            except Exception as e:
+                logger.warning(f"Failed to load patient ID from {npz_path}: {e}")
+                patient_ids.append(npz_path.stem)
+        return patient_ids
+    
+    def get_dataset_info(self) -> Dict:
+        """Get dataset statistics including patient IDs"""
+        patient_ids = self.get_patient_ids()
+        unique_patients = list(set(patient_ids))
+        return {
+            'split': self.split,
+            'total_samples': len(self.samples),
+            'unique_patients': len(unique_patients),
+            'patient_ids': unique_patients,
+            'sample_paths': [str(p.name) for p in self.samples]
+        }
+    
     def __getitem__(self, idx: int) -> Dict:
         npz_path = self.samples[idx]
         data = np.load(npz_path, allow_pickle=True)
