@@ -125,6 +125,41 @@ def cmd_test(args):
         json.dump(summary, f, indent=2)
     logging.info(f"📁 Results saved to: {output_path}")
 
+def cmd_visualize(args):
+    logging.info("🖼️ Starting Visualization...")
+    
+    config = Config()
+    config.data.npz_dir = args.npz_dir
+    config.model.base_filters = args.base_filters
+    config.model.image_size = args.image_size
+    config.device = args.device
+    
+    trainer = UNet3DTrainer(config)
+    trainer.load_checkpoint(args.checkpoint)
+    save_dir = trainer.visualize_predictions(args.split, args.output_dir)
+    
+    logging.info(f"✅ Visualization complete! Images saved to: {save_dir}")
+
+def cmd_fulltest(args):
+    """Run comprehensive test with all metrics and visualizations"""
+    logging.info("🔬 Starting Comprehensive Test...")
+    
+    config = Config()
+    config.data.npz_dir = args.npz_dir
+    config.model.base_filters = args.base_filters
+    config.model.image_size = args.image_size
+    config.device = args.device
+    
+    trainer = UNet3DTrainer(config)
+    trainer.load_checkpoint(args.checkpoint)
+    
+    summary = trainer.comprehensive_test(
+        split=args.split,
+        save_visualizations=not args.no_viz
+    )
+    
+    logging.info("✅ Comprehensive test complete!")
+
 def main():
     parser = argparse.ArgumentParser(description='3D U-Net Video Training')
     parser.add_argument('--log_level', default='INFO')
@@ -172,6 +207,26 @@ def main():
     test.add_argument('--no_postprocess', action='store_true', 
                       help='Disable lung mask and postprocessing')
     
+    # FULLTEST (comprehensive test with visualization)
+    fulltest = subparsers.add_parser('fulltest', help='Full test with segmentation & detection metrics + visualization')
+    fulltest.add_argument('--npz_dir', default='volume_npz')
+    fulltest.add_argument('--checkpoint', required=True)
+    fulltest.add_argument('--split', default='test')
+    fulltest.add_argument('--base_filters', type=int, default=32)
+    fulltest.add_argument('--image_size', type=int, default=256)
+    fulltest.add_argument('--device', default='cuda')
+    fulltest.add_argument('--no_viz', action='store_true', help='Skip per-sample visualizations')
+    
+    # VISUALIZE
+    viz = subparsers.add_parser('visualize', help='Visualize predictions vs GT for all samples')
+    viz.add_argument('--npz_dir', default='volume_npz')
+    viz.add_argument('--checkpoint', required=True)
+    viz.add_argument('--split', default='test')
+    viz.add_argument('--base_filters', type=int, default=32)
+    viz.add_argument('--image_size', type=int, default=256)
+    viz.add_argument('--device', default='cuda')
+    viz.add_argument('--output_dir', default=None, help='Output directory for images')
+    
     args = parser.parse_args()
     setup_logging(args.log_level)
     
@@ -183,6 +238,10 @@ def main():
         cmd_stats(args)
     elif args.command == 'test':
         cmd_test(args)
+    elif args.command == 'fulltest':
+        cmd_fulltest(args)
+    elif args.command == 'visualize':
+        cmd_visualize(args)
     else:
         parser.print_help()
 

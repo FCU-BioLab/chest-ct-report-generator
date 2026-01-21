@@ -8,7 +8,9 @@ Trainer logic for 3D U-Net.
 
 import logging
 import os
+import json
 from pathlib import Path
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -28,25 +30,29 @@ logger = logging.getLogger(__name__)
 
 # ============ Postprocess Functions ============
 
-def generate_lung_mask(volume: np.ndarray, threshold: float = 0.3) -> np.ndarray:
+def generate_lung_mask(volume: np.ndarray, threshold: float = 0.45, dilate_mm: float = 5.0) -> np.ndarray:
     """
-    從 CT volume 生成簡易肺部遮罩
-    使用 Otsu-like thresholding 和形態學操作
+    從 CT volume 生成肺部遮罩
     
     Args:
         volume: (D, H, W) normalized to [0, 1]
-        threshold: 肺部閾值 (通常肺部較暗)
+        threshold: 肺部閾值 (肺部較暗，低於此值視為肺部)
+        dilate_mm: 擴張半徑 (mm)，確保覆蓋邊緣結節
         
     Returns:
         lung_mask: (D, H, W) binary mask
     """
     # 肺部通常比較暗（在 CT 中 HU 較低）
-    # 假設 volume 已經正規化到 [0, 1]，肺部大約在 0.2-0.4 範圍
+    # 提高閾值避免漏分割
     binary = (volume < threshold).astype(np.uint8)
     
     # 形態學操作：閉運算填補小孔
-    struct = morphology.ball(2) if binary.ndim == 3 else morphology.disk(2)
+    struct = morphology.ball(3) if binary.ndim == 3 else morphology.disk(3)
     binary = morphology.binary_closing(binary, struct)
+    
+    # 填充 2D 孔洞（逐切片）
+    for z in range(binary.shape[0]):
+        binary[z] = ndimage.binary_fill_holes(binary[z])
     
     # 移除小的連通區域，保留最大的兩個（左右肺）
     labels = measure.label(binary)
@@ -56,11 +62,19 @@ def generate_lung_mask(volume: np.ndarray, threshold: float = 0.3) -> np.ndarray
         regions = sorted(regions, key=lambda x: x.area, reverse=True)
         lung_mask = np.zeros_like(binary)
         for region in regions[:2]:  # 最多保留兩個（左右肺）
-            if region.area > 1000:  # 過濾太小的區域
+            if region.area > 500:  # 降低閾值，避免遺漏
                 lung_mask[labels == region.label] = 1
-        return lung_mask.astype(np.uint8)
+    else:
+        lung_mask = binary
     
-    return binary
+    # 擴張肺遮罩，確保邊緣結節不被過濾
+    if dilate_mm > 0:
+        # 假設 1 voxel ≈ 1mm（可根據實際 spacing 調整）
+        dilate_radius = max(2, int(dilate_mm))
+        struct_dilate = morphology.ball(dilate_radius) if lung_mask.ndim == 3 else morphology.disk(dilate_radius)
+        lung_mask = morphology.binary_dilation(lung_mask, struct_dilate)
+    
+    return lung_mask.astype(np.uint8)
 
 
 def postprocess_prediction(
@@ -192,6 +206,40 @@ def calc_dice_score(pred: np.ndarray, gt: np.ndarray) -> float:
     union = (pred > 0).sum() + (gt > 0).sum()
     return (2.0 * inter) / (union + 1e-6)
 
+
+def calc_iou(pred: np.ndarray, gt: np.ndarray) -> float:
+    """Calculate IoU (Jaccard Index)"""
+    inter = np.logical_and(pred > 0, gt > 0).sum()
+    union = np.logical_or(pred > 0, gt > 0).sum()
+    return inter / (union + 1e-6)
+
+
+def calc_segmentation_metrics(pred: np.ndarray, gt: np.ndarray) -> Dict[str, float]:
+    """
+    Calculate comprehensive segmentation metrics.
+    
+    Returns:
+        Dict with: dice, iou, precision, recall
+    """
+    pred_bin = (pred > 0).astype(np.uint8)
+    gt_bin = (gt > 0).astype(np.uint8)
+    
+    tp = np.logical_and(pred_bin, gt_bin).sum()
+    fp = np.logical_and(pred_bin, np.logical_not(gt_bin)).sum()
+    fn = np.logical_and(np.logical_not(pred_bin), gt_bin).sum()
+    
+    precision = tp / (tp + fp + 1e-6)
+    recall = tp / (tp + fn + 1e-6)
+    dice = 2 * tp / (2 * tp + fp + fn + 1e-6)
+    iou = tp / (tp + fp + fn + 1e-6)
+    
+    return {
+        'dice': float(dice),
+        'iou': float(iou),
+        'precision': float(precision),
+        'recall': float(recall)
+    }
+
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-5):  # 降低 smooth，讓稀少正樣本的梯度更強
         super().__init__()
@@ -316,6 +364,10 @@ class UNet3DTrainer:
         
         self.best_val_score = 0.0
         
+        # Store datasets for info export
+        self.train_dataset = self.train_loader.dataset
+        self.val_dataset = self.val_loader.dataset
+        
     def _create_loader(self, split: str, shuffle: bool):
         dataset = VolumetricDataset(
             npz_dir=self.config.data.npz_dir,
@@ -333,26 +385,91 @@ class UNet3DTrainer:
             pin_memory=True
         )
 
+    def export_dataset_info(self):
+        """Export dataset information to Dataset.json"""
+        logger.info("📊 Exporting dataset information...")
+        
+        dataset_info = {
+            'export_time': datetime.now().isoformat(),
+            'npz_dir': str(self.config.data.npz_dir),
+            'splits': {}
+        }
+        
+        # Collect info from train and val datasets
+        for split_name, dataset in [('train', self.train_dataset), ('val', self.val_dataset)]:
+            info = dataset.get_dataset_info()
+            dataset_info['splits'][split_name] = info
+            logger.info(f"  {split_name}: {info['total_samples']} samples, {info['unique_patients']} patients")
+        
+        # Try to load test dataset info
+        try:
+            test_dataset = VolumetricDataset(
+                npz_dir=self.config.data.npz_dir,
+                split='test',
+                image_size=self.config.model.image_size,
+                max_depth=self.config.data.max_depth,
+                augmentation=False
+            )
+            info = test_dataset.get_dataset_info()
+            dataset_info['splits']['test'] = info
+            logger.info(f"  test: {info['total_samples']} samples, {info['unique_patients']} patients")
+        except Exception as e:
+            logger.warning(f"  Could not load test dataset: {e}")
+        
+        # Export to JSON
+        json_path = self.output_dir / "Dataset.json"
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(dataset_info, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"✅ Dataset info exported to {json_path}")
+        return dataset_info
+
     def train(self):
         logger.info(f"🚀 Starting training for {self.config.training.epochs} epochs")
-        history = {'train_loss': [], 'val_dice': [], 'val_det_rate': []}
+        
+        # Export dataset info at start
+        self.export_dataset_info()
+        
+        # Enhanced history tracking
+        history = {
+            'train_loss': [],
+            'val_loss': [],
+            'val_dice': [],
+            'val_iou': [],
+            'val_precision': [],
+            'val_recall': [],
+            'val_det_rate': [],
+            'val_det_precision': [],
+            'val_det_recall': [],
+            'val_det_f1': []
+        }
         best_dice = 0.0
         
         for epoch in range(1, self.config.training.epochs + 1):
             train_loss = self.train_epoch(epoch)
-            # Validation
-            val_dice, val_det_rate = self.validate(epoch)
+            # Validation with comprehensive metrics
+            val_metrics = self.validate(epoch)
             
+            # Update history
             history['train_loss'].append(train_loss)
-            history['val_dice'].append(val_dice)
-            history['val_det_rate'].append(val_det_rate)
+            history['val_loss'].append(val_metrics['loss'])
+            history['val_dice'].append(val_metrics['dice'])
+            history['val_iou'].append(val_metrics['iou'])
+            history['val_precision'].append(val_metrics['precision'])
+            history['val_recall'].append(val_metrics['recall'])
+            history['val_det_rate'].append(val_metrics['det_rate'])
+            history['val_det_precision'].append(val_metrics['det_precision'])
+            history['val_det_recall'].append(val_metrics['det_recall'])
+            history['val_det_f1'].append(val_metrics['det_f1'])
             
-            logger.info(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Dice={val_dice:.4f}")
+            # Log epoch summary
+            logger.info(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_metrics['loss']:.4f}, Val Dice={val_metrics['dice']:.4f}")
             
-            # Plot metrics
-            self.plot_metrics(history['train_loss'], history['val_dice'], history['val_det_rate'])
+            # Plot all metrics
+            self.plot_metrics(history)
             
             # Save Best
+            val_dice = val_metrics['dice']
             if val_dice > best_dice:
                 best_dice = val_dice
                 logger.info(f"🆕 New best model saved (Dice={best_dice:.4f})")
@@ -405,12 +522,25 @@ class UNet3DTrainer:
             
         return total_loss / len(self.train_loader)
 
-    def validate(self, epoch: int) -> float:
+    def validate(self, epoch: int) -> Dict[str, float]:
+        """
+        Validate model and compute comprehensive metrics.
+        
+        Returns:
+            Dict with: loss, dice, iou, precision, recall, det_rate, det_precision, det_recall, det_f1
+        """
         self.model.eval()
-        total_dice = 0
-        count = 0
+        
+        # Accumulators for segmentation metrics
+        total_loss = 0.0
+        seg_metrics_sum = {'dice': 0.0, 'iou': 0.0, 'precision': 0.0, 'recall': 0.0}
+        
+        # Accumulators for detection metrics
+        total_tp, total_fp, total_fn = 0, 0, 0
         total_hits = 0
         total_nodules = 0
+        
+        count = 0
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc=f"Val Ep {epoch}"):
@@ -421,11 +551,19 @@ class UNet3DTrainer:
                 if isinstance(logits, list):
                     logits = logits[0]
                 
-                # Dice score calculation
-                pred = (torch.sigmoid(logits) > 0.5).float()
+                # Calculate validation loss
+                loss_bce = self.bce_weighted(logits, masks)
+                loss_focal = self.focal(logits, masks)
+                loss_dice = self.dice(logits, masks)
+                loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
+                total_loss += loss.item()
                 
-                if count == 0 and epoch % 1 == 0:
-                    # Debug logging for first batch of epoch
+                # Get predictions
+                probs = torch.sigmoid(logits)
+                pred = (probs > 0.5).float()
+                
+                # Debug logging for first batch
+                if count == 0:
                     logger.info(f"🔍 DEBUG [Val Ep {epoch}]")
                     logger.info(f"  Img: min={images.min():.4f}, max={images.max():.4f}, mean={images.mean():.4f}")
                     logger.info(f"  Msk: sum={masks.sum()}, unique={torch.unique(masks)}")
@@ -433,86 +571,221 @@ class UNet3DTrainer:
                     logger.info(f"  Pred: sum={pred.sum()}, unique={torch.unique(pred)}")
                     
                     # Save debug image
-                    try:
-                        import matplotlib.pyplot as plt
-                        import numpy as np
-                        
-                        # Take first sample
-                        img_t = images[0, 0].cpu().numpy() # (D, H, W)
-                        msk_t = masks[0, 0].cpu().numpy()
-                        prob_t = torch.sigmoid(logits[0, 0]).cpu().numpy() # Probability map
-                        
-                        # Find slice with largest mask, or center
-                        if msk_t.sum() > 0:
-                            z_idx = np.argmax(msk_t.sum(axis=(1, 2)))
-                        else:
-                            z_idx = msk_t.shape[0] // 2
-                            
-                        plt.figure(figsize=(15, 5))
-                        plt.subplot(1, 4, 1); plt.imshow(img_t[z_idx], cmap='gray'); plt.title(f'Image (z={z_idx})')
-                        plt.subplot(1, 4, 2); plt.imshow(msk_t[z_idx], cmap='gray'); plt.title('GT Mask')
-                        plt.subplot(1, 4, 3); plt.imshow(prob_t[z_idx], cmap='jet', vmin=0, vmax=1); plt.title(f'Prob Map') # Heatmap
-                        plt.subplot(1, 4, 4); plt.hist(prob_t.flatten(), bins=50); plt.title('Prob Dist')
-                        
-                        plt.savefig(self.output_dir / f"debug_ep{epoch:03d}.png")
-                        plt.close()
-                        logger.info(f"  🖼️ Saved debug image to {self.output_dir / f'debug_ep{epoch:03d}.png'}")
-                    except Exception as e:
-                        logger.warning(f"  ❌ Failed to save debug image: {e}")
-
-                inter = (pred * masks).sum()
-                union = pred.sum() + masks.sum()
-                dice = (2. * inter) / (union + 1e-6)
+                    self._save_debug_image(images, masks, logits, epoch)
                 
-                total_dice += dice.item()
+                # Calculate per-sample metrics
+                batch_size = images.shape[0]
+                for i in range(batch_size):
+                    pred_np = pred[i, 0].cpu().numpy()
+                    mask_np = masks[i, 0].cpu().numpy()
+                    
+                    # Segmentation metrics
+                    seg_m = calc_segmentation_metrics(pred_np, mask_np)
+                    for k in seg_metrics_sum:
+                        seg_metrics_sum[k] += seg_m[k]
+                    
+                    # Detection metrics (connected component analysis)
+                    det_m = calc_detection_metrics(pred_np, mask_np, iou_threshold=0.1)
+                    total_tp += det_m['TP']
+                    total_fp += det_m['FP']
+                    total_fn += det_m['FN']
                 
-                # Detection Rate
-                # 3D connected components
+                # Detection rate (simple IoU-based)
                 batch_hits = calc_detection_rate(logits, masks)
                 total_hits += batch_hits
-                # Count samples that actually have nodules (gt > 0)
-                # masks: (B, 1, D, H, W) -> Check if max value in each sample is 1
                 total_nodules += (masks.amax(dim=(1,2,3,4)).sum().item())
                 
-                count += 1
+                count += batch_size
         
-        avg_dice = total_dice / count if count > 0 else 0.0
+        # Compute averages
+        n_batches = len(self.val_loader)
+        n_samples = count
+        
+        avg_loss = total_loss / n_batches if n_batches > 0 else 0.0
+        avg_seg = {k: v / n_samples for k, v in seg_metrics_sum.items()} if n_samples > 0 else seg_metrics_sum
+        
+        # Detection aggregates
+        det_precision = total_tp / (total_tp + total_fp + 1e-6)
+        det_recall = total_tp / (total_tp + total_fn + 1e-6)
+        det_f1 = 2 * det_precision * det_recall / (det_precision + det_recall + 1e-6)
         det_rate = total_hits / (total_nodules + 1e-6) if total_nodules > 0 else 0.0
         
-        logger.info(f"📊 Val Metrics: Dice={avg_dice:.4f}, Det_Rate={det_rate*100:.2f}%")
-        return avg_dice, det_rate
-            
-    def plot_metrics(self, train_losses, val_dices, val_det_rates):
+        # Log comprehensive metrics
+        logger.info(f"📊 Val Metrics [Ep {epoch}]:")
+        logger.info(f"  Loss: {avg_loss:.4f}")
+        logger.info(f"  Segmentation: Dice={avg_seg['dice']:.4f}, IoU={avg_seg['iou']:.4f}, Precision={avg_seg['precision']:.4f}, Recall={avg_seg['recall']:.4f}")
+        logger.info(f"  Detection: Rate={det_rate*100:.2f}%, Precision={det_precision:.4f}, Recall={det_recall:.4f}, F1={det_f1:.4f}")
+        logger.info(f"  Detection Counts: TP={total_tp}, FP={total_fp}, FN={total_fn}")
+        
+        return {
+            'loss': avg_loss,
+            'dice': avg_seg['dice'],
+            'iou': avg_seg['iou'],
+            'precision': avg_seg['precision'],
+            'recall': avg_seg['recall'],
+            'det_rate': det_rate,
+            'det_precision': det_precision,
+            'det_recall': det_recall,
+            'det_f1': det_f1,
+            'det_tp': total_tp,
+            'det_fp': total_fp,
+            'det_fn': total_fn
+        }
+    
+    def _save_debug_image(self, images, masks, logits, epoch):
+        """Save debug visualization image"""
         try:
             import matplotlib.pyplot as plt
-            epochs = range(1, len(train_losses) + 1)
             
-            plt.figure(figsize=(15, 5))
+            # Take first sample
+            img_t = images[0, 0].cpu().numpy()
+            msk_t = masks[0, 0].cpu().numpy()
+            prob_t = torch.sigmoid(logits[0, 0]).cpu().numpy()
+            pred_t = (prob_t > 0.5).astype(np.uint8)
             
-            # Loss
-            plt.subplot(1, 3, 1)
-            plt.plot(epochs, train_losses, 'b-', label='Train Loss')
-            plt.title('Training Loss')
-            plt.xlabel('Epochs'); plt.ylabel('Loss')
-            plt.grid(True)
+            # Find slice with largest mask, or center
+            if msk_t.sum() > 0:
+                z_idx = int(np.argmax(msk_t.sum(axis=(1, 2))))
+            else:
+                z_idx = msk_t.shape[0] // 2
             
-            # Dice
-            plt.subplot(1, 3, 2)
-            plt.plot(epochs, val_dices, 'g-', label='Val Dice')
-            plt.title('Validation Dice Score')
-            plt.xlabel('Epochs'); plt.ylabel('Dice')
-            plt.grid(True)
-            
-            # Det Rate
-            plt.subplot(1, 3, 3)
-            plt.plot(epochs, [d * 100 for d in val_det_rates], 'r-', label='Det Rate (%)')
-            plt.title('Nodule Detection Rate')
-            plt.xlabel('Epochs'); plt.ylabel('Rate (%)')
-            plt.grid(True)
+            plt.figure(figsize=(20, 5))
+            plt.subplot(1, 5, 1); plt.imshow(img_t[z_idx], cmap='gray'); plt.title(f'Image (z={z_idx})')
+            plt.subplot(1, 5, 2); plt.imshow(msk_t[z_idx], cmap='gray'); plt.title('GT Mask')
+            plt.subplot(1, 5, 3); plt.imshow(prob_t[z_idx], cmap='jet', vmin=0, vmax=1); plt.title('Prob Map')
+            plt.subplot(1, 5, 4); plt.imshow(pred_t[z_idx], cmap='gray'); plt.title('Prediction')
+            plt.subplot(1, 5, 5); plt.hist(prob_t.flatten(), bins=50); plt.title('Prob Dist')
             
             plt.tight_layout()
-            plt.savefig(self.output_dir / "metrics.png")
+            plt.savefig(self.output_dir / f"debug_ep{epoch:03d}.png")
             plt.close()
+            logger.info(f"  🖼️ Saved debug image to {self.output_dir / f'debug_ep{epoch:03d}.png'}")
+        except Exception as e:
+            logger.warning(f"  ❌ Failed to save debug image: {e}")
+            
+    def plot_metrics(self, history: Dict):
+        """
+        Plot comprehensive training metrics and save multiple visualization PNGs.
+        
+        Args:
+            history: Dict with keys for all tracked metrics
+        """
+        try:
+            import matplotlib.pyplot as plt
+            epochs = range(1, len(history['train_loss']) + 1)
+            
+            # ============ Main Metrics Plot (2x3 grid) ============
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+            
+            # Row 1: Loss metrics
+            # Train Loss
+            axes[0, 0].plot(epochs, history['train_loss'], 'b-', linewidth=2, label='Train Loss')
+            axes[0, 0].set_title('Training Loss', fontsize=12, fontweight='bold')
+            axes[0, 0].set_xlabel('Epochs'); axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 0].legend()
+            
+            # Validation Loss
+            axes[0, 1].plot(epochs, history['val_loss'], 'r-', linewidth=2, label='Val Loss')
+            axes[0, 1].set_title('Validation Loss', fontsize=12, fontweight='bold')
+            axes[0, 1].set_xlabel('Epochs'); axes[0, 1].set_ylabel('Loss')
+            axes[0, 1].grid(True, alpha=0.3)
+            axes[0, 1].legend()
+            
+            # Train vs Val Loss
+            axes[0, 2].plot(epochs, history['train_loss'], 'b-', linewidth=2, label='Train')
+            axes[0, 2].plot(epochs, history['val_loss'], 'r-', linewidth=2, label='Val')
+            axes[0, 2].set_title('Train vs Val Loss', fontsize=12, fontweight='bold')
+            axes[0, 2].set_xlabel('Epochs'); axes[0, 2].set_ylabel('Loss')
+            axes[0, 2].grid(True, alpha=0.3)
+            axes[0, 2].legend()
+            
+            # Row 2: Segmentation and Detection metrics
+            # Dice & IoU
+            axes[1, 0].plot(epochs, history['val_dice'], 'g-', linewidth=2, label='Dice')
+            axes[1, 0].plot(epochs, history['val_iou'], 'c-', linewidth=2, label='IoU')
+            axes[1, 0].set_title('Segmentation: Dice & IoU', fontsize=12, fontweight='bold')
+            axes[1, 0].set_xlabel('Epochs'); axes[1, 0].set_ylabel('Score')
+            axes[1, 0].set_ylim(0, 1)
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].legend()
+            
+            # Precision & Recall (Segmentation)
+            axes[1, 1].plot(epochs, history['val_precision'], 'm-', linewidth=2, label='Precision')
+            axes[1, 1].plot(epochs, history['val_recall'], 'y-', linewidth=2, label='Recall')
+            axes[1, 1].set_title('Segmentation: Precision & Recall', fontsize=12, fontweight='bold')
+            axes[1, 1].set_xlabel('Epochs'); axes[1, 1].set_ylabel('Score')
+            axes[1, 1].set_ylim(0, 1)
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].legend()
+            
+            # Detection Rate
+            det_rates_pct = [d * 100 for d in history['val_det_rate']]
+            axes[1, 2].plot(epochs, det_rates_pct, 'r-', linewidth=2, label='Detection Rate')
+            axes[1, 2].set_title('Nodule Detection Rate', fontsize=12, fontweight='bold')
+            axes[1, 2].set_xlabel('Epochs'); axes[1, 2].set_ylabel('Rate (%)')
+            axes[1, 2].set_ylim(0, 100)
+            axes[1, 2].grid(True, alpha=0.3)
+            axes[1, 2].legend()
+            
+            plt.tight_layout()
+            plt.savefig(self.output_dir / "metrics.png", dpi=150)
+            plt.close()
+            
+            # ============ Segmentation Metrics Plot ============
+            fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+            
+            axes[0].plot(epochs, history['val_dice'], 'g-', linewidth=2)
+            axes[0].set_title('Dice Score (DSC)', fontsize=12, fontweight='bold')
+            axes[0].set_xlabel('Epochs'); axes[0].set_ylabel('Score')
+            axes[0].set_ylim(0, 1); axes[0].grid(True, alpha=0.3)
+            
+            axes[1].plot(epochs, history['val_iou'], 'c-', linewidth=2)
+            axes[1].set_title('IoU (Jaccard)', fontsize=12, fontweight='bold')
+            axes[1].set_xlabel('Epochs'); axes[1].set_ylabel('Score')
+            axes[1].set_ylim(0, 1); axes[1].grid(True, alpha=0.3)
+            
+            axes[2].plot(epochs, history['val_precision'], 'm-', linewidth=2)
+            axes[2].set_title('Precision', fontsize=12, fontweight='bold')
+            axes[2].set_xlabel('Epochs'); axes[2].set_ylabel('Score')
+            axes[2].set_ylim(0, 1); axes[2].grid(True, alpha=0.3)
+            
+            axes[3].plot(epochs, history['val_recall'], 'y-', linewidth=2)
+            axes[3].set_title('Recall', fontsize=12, fontweight='bold')
+            axes[3].set_xlabel('Epochs'); axes[3].set_ylabel('Score')
+            axes[3].set_ylim(0, 1); axes[3].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(self.output_dir / "segmentation_metrics.png", dpi=150)
+            plt.close()
+            
+            # ============ Detection Metrics Plot ============
+            fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+            
+            axes[0].plot(epochs, det_rates_pct, 'r-', linewidth=2)
+            axes[0].set_title('Detection Rate', fontsize=12, fontweight='bold')
+            axes[0].set_xlabel('Epochs'); axes[0].set_ylabel('Rate (%)')
+            axes[0].set_ylim(0, 100); axes[0].grid(True, alpha=0.3)
+            
+            axes[1].plot(epochs, history['val_det_precision'], 'b-', linewidth=2)
+            axes[1].set_title('Detection Precision', fontsize=12, fontweight='bold')
+            axes[1].set_xlabel('Epochs'); axes[1].set_ylabel('Score')
+            axes[1].set_ylim(0, 1); axes[1].grid(True, alpha=0.3)
+            
+            axes[2].plot(epochs, history['val_det_recall'], 'orange', linewidth=2)
+            axes[2].set_title('Detection Recall', fontsize=12, fontweight='bold')
+            axes[2].set_xlabel('Epochs'); axes[2].set_ylabel('Score')
+            axes[2].set_ylim(0, 1); axes[2].grid(True, alpha=0.3)
+            
+            axes[3].plot(epochs, history['val_det_f1'], 'purple', linewidth=2)
+            axes[3].set_title('Detection F1 Score', fontsize=12, fontweight='bold')
+            axes[3].set_xlabel('Epochs'); axes[3].set_ylabel('Score')
+            axes[3].set_ylim(0, 1); axes[3].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(self.output_dir / "detection_metrics.png", dpi=150)
+            plt.close()
+            
         except Exception as e:
             logger.warning(f"Failed to plot metrics: {e}")
 
@@ -533,13 +806,22 @@ class UNet3DTrainer:
             logger.info(f"🆕 New best model saved (Dice={score:.4f})")
 
     def load_checkpoint(self, checkpoint_path: str):
-        """Load checkpoint"""
+        """Load checkpoint - handles both full checkpoint dict and raw state_dict"""
         logger.info(f"📥 Loading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        logger.info(f"✅ Checkpoint loaded (Epoch {checkpoint.get('epoch', '?')}, Score {checkpoint.get('score', 0.0):.4f})")
+        
+        # Handle both checkpoint formats:
+        # 1) Full checkpoint dict with 'model_state_dict' key (from save_checkpoint)
+        # 2) Raw state_dict saved directly (from best_model.pth in train())
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            if 'optimizer_state_dict' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            logger.info(f"✅ Checkpoint loaded (Epoch {checkpoint.get('epoch', '?')}, Score {checkpoint.get('score', 0.0):.4f})")
+        else:
+            # Raw state_dict (like best_model.pth)
+            self.model.load_state_dict(checkpoint)
+            logger.info(f"✅ Model state loaded from {checkpoint_path}")
 
     def evaluate(self, split: str = 'test', use_postprocess: bool = True):
         """
@@ -584,15 +866,15 @@ class UNet3DTrainer:
                     all_dice_raw.append(dice_raw)
                     
                     if use_postprocess:
-                        # Generate lung mask from image
-                        lung_mask = generate_lung_mask(img_np, threshold=0.35)
+                        # 停用 Lung Mask（容易漏分割），只使用連通區域過濾
+                        # lung_mask = generate_lung_mask(img_np, threshold=0.45)
                         
-                        # Apply postprocessing
+                        # Apply postprocessing (without lung mask)
                         pred_post = postprocess_prediction(
                             prob_np,
-                            lung_mask=lung_mask,
+                            lung_mask=None,  # 停用 lung mask
                             threshold=0.5,
-                            min_size_voxels=10,
+                            min_size_voxels=5,  # 降低最小體素數
                             apply_closing=True
                         )
                         
@@ -655,3 +937,678 @@ class UNet3DTrainer:
             'FN': total_fn,
             'sample_results': sample_results
         }
+
+    def comprehensive_test(self, split: str = 'test', save_visualizations: bool = True):
+        """
+        Complete test evaluation with segmentation metrics, detection metrics, 
+        and per-sample visualizations.
+        
+        Args:
+            split: Dataset split to evaluate
+            save_visualizations: Whether to save visualization images
+            
+        Returns:
+            Dict with all metrics and paths to saved files
+        """
+        import matplotlib.pyplot as plt
+        
+        logger.info(f"🔬 Comprehensive Test on {split} set...")
+        
+        # Setup output directory
+        output_dir = self.output_dir / f"test_{split}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        viz_dir = output_dir / "visualizations"
+        viz_dir.mkdir(parents=True, exist_ok=True)
+        
+        loader = self._create_loader(split, shuffle=False)
+        self.model.eval()
+        
+        # Accumulators
+        sample_results = []
+        seg_metrics = {'dice': [], 'iou': [], 'precision': [], 'recall': []}
+        det_totals = {'TP': 0, 'FP': 0, 'FN': 0}
+        
+        sample_idx = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(loader, desc=f"Testing {split}"):
+                images = batch['image'].to(self.device).float()
+                masks = batch['mask'].to(self.device).float()
+                
+                logits = self.model(images)
+                if isinstance(logits, list):
+                    logits = logits[0]
+                
+                probs = torch.sigmoid(logits)
+                
+                batch_size = images.shape[0]
+                for i in range(batch_size):
+                    # Get numpy arrays
+                    img_np = images[i, 0].cpu().numpy()
+                    mask_np = masks[i, 0].cpu().numpy()
+                    prob_np = probs[i, 0].cpu().numpy()
+                    
+                    # Predictions
+                    pred_raw = (prob_np > 0.5).astype(np.uint8)
+                    pred_post = postprocess_prediction(
+                        prob_np, lung_mask=None, threshold=0.5,
+                        min_size_voxels=5, apply_closing=True
+                    )
+                    
+                    # Segmentation metrics
+                    seg_m = calc_segmentation_metrics(pred_post, mask_np)
+                    for k in seg_metrics:
+                        seg_metrics[k].append(seg_m[k])
+                    
+                    # Detection metrics
+                    det_m = calc_detection_metrics(pred_post, mask_np, iou_threshold=0.1)
+                    det_totals['TP'] += det_m['TP']
+                    det_totals['FP'] += det_m['FP']
+                    det_totals['FN'] += det_m['FN']
+                    
+                    # Sample name
+                    npz_name = Path(batch['npz_path'][i]).stem if 'npz_path' in batch else f'sample_{sample_idx}'
+                    
+                    # Create per-case folder
+                    case_dir = viz_dir / f'{sample_idx:03d}_{npz_name}'
+                    case_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Per-case statistics
+                    case_stats = {
+                        'idx': sample_idx,
+                        'name': npz_name,
+                        'npz_path': batch['npz_path'][i] if 'npz_path' in batch else None,
+                        'segmentation': {
+                            'dice': seg_m['dice'],
+                            'iou': seg_m['iou'],
+                            'precision': seg_m['precision'],
+                            'recall': seg_m['recall'],
+                            'gt_voxels': int(mask_np.sum()),
+                            'pred_voxels': int(pred_post.sum())
+                        },
+                        'detection': {
+                            'TP': det_m['TP'],
+                            'FP': det_m['FP'],
+                            'FN': det_m['FN'],
+                            'precision': det_m['Precision'],
+                            'recall': det_m['Recall'],
+                            'f1': det_m['F1']
+                        }
+                    }
+                    
+                    # Save per-case JSON
+                    with open(case_dir / 'stats.json', 'w', encoding='utf-8') as f:
+                        json.dump(case_stats, f, indent=2, ensure_ascii=False)
+                    
+                    sample_results.append(case_stats)
+                    
+                    # Visualization
+                    if save_visualizations:
+                        self._save_case_visualization(
+                            img_np, mask_np, prob_np, pred_raw, pred_post,
+                            seg_m, det_m, npz_name, case_dir
+                        )
+                    
+                    sample_idx += 1
+        
+        # Compute aggregated metrics
+        n_samples = len(sample_results)
+        avg_seg = {k: np.mean(v) for k, v in seg_metrics.items()}
+        
+        det_precision = det_totals['TP'] / (det_totals['TP'] + det_totals['FP'] + 1e-6)
+        det_recall = det_totals['TP'] / (det_totals['TP'] + det_totals['FN'] + 1e-6)
+        det_f1 = 2 * det_precision * det_recall / (det_precision + det_recall + 1e-6)
+        
+        # Create summary
+        summary = {
+            'split': split,
+            'n_samples': n_samples,
+            'segmentation': {
+                'dice_mean': avg_seg['dice'],
+                'dice_std': np.std(seg_metrics['dice']),
+                'iou_mean': avg_seg['iou'],
+                'precision_mean': avg_seg['precision'],
+                'recall_mean': avg_seg['recall']
+            },
+            'detection': {
+                'TP': det_totals['TP'],
+                'FP': det_totals['FP'],
+                'FN': det_totals['FN'],
+                'precision': det_precision,
+                'recall': det_recall,
+                'f1': det_f1
+            },
+            'sample_results': sample_results
+        }
+        
+        # Save JSON report
+        json_path = output_dir / "test_results.json"
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        
+        # Generate summary plots
+        self._generate_test_summary_plots(summary, output_dir)
+        
+        # Log results
+        logger.info(f"\n{'='*70}")
+        logger.info(f"📊 COMPREHENSIVE TEST RESULTS - {split.upper()}")
+        logger.info(f"{'='*70}")
+        logger.info(f"📈 Segmentation Metrics (n={n_samples}):")
+        logger.info(f"   • Dice:      {avg_seg['dice']:.4f} ± {np.std(seg_metrics['dice']):.4f}")
+        logger.info(f"   • IoU:       {avg_seg['iou']:.4f}")
+        logger.info(f"   • Precision: {avg_seg['precision']:.4f}")
+        logger.info(f"   • Recall:    {avg_seg['recall']:.4f}")
+        logger.info(f"\n🎯 Detection Metrics:")
+        logger.info(f"   • TP={det_totals['TP']}, FP={det_totals['FP']}, FN={det_totals['FN']}")
+        logger.info(f"   • Precision: {det_precision:.4f}")
+        logger.info(f"   • Recall:    {det_recall:.4f}")
+        logger.info(f"   • F1 Score:  {det_f1:.4f}")
+        logger.info(f"\n📁 Output saved to: {output_dir}")
+        logger.info(f"{'='*70}\n")
+        
+        return summary
+    
+    def _save_sample_visualization(self, img_np, mask_np, prob_np, pred_raw, pred_post,
+                                   seg_m, det_m, npz_name, sample_idx, viz_dir):
+        """Save per-sample visualization with segmentation and detection info"""
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        
+        # Find slice with most GT content
+        if mask_np.sum() > 0:
+            z_idx = int(np.argmax(mask_np.sum(axis=(1, 2))))
+        else:
+            z_idx = mask_np.shape[0] // 2
+        
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        
+        # Row 1: Image, GT, Pred, Overlay
+        axes[0, 0].imshow(img_np[z_idx], cmap='gray')
+        axes[0, 0].set_title(f'Image (z={z_idx})')
+        axes[0, 0].axis('off')
+        
+        axes[0, 1].imshow(mask_np[z_idx], cmap='Reds')
+        axes[0, 1].set_title(f'GT Mask (sum={mask_np.sum():.0f})')
+        axes[0, 1].axis('off')
+        
+        axes[0, 2].imshow(pred_post[z_idx], cmap='Blues')
+        axes[0, 2].set_title(f'Prediction (sum={pred_post.sum():.0f})')
+        axes[0, 2].axis('off')
+        
+        # Overlay: Red=GT, Blue=Pred, Yellow=Both
+        overlay = np.stack([img_np[z_idx]] * 3, axis=-1)
+        overlay = (overlay * 255).clip(0, 255).astype(np.uint8)
+        overlay[mask_np[z_idx] > 0, 0] = 255  # GT = Red
+        overlay[mask_np[z_idx] > 0, 1] = 0
+        overlay[mask_np[z_idx] > 0, 2] = 0
+        pred_only = (pred_post[z_idx] > 0) & (mask_np[z_idx] == 0)
+        overlay[pred_only, 0] = 0
+        overlay[pred_only, 1] = 0
+        overlay[pred_only, 2] = 255  # Pred only = Blue
+        both = (pred_post[z_idx] > 0) & (mask_np[z_idx] > 0)
+        overlay[both, 0] = 255
+        overlay[both, 1] = 255
+        overlay[both, 2] = 0  # Both = Yellow
+        
+        axes[0, 3].imshow(overlay)
+        axes[0, 3].set_title('Overlay: R=GT, B=Pred, Y=Both')
+        axes[0, 3].axis('off')
+        
+        # Row 2: Prob map, Metrics text, Multi-slice view, Histogram
+        axes[1, 0].imshow(prob_np[z_idx], cmap='jet', vmin=0, vmax=1)
+        axes[1, 0].set_title('Probability Map')
+        axes[1, 0].axis('off')
+        
+        # Metrics text
+        axes[1, 1].axis('off')
+        metrics_text = (
+            f"SEGMENTATION METRICS\n"
+            f"{'─'*25}\n"
+            f"Dice:      {seg_m['dice']:.4f}\n"
+            f"IoU:       {seg_m['iou']:.4f}\n"
+            f"Precision: {seg_m['precision']:.4f}\n"
+            f"Recall:    {seg_m['recall']:.4f}\n\n"
+            f"DETECTION METRICS\n"
+            f"{'─'*25}\n"
+            f"TP: {det_m['TP']}  FP: {det_m['FP']}  FN: {det_m['FN']}\n"
+            f"Precision: {det_m['Precision']:.4f}\n"
+            f"Recall:    {det_m['Recall']:.4f}\n"
+            f"F1:        {det_m['F1']:.4f}"
+        )
+        axes[1, 1].text(0.1, 0.9, metrics_text, transform=axes[1, 1].transAxes,
+                        fontsize=12, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        axes[1, 1].set_title('Metrics')
+        
+        # Multi-slice (3 slices around z_idx)
+        slices = [max(0, z_idx-2), z_idx, min(mask_np.shape[0]-1, z_idx+2)]
+        combined = np.hstack([pred_post[s] for s in slices])
+        axes[1, 2].imshow(combined, cmap='Blues')
+        axes[1, 2].set_title(f'Multi-slice view (z={slices})')
+        axes[1, 2].axis('off')
+        
+        # Probability histogram
+        axes[1, 3].hist(prob_np.flatten(), bins=50, color='steelblue', alpha=0.7)
+        axes[1, 3].axvline(x=0.5, color='red', linestyle='--', label='Threshold=0.5')
+        axes[1, 3].set_xlabel('Probability')
+        axes[1, 3].set_ylabel('Voxel Count')
+        axes[1, 3].set_title('Probability Distribution')
+        axes[1, 3].legend()
+        
+        # Overall title
+        status = "[OK]" if seg_m['dice'] > 0.5 else ("[WARN]" if seg_m['dice'] > 0.2 else "[FAIL]")
+        fig.suptitle(f"{status} {npz_name} | Dice={seg_m['dice']:.4f} | Detection: TP={det_m['TP']}, FP={det_m['FP']}, FN={det_m['FN']}",
+                    fontsize=14, fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(viz_dir / f'{sample_idx:03d}_{npz_name}.png', dpi=100)
+        plt.close()
+    
+    def _save_case_visualization(self, img_np, mask_np, prob_np, pred_raw, pred_post,
+                                  seg_m, det_m, npz_name, case_dir):
+        """
+        Save per-case visualization files to individual folder
+        
+        Saves:
+        - overview.png: Combined 8-panel visualization
+        - slices/: Multi-slice images
+        - overlay.png: GT vs Prediction overlay
+        """
+        import matplotlib.pyplot as plt
+        
+        # Find slice with most GT content
+        if mask_np.sum() > 0:
+            z_idx = int(np.argmax(mask_np.sum(axis=(1, 2))))
+        else:
+            z_idx = mask_np.shape[0] // 2
+        
+        # ====== 1. Overview Panel ======
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        
+        # Row 1: Image, GT, Pred, Overlay
+        axes[0, 0].imshow(img_np[z_idx], cmap='gray')
+        axes[0, 0].set_title(f'Image (z={z_idx})')
+        axes[0, 0].axis('off')
+        
+        axes[0, 1].imshow(mask_np[z_idx], cmap='Reds')
+        axes[0, 1].set_title(f'GT Mask (sum={mask_np.sum():.0f})')
+        axes[0, 1].axis('off')
+        
+        axes[0, 2].imshow(pred_post[z_idx], cmap='Blues')
+        axes[0, 2].set_title(f'Prediction (sum={pred_post.sum():.0f})')
+        axes[0, 2].axis('off')
+        
+        # Overlay
+        overlay = np.stack([img_np[z_idx]] * 3, axis=-1)
+        overlay = (overlay * 255).clip(0, 255).astype(np.uint8)
+        overlay[mask_np[z_idx] > 0, 0] = 255
+        overlay[mask_np[z_idx] > 0, 1] = 0
+        overlay[mask_np[z_idx] > 0, 2] = 0
+        pred_only = (pred_post[z_idx] > 0) & (mask_np[z_idx] == 0)
+        overlay[pred_only, 0] = 0
+        overlay[pred_only, 1] = 0
+        overlay[pred_only, 2] = 255
+        both = (pred_post[z_idx] > 0) & (mask_np[z_idx] > 0)
+        overlay[both, 0] = 255
+        overlay[both, 1] = 255
+        overlay[both, 2] = 0
+        
+        axes[0, 3].imshow(overlay)
+        axes[0, 3].set_title('Overlay: R=GT, B=Pred, Y=Both')
+        axes[0, 3].axis('off')
+        
+        # Row 2: Prob map, Metrics, Multi-slice, Histogram
+        axes[1, 0].imshow(prob_np[z_idx], cmap='jet', vmin=0, vmax=1)
+        axes[1, 0].set_title('Probability Map')
+        axes[1, 0].axis('off')
+        
+        # Metrics text
+        axes[1, 1].axis('off')
+        metrics_text = (
+            f"SEGMENTATION\n"
+            f"Dice:      {seg_m['dice']:.4f}\n"
+            f"IoU:       {seg_m['iou']:.4f}\n"
+            f"Precision: {seg_m['precision']:.4f}\n"
+            f"Recall:    {seg_m['recall']:.4f}\n\n"
+            f"DETECTION\n"
+            f"TP:{det_m['TP']} FP:{det_m['FP']} FN:{det_m['FN']}\n"
+            f"P:{det_m['Precision']:.3f} R:{det_m['Recall']:.3f} F1:{det_m['F1']:.3f}"
+        )
+        axes[1, 1].text(0.1, 0.9, metrics_text, transform=axes[1, 1].transAxes,
+                        fontsize=11, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        axes[1, 1].set_title('Metrics')
+        
+        # Multi-slice
+        slices = [max(0, z_idx-2), z_idx, min(mask_np.shape[0]-1, z_idx+2)]
+        combined = np.hstack([pred_post[s] for s in slices])
+        axes[1, 2].imshow(combined, cmap='Blues')
+        axes[1, 2].set_title(f'Multi-slice (z={slices})')
+        axes[1, 2].axis('off')
+        
+        # Histogram
+        axes[1, 3].hist(prob_np.flatten(), bins=50, color='steelblue', alpha=0.7)
+        axes[1, 3].axvline(x=0.5, color='red', linestyle='--', label='Threshold')
+        axes[1, 3].set_xlabel('Probability')
+        axes[1, 3].set_ylabel('Count')
+        axes[1, 3].set_title('Probability Distribution')
+        axes[1, 3].legend()
+        
+        status = "[OK]" if seg_m['dice'] > 0.5 else ("[WARN]" if seg_m['dice'] > 0.2 else "[FAIL]")
+        fig.suptitle(f"{status} {npz_name} | Dice={seg_m['dice']:.4f}", fontsize=14, fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(case_dir / 'overview.png', dpi=100)
+        plt.close()
+        
+        # ====== 2. Overlay Image (high-res) ======
+        plt.figure(figsize=(10, 10))
+        plt.imshow(overlay)
+        plt.title(f'{npz_name} (z={z_idx}) - R=GT, B=Pred, Y=Both')
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(case_dir / 'overlay.png', dpi=150)
+        plt.close()
+        
+        # ====== 3. Slices folder ======
+        slices_dir = case_dir / 'slices'
+        slices_dir.mkdir(exist_ok=True)
+        
+        # Save slices around the center
+        for z_offset in range(-3, 4):
+            z = z_idx + z_offset
+            if 0 <= z < mask_np.shape[0]:
+                fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+                
+                axes[0].imshow(img_np[z], cmap='gray')
+                axes[0].set_title(f'Image z={z}')
+                axes[0].axis('off')
+                
+                axes[1].imshow(mask_np[z], cmap='Reds')
+                axes[1].set_title(f'GT')
+                axes[1].axis('off')
+                
+                axes[2].imshow(pred_post[z], cmap='Blues')
+                axes[2].set_title(f'Pred')
+                axes[2].axis('off')
+                
+                # Overlay for this slice
+                slice_overlay = np.stack([img_np[z]] * 3, axis=-1)
+                slice_overlay = (slice_overlay * 255).clip(0, 255).astype(np.uint8)
+                slice_overlay[mask_np[z] > 0, 0] = 255
+                slice_overlay[mask_np[z] > 0, 1] = 0
+                slice_overlay[mask_np[z] > 0, 2] = 0
+                pred_only_z = (pred_post[z] > 0) & (mask_np[z] == 0)
+                slice_overlay[pred_only_z, 2] = 255
+                both_z = (pred_post[z] > 0) & (mask_np[z] > 0)
+                slice_overlay[both_z, 0] = 255
+                slice_overlay[both_z, 1] = 255
+                slice_overlay[both_z, 2] = 0
+                
+                axes[3].imshow(slice_overlay)
+                axes[3].set_title(f'Overlay')
+                axes[3].axis('off')
+                
+                plt.tight_layout()
+                plt.savefig(slices_dir / f'slice_{z:03d}.png', dpi=80)
+                plt.close()
+    
+    def _generate_test_summary_plots(self, summary, output_dir):
+        """Generate summary plots for test results"""
+        import matplotlib.pyplot as plt
+        
+        sample_results = summary['sample_results']
+        
+        # Extract data (handle nested structure)
+        dices = [s['segmentation']['dice'] if 'segmentation' in s else s.get('dice', 0) for s in sample_results]
+        ious = [s['segmentation']['iou'] if 'segmentation' in s else s.get('iou', 0) for s in sample_results]
+        precisions = [s['segmentation']['precision'] if 'segmentation' in s else s.get('precision', 0) for s in sample_results]
+        recalls = [s['segmentation']['recall'] if 'segmentation' in s else s.get('recall', 0) for s in sample_results]
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # Dice distribution
+        axes[0, 0].hist(dices, bins=20, color='green', alpha=0.7, edgecolor='black')
+        axes[0, 0].axvline(x=np.mean(dices), color='red', linestyle='--', 
+                          label=f'Mean={np.mean(dices):.4f}')
+        axes[0, 0].set_xlabel('Dice Score')
+        axes[0, 0].set_ylabel('Count')
+        axes[0, 0].set_title('Dice Score Distribution')
+        axes[0, 0].legend()
+        
+        # IoU distribution
+        axes[0, 1].hist(ious, bins=20, color='blue', alpha=0.7, edgecolor='black')
+        axes[0, 1].axvline(x=np.mean(ious), color='red', linestyle='--',
+                          label=f'Mean={np.mean(ious):.4f}')
+        axes[0, 1].set_xlabel('IoU')
+        axes[0, 1].set_ylabel('Count')
+        axes[0, 1].set_title('IoU Distribution')
+        axes[0, 1].legend()
+        
+        # Precision vs Recall scatter
+        axes[0, 2].scatter(recalls, precisions, alpha=0.6, c=dices, cmap='RdYlGn')
+        axes[0, 2].set_xlabel('Recall')
+        axes[0, 2].set_ylabel('Precision')
+        axes[0, 2].set_title('Precision vs Recall (color=Dice)')
+        axes[0, 2].set_xlim(0, 1)
+        axes[0, 2].set_ylim(0, 1)
+        axes[0, 2].plot([0, 1], [1, 0], 'k--', alpha=0.3)  # iso-F1 reference
+        
+        # Per-sample Dice bar chart (sorted)
+        # Extract dice for sorting
+        samples_with_dice = [(s['name'], s['segmentation']['dice'] if 'segmentation' in s else s.get('dice', 0)) for s in sample_results]
+        sorted_samples = sorted(samples_with_dice, key=lambda x: x[1], reverse=True)
+        top_n = min(30, len(sorted_samples))
+        names = [s[0][:15] for s in sorted_samples[:top_n]]
+        dices_sorted = [s[1] for s in sorted_samples[:top_n]]
+        colors = ['green' if d > 0.5 else ('orange' if d > 0.2 else 'red') for d in dices_sorted]
+        axes[1, 0].barh(range(top_n), dices_sorted, color=colors)
+        axes[1, 0].set_yticks(range(top_n))
+        axes[1, 0].set_yticklabels(names, fontsize=8)
+        axes[1, 0].set_xlabel('Dice Score')
+        axes[1, 0].set_title(f'Top {top_n} Samples by Dice')
+        axes[1, 0].invert_yaxis()
+        
+        # Detection summary pie chart
+        det = summary['detection']
+        axes[1, 1].pie([det['TP'], det['FP'], det['FN']], 
+                       labels=[f"TP={det['TP']}", f"FP={det['FP']}", f"FN={det['FN']}"],
+                       colors=['green', 'orange', 'red'], autopct='%1.1f%%')
+        axes[1, 1].set_title(f"Detection Summary\nP={det['precision']:.2f}, R={det['recall']:.2f}, F1={det['f1']:.2f}")
+        
+        # Summary text
+        axes[1, 2].axis('off')
+        summary_text = (
+            f"TEST SUMMARY\n"
+            f"{'='*40}\n\n"
+            f"Samples: {summary['n_samples']}\n\n"
+            f"SEGMENTATION\n"
+            f"  Dice:      {summary['segmentation']['dice_mean']:.4f} ± {summary['segmentation']['dice_std']:.4f}\n"
+            f"  IoU:       {summary['segmentation']['iou_mean']:.4f}\n"
+            f"  Precision: {summary['segmentation']['precision_mean']:.4f}\n"
+            f"  Recall:    {summary['segmentation']['recall_mean']:.4f}\n\n"
+            f"DETECTION\n"
+            f"  TP: {det['TP']}  FP: {det['FP']}  FN: {det['FN']}\n"
+            f"  Precision: {det['precision']:.4f}\n"
+            f"  Recall:    {det['recall']:.4f}\n"
+            f"  F1 Score:  {det['f1']:.4f}"
+        )
+        axes[1, 2].text(0.1, 0.9, summary_text, transform=axes[1, 2].transAxes,
+                        fontsize=14, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+        
+        plt.tight_layout()
+        plt.savefig(output_dir / "test_summary.png", dpi=150)
+        plt.close()
+        
+        logger.info(f"📊 Summary plot saved to {output_dir / 'test_summary.png'}")
+
+    def visualize_predictions(self, split: str = 'test', save_dir: Optional[str] = None):
+        """
+        Visualize predictions vs GT for all samples in a split.
+        Saves overlay images showing: Image, GT, Pred_Raw, Pred_Post, LungMask, Overlay
+        
+        Args:
+            split: Dataset split to visualize
+            save_dir: Directory to save images (default: output_dir/visualize_{split})
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import ListedColormap
+        
+        logger.info(f"🖼️ Visualizing predictions for {split} set...")
+        
+        # Setup output directory
+        if save_dir is None:
+            save_dir = self.output_dir / f"visualize_{split}"
+        else:
+            save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        loader = self._create_loader(split, shuffle=False)
+        self.model.eval()
+        
+        sample_idx = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(loader, desc=f"Visualizing {split}"):
+                images = batch['image'].to(self.device).float()
+                masks = batch['mask'].to(self.device).float()
+                
+                logits = self.model(images)
+                if isinstance(logits, list):
+                    logits = logits[0]
+                
+                probs = torch.sigmoid(logits)
+                
+                batch_size = images.shape[0]
+                for i in range(batch_size):
+                    # Get numpy arrays
+                    img_np = images[i, 0].cpu().numpy()  # (D, H, W)
+                    mask_np = masks[i, 0].cpu().numpy()  # (D, H, W)
+                    prob_np = probs[i, 0].cpu().numpy()  # (D, H, W)
+                    
+                    # Predictions
+                    pred_raw = (prob_np > 0.5).astype(np.uint8)
+                    
+                    # Postprocessed prediction (無 lung mask)
+                    pred_post = postprocess_prediction(
+                        prob_np,
+                        lung_mask=None,  # 停用 lung mask
+                        threshold=0.5,
+                        min_size_voxels=5,
+                        apply_closing=True
+                    )
+                    
+                    # Calculate metrics for this sample
+                    dice_raw = calc_dice_score(pred_raw, mask_np)
+                    dice_post = calc_dice_score(pred_post, mask_np)
+                    
+                    # Find the slice with most GT mask content
+                    if mask_np.sum() > 0:
+                        z_idx = int(np.argmax(mask_np.sum(axis=(1, 2))))
+                    else:
+                        z_idx = mask_np.shape[0] // 2
+                    
+                    # Create visualization figure (2 rows x 4 cols)
+                    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+                    
+                    # Get sample name
+                    npz_name = Path(batch['npz_path'][i]).stem if 'npz_path' in batch else f'sample_{sample_idx}'
+                    
+                    # Row 1: Basic views
+                    # Image
+                    axes[0, 0].imshow(img_np[z_idx], cmap='gray')
+                    axes[0, 0].set_title(f'Image (z={z_idx})')
+                    axes[0, 0].axis('off')
+                    
+                    # GT Mask
+                    axes[0, 1].imshow(mask_np[z_idx], cmap='Reds')
+                    axes[0, 1].set_title(f'GT Mask (sum={mask_np.sum():.0f})')
+                    axes[0, 1].axis('off')
+                    
+                    # Pred Raw
+                    axes[0, 2].imshow(pred_raw[z_idx], cmap='Blues')
+                    axes[0, 2].set_title(f'Pred Raw (Dice={dice_raw:.4f})')
+                    axes[0, 2].axis('off')
+                    
+                    # Pred Post
+                    axes[0, 3].imshow(pred_post[z_idx], cmap='Greens')
+                    axes[0, 3].set_title(f'Pred Post (Dice={dice_post:.4f})')
+                    axes[0, 3].axis('off')
+                    
+                    # Row 2: Analysis views
+                    # Difference: Raw - Post (顯示被過濾掉的區域)
+                    diff_removed = (pred_raw > 0) & (pred_post == 0)  # 被後處理移除的
+                    diff_added = (pred_post > 0) & (pred_raw == 0)    # 被後處理新增的
+                    axes[1, 0].imshow(diff_removed[z_idx], cmap='Reds')
+                    axes[1, 0].set_title(f'Removed by PostProc (sum={diff_removed.sum():.0f})')
+                    axes[1, 0].axis('off')
+                    
+                    # Probability Map
+                    axes[1, 1].imshow(prob_np[z_idx], cmap='jet', vmin=0, vmax=1)
+                    axes[1, 1].set_title('Probability Map')
+                    axes[1, 1].axis('off')
+                    
+                    # Overlay: Image + GT (red) + Pred_Raw (blue)
+                    overlay_raw = np.stack([
+                        img_np[z_idx],  # R
+                        img_np[z_idx],  # G
+                        img_np[z_idx]   # B
+                    ], axis=-1)
+                    overlay_raw = (overlay_raw * 255).clip(0, 255).astype(np.uint8)
+                    # Add GT in red
+                    overlay_raw[mask_np[z_idx] > 0, 0] = 255
+                    overlay_raw[mask_np[z_idx] > 0, 1] = 0
+                    overlay_raw[mask_np[z_idx] > 0, 2] = 0
+                    # Add Pred Raw in blue (where no GT)
+                    pred_only = (pred_raw[z_idx] > 0) & (mask_np[z_idx] == 0)
+                    overlay_raw[pred_only, 0] = 0
+                    overlay_raw[pred_only, 1] = 0
+                    overlay_raw[pred_only, 2] = 255
+                    # Overlap (both GT and Pred) in yellow
+                    overlap = (pred_raw[z_idx] > 0) & (mask_np[z_idx] > 0)
+                    overlay_raw[overlap, 0] = 255
+                    overlay_raw[overlap, 1] = 255
+                    overlay_raw[overlap, 2] = 0
+                    
+                    axes[1, 2].imshow(overlay_raw)
+                    axes[1, 2].set_title('Overlay Raw: R=GT, B=Pred, Y=Both')
+                    axes[1, 2].axis('off')
+                    
+                    # Overlay: Image + GT (red) + Pred_Post (green)
+                    overlay_post = np.stack([
+                        img_np[z_idx],
+                        img_np[z_idx],
+                        img_np[z_idx]
+                    ], axis=-1)
+                    overlay_post = (overlay_post * 255).clip(0, 255).astype(np.uint8)
+                    overlay_post[mask_np[z_idx] > 0, 0] = 255
+                    overlay_post[mask_np[z_idx] > 0, 1] = 0
+                    overlay_post[mask_np[z_idx] > 0, 2] = 0
+                    pred_only_post = (pred_post[z_idx] > 0) & (mask_np[z_idx] == 0)
+                    overlay_post[pred_only_post, 0] = 0
+                    overlay_post[pred_only_post, 1] = 255
+                    overlay_post[pred_only_post, 2] = 0
+                    overlap_post = (pred_post[z_idx] > 0) & (mask_np[z_idx] > 0)
+                    overlay_post[overlap_post, 0] = 255
+                    overlay_post[overlap_post, 1] = 255
+                    overlay_post[overlap_post, 2] = 0
+                    
+                    axes[1, 3].imshow(overlay_post)
+                    axes[1, 3].set_title('Overlay Post: R=GT, G=Pred, Y=Both')
+                    axes[1, 3].axis('off')
+                    
+                    # Add overall title
+                    diff = dice_raw - dice_post
+                    status = "⚠️ POST WORSE" if diff > 0.1 else ("✅ OK" if diff < 0.1 else "")
+                    fig.suptitle(f'{npz_name}\nDice: Raw={dice_raw:.4f}, Post={dice_post:.4f} (diff={diff:+.4f}) {status}', 
+                                fontsize=14, fontweight='bold')
+                    
+                    plt.tight_layout()
+                    plt.savefig(save_dir / f'{sample_idx:03d}_{npz_name}.png', dpi=100)
+                    plt.close()
+                    
+                    sample_idx += 1
+        
+        logger.info(f"✅ Saved {sample_idx} visualization images to {save_dir}")
+        return save_dir
