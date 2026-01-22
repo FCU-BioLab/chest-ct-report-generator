@@ -257,6 +257,188 @@ class DiceLoss(nn.Module):
         
         return 1 - dice
 
+
+class TverskyLoss(nn.Module):
+    """
+    Tversky Loss - 可調整 FP/FN 權重的 Dice 變體
+    
+    當 alpha=0.5, beta=0.5 時等同於 Dice Loss
+    當 alpha < beta 時，更注重減少 FN（提高 Recall）
+    當 alpha > beta 時，更注重減少 FP（提高 Precision）
+    
+    推薦：alpha=0.3, beta=0.7 對於小目標分割（減少漏檢）
+    """
+    def __init__(self, alpha=0.3, beta=0.7, smooth=1e-5):
+        super().__init__()
+        self.alpha = alpha  # FP 權重
+        self.beta = beta    # FN 權重
+        self.smooth = smooth
+    
+    def forward(self, pred, target):
+        pred = torch.sigmoid(pred)
+        
+        # Flatten
+        pred = pred.view(-1)
+        target = target.view(-1)
+        
+        # True Positives, False Positives, False Negatives
+        TP = (pred * target).sum()
+        FP = ((1 - target) * pred).sum()
+        FN = (target * (1 - pred)).sum()
+        
+        tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        
+        return 1 - tversky
+
+
+class FocalTverskyLoss(nn.Module):
+    """
+    Focal Tversky Loss - 結合 Focal 機制的 Tversky Loss
+    對困難樣本給予更高權重
+    
+    gamma > 1: 更加專注於困難樣本
+    """
+    def __init__(self, alpha=0.3, beta=0.7, gamma=1.5, smooth=1e-5):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+    
+    def forward(self, pred, target):
+        pred = torch.sigmoid(pred)
+        
+        # Flatten
+        pred = pred.view(-1)
+        target = target.view(-1)
+        
+        TP = (pred * target).sum()
+        FP = ((1 - target) * pred).sum()
+        FN = (target * (1 - pred)).sum()
+        
+        tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        focal_tversky = (1 - tversky) ** self.gamma
+        
+        return focal_tversky
+
+
+class BoundaryLoss(nn.Module):
+    """
+    Boundary Loss - 專注於分割邊界區域
+    
+    使用距離變換計算邊界，對邊界區域的誤差給予更高權重
+    適合小目標和邊界精確度要求高的場景
+    """
+    def __init__(self, boundary_weight=1.0, use_dist_map=True):
+        super().__init__()
+        self.boundary_weight = boundary_weight
+        self.use_dist_map = use_dist_map
+    
+    def compute_boundary_weight_map(self, target):
+        """
+        Compute boundary weight map using distance transform
+        """
+        # Move to CPU for scipy operations
+        target_np = target.detach().cpu().numpy()
+        batch_size = target_np.shape[0]
+        weight_maps = []
+        
+        for b in range(batch_size):
+            mask = target_np[b, 0]  # (D, H, W)
+            
+            if mask.sum() < 1:
+                # No foreground, return uniform weight
+                weight_map = np.ones_like(mask)
+            else:
+                # Compute distance to boundary
+                from scipy import ndimage as ndi
+                
+                # Distance from foreground to boundary
+                dist_fg = ndi.distance_transform_edt(mask)
+                # Distance from background to boundary  
+                dist_bg = ndi.distance_transform_edt(1 - mask)
+                
+                # Combine - closer to boundary = higher weight
+                # Use exponential decay from boundary
+                dist_to_boundary = np.minimum(dist_fg, dist_bg)
+                weight_map = np.exp(-dist_to_boundary / 3.0)  # decay factor
+                
+                # Normalize
+                weight_map = (weight_map - weight_map.min()) / (weight_map.max() - weight_map.min() + 1e-6)
+                weight_map = weight_map + 0.5  # baseline weight of 0.5
+            
+            weight_maps.append(weight_map)
+        
+        weight_tensor = torch.tensor(np.stack(weight_maps)[:, np.newaxis], 
+                                     dtype=target.dtype, device=target.device)
+        return weight_tensor
+    
+    def forward(self, pred, target):
+        pred_prob = torch.sigmoid(pred)
+        
+        if self.use_dist_map:
+            # Compute boundary-aware weight map
+            weight_map = self.compute_boundary_weight_map(target)
+            
+            # Weighted BCE
+            bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+            weighted_bce = (bce * weight_map).mean()
+            
+            return self.boundary_weight * weighted_bce
+        else:
+            # Simple Laplacian edge detection
+            # Apply 3D Laplacian filter to get edges
+            laplacian_kernel = torch.tensor([[[0, 0, 0], [0, 1, 0], [0, 0, 0]],
+                                             [[0, 1, 0], [1, -6, 1], [0, 1, 0]],
+                                             [[0, 0, 0], [0, 1, 0], [0, 0, 0]]], 
+                                            dtype=pred.dtype, device=pred.device)
+            laplacian_kernel = laplacian_kernel.view(1, 1, 3, 3, 3)
+            
+            # Get edges of target
+            target_edges = F.conv3d(target, laplacian_kernel, padding=1).abs()
+            target_edges = (target_edges > 0.1).float()
+            
+            # MSE on boundary regions
+            boundary_loss = F.mse_loss(pred_prob * target_edges, target * target_edges)
+            
+            return self.boundary_weight * boundary_loss
+
+
+class CombinedLoss(nn.Module):
+    """
+    Combined Loss for nodule segmentation:
+    - Tversky Loss: Handle class imbalance, reduce FN
+    - Boundary Loss: Improve boundary accuracy
+    - BCE: Voxel-level learning signal
+    """
+    def __init__(self, tversky_weight=1.0, boundary_weight=0.5, bce_weight=0.5,
+                 tversky_alpha=0.3, tversky_beta=0.7, pos_weight=100.0):
+        super().__init__()
+        self.tversky = TverskyLoss(alpha=tversky_alpha, beta=tversky_beta)
+        self.boundary = BoundaryLoss(boundary_weight=1.0, use_dist_map=True)
+        # Store pos_weight as a buffer so it moves with the module
+        self.register_buffer('pos_weight', torch.tensor([pos_weight]))
+        
+        self.tversky_weight = tversky_weight
+        self.boundary_weight = boundary_weight
+        self.bce_weight = bce_weight
+    
+    def forward(self, pred, target):
+        loss_tversky = self.tversky(pred, target)
+        loss_boundary = self.boundary(pred, target)
+        
+        # BCE with pos_weight on correct device
+        loss_bce = F.binary_cross_entropy_with_logits(
+            pred, target, 
+            pos_weight=self.pos_weight.to(pred.device)
+        )
+        
+        total = (self.tversky_weight * loss_tversky + 
+                 self.boundary_weight * loss_boundary +
+                 self.bce_weight * loss_bce)
+        
+        return total
+
 def calc_detection_rate(logits_batch, masks_batch, threshold=0.1):
     """
     Calculate Nodule Detection Rate (Sensitivity)
@@ -331,15 +513,36 @@ class UNet3DTrainer:
             weight_decay=config.training.weight_decay
         )
         
-        # Losses
-        # 1. 帶權重的 BCE Loss：降低 pos_weight 減少過度預測
-        self.bce_weighted = nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor([150.0]).to(self.device)  # 從 500 降到 150
-        )
-        # 2. Focal Loss：alpha=0.90 稍微降低，平衡召回與精確
-        self.focal = FocalLoss(alpha=0.90, gamma=2.0)
-        # 3. Dice Loss：smooth=1e-5 讓稀少正樣本有更強梯度
-        self.dice = DiceLoss(smooth=1e-5)
+        # Losses - based on config.training.loss_type
+        loss_type = getattr(config.training, 'loss_type', 'combined')
+        logger.info(f"📉 Initializing loss: {loss_type}")
+        
+        if loss_type == 'combined':
+            # Combined Loss: Tversky + Boundary + BCE
+            self.combined_loss = CombinedLoss(
+                tversky_weight=getattr(config.training, 'tversky_weight', 1.0),
+                boundary_weight=getattr(config.training, 'boundary_weight', 0.5),
+                bce_weight=getattr(config.training, 'bce_weight', 0.5),
+                tversky_alpha=getattr(config.training, 'tversky_alpha', 0.3),
+                tversky_beta=getattr(config.training, 'tversky_beta', 0.7),
+                pos_weight=getattr(config.training, 'pos_weight', 100.0)
+            )
+            self.use_combined_loss = True
+        elif loss_type == 'tversky':
+            # Tversky Loss only
+            self.tversky = TverskyLoss(
+                alpha=getattr(config.training, 'tversky_alpha', 0.3),
+                beta=getattr(config.training, 'tversky_beta', 0.7)
+            )
+            self.use_combined_loss = False
+        else:
+            # Legacy losses (dice + bce + focal)
+            self.bce_weighted = nn.BCEWithLogitsLoss(
+                pos_weight=torch.tensor([getattr(config.training, 'pos_weight', 150.0)]).to(self.device)
+            )
+            self.focal = FocalLoss(alpha=0.90, gamma=2.0)
+            self.dice = DiceLoss(smooth=1e-5)
+            self.use_combined_loss = False
         
         # Datasets
         self.train_loader = self._create_loader("train", shuffle=True)
@@ -494,24 +697,35 @@ class UNet3DTrainer:
             if isinstance(logits, list):
                 # Deep supervision
                 loss = 0
-                weights = [1.0, 0.5, 0.25, 0.125]  # Example weights
+                weights = [1.0, 0.5, 0.25, 0.125]
                 for i, logit in enumerate(logits[:len(weights)]):
-                    # Resize mask to logit size if needed
                     if logit.shape != masks.shape:
                          target = F.interpolate(masks, size=logit.shape[2:], mode='nearest')
                     else:
                         target = masks
                     
-                    l_focal = self.focal(logit, target)
-                    l_dice = self.dice(logit, target)
-                    loss += weights[i] * (l_focal + 2.0 * l_dice)
+                    if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
+                        loss += weights[i] * self.combined_loss(logit, target)
+                    elif hasattr(self, 'tversky'):
+                        loss += weights[i] * self.tversky(logit, target)
+                    else:
+                        l_focal = self.focal(logit, target)
+                        l_dice = self.dice(logit, target)
+                        loss += weights[i] * (l_focal + 2.0 * l_dice)
             else:
-                # 組合 Loss: BCE(weighted) + Focal + 2*Dice
-                loss_bce = self.bce_weighted(logits, masks)
-                loss_focal = self.focal(logits, masks)
-                loss_dice = self.dice(logits, masks)
-                # 提高 Dice 權重，讓模型更重視精確度而非只是召回
-                loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
+                # Single output
+                if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
+                    # Use Combined Loss (Tversky + Boundary + BCE)
+                    loss = self.combined_loss(logits, masks)
+                elif hasattr(self, 'tversky'):
+                    # Use Tversky Loss only
+                    loss = self.tversky(logits, masks)
+                else:
+                    # Legacy: BCE + Focal + Dice
+                    loss_bce = self.bce_weighted(logits, masks)
+                    loss_focal = self.focal(logits, masks)
+                    loss_dice = self.dice(logits, masks)
+                    loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
             
             loss.backward()
             self.optimizer.step()
@@ -551,11 +765,16 @@ class UNet3DTrainer:
                 if isinstance(logits, list):
                     logits = logits[0]
                 
-                # Calculate validation loss
-                loss_bce = self.bce_weighted(logits, masks)
-                loss_focal = self.focal(logits, masks)
-                loss_dice = self.dice(logits, masks)
-                loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
+                # Calculate validation loss based on loss type
+                if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
+                    loss = self.combined_loss(logits, masks)
+                elif hasattr(self, 'tversky'):
+                    loss = self.tversky(logits, masks)
+                else:
+                    loss_bce = self.bce_weighted(logits, masks)
+                    loss_focal = self.focal(logits, masks)
+                    loss_dice = self.dice(logits, masks)
+                    loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
                 total_loss += loss.item()
                 
                 # Get predictions
@@ -938,7 +1157,7 @@ class UNet3DTrainer:
             'sample_results': sample_results
         }
 
-    def comprehensive_test(self, split: str = 'test', save_visualizations: bool = True):
+    def comprehensive_test(self, split: str = 'test', save_visualizations: bool = True, export_gif: bool = True):
         """
         Complete test evaluation with segmentation metrics, detection metrics, 
         and per-sample visualizations.
@@ -946,6 +1165,7 @@ class UNet3DTrainer:
         Args:
             split: Dataset split to evaluate
             save_visualizations: Whether to save visualization images
+            export_gif: Whether to export GIF animations for each case
             
         Returns:
             Dict with all metrics and paths to saved files
@@ -1046,7 +1266,7 @@ class UNet3DTrainer:
                     if save_visualizations:
                         self._save_case_visualization(
                             img_np, mask_np, prob_np, pred_raw, pred_post,
-                            seg_m, det_m, npz_name, case_dir
+                            seg_m, det_m, npz_name, case_dir, export_gif=export_gif
                         )
                     
                     sample_idx += 1
@@ -1205,7 +1425,7 @@ class UNet3DTrainer:
         plt.close()
     
     def _save_case_visualization(self, img_np, mask_np, prob_np, pred_raw, pred_post,
-                                  seg_m, det_m, npz_name, case_dir):
+                                  seg_m, det_m, npz_name, case_dir, export_gif: bool = True):
         """
         Save per-case visualization files to individual folder
         
@@ -1213,6 +1433,7 @@ class UNet3DTrainer:
         - overview.png: Combined 8-panel visualization
         - slices/: Multi-slice images
         - overlay.png: GT vs Prediction overlay
+        - animation.gif: Animated GIF of all slices (if export_gif=True)
         """
         import matplotlib.pyplot as plt
         
@@ -1352,6 +1573,67 @@ class UNet3DTrainer:
                 plt.tight_layout()
                 plt.savefig(slices_dir / f'slice_{z:03d}.png', dpi=80)
                 plt.close()
+        
+        # ====== 4. Animated GIF ======
+        if export_gif:
+            self._save_case_gif(img_np, mask_np, pred_post, seg_m, npz_name, case_dir)
+    
+    def _save_case_gif(self, img_np, mask_np, pred_post, seg_m, npz_name, case_dir, fps: int = 5):
+        """
+        Save animated GIF showing all slices with Overlay view.
+        Colors: Red=GT, Blue=Pred, Yellow=Both
+        
+        Args:
+            img_np: (D, H, W) CT volume normalized to [0, 1]
+            mask_np: (D, H, W) Ground truth mask
+            pred_post: (D, H, W) Postprocessed prediction
+            seg_m: Segmentation metrics dict
+            npz_name: Sample name for title
+            case_dir: Directory to save GIF
+            fps: Frames per second
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation, PillowWriter
+        
+        D = img_np.shape[0]
+        
+        # Create overlay function
+        def create_overlay(z_idx):
+            overlay = np.stack([img_np[z_idx]] * 3, axis=-1)
+            overlay = (overlay * 255).clip(0, 255).astype(np.uint8)
+            # GT = Red
+            overlay[mask_np[z_idx] > 0, 0] = 255
+            overlay[mask_np[z_idx] > 0, 1] = 0
+            overlay[mask_np[z_idx] > 0, 2] = 0
+            # Pred only = Blue
+            pred_only = (pred_post[z_idx] > 0) & (mask_np[z_idx] == 0)
+            overlay[pred_only, 0] = 0
+            overlay[pred_only, 1] = 0
+            overlay[pred_only, 2] = 255
+            # Both = Yellow
+            both = (pred_post[z_idx] > 0) & (mask_np[z_idx] > 0)
+            overlay[both, 0] = 255
+            overlay[both, 1] = 255
+            overlay[both, 2] = 0
+            return overlay
+        
+        # Create single-panel figure
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.axis('off')
+        
+        im = ax.imshow(create_overlay(0))
+        title = ax.set_title(f'{npz_name} | Dice={seg_m["dice"]:.4f}\nSlice 0/{D-1}\nR=GT, B=Pred, Y=Both', fontsize=10)
+        
+        def update(frame_idx):
+            im.set_data(create_overlay(frame_idx))
+            title.set_text(f'{npz_name} | Dice={seg_m["dice"]:.4f}\nSlice {frame_idx}/{D-1}\nR=GT, B=Pred, Y=Both')
+            return [im, title]
+        
+        anim = FuncAnimation(fig, update, frames=D, interval=1000//fps, blit=True)
+        
+        gif_path = case_dir / 'animation.gif'
+        anim.save(str(gif_path), writer=PillowWriter(fps=fps))
+        plt.close()
     
     def _generate_test_summary_plots(self, summary, output_dir):
         """Generate summary plots for test results"""
