@@ -812,7 +812,7 @@ class DatasetVisualizer:
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize 3D U-Net Training Data")
-    parser.add_argument("--npz_dir", type=str, default="../../cache/volume_npz",
+    parser.add_argument("--npz_dir", type=str, default="cache/volume_npz",
                         help="Directory containing NPZ files")
     parser.add_argument("--split", type=str, default="train", choices=["train", "val", "test"],
                         help="Data split to visualize")

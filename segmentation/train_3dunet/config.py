@@ -50,7 +50,9 @@ class ModelConfig:
     num_groups: int = 8
     dropout_rate: float = 0.0
     image_size: int = 256  # Input spatial size (H, W)
-    # base_filters is now implicitly f_maps[0]
+    # Attention options
+    use_attention: bool = False  # Enable SE blocks + Attention Gates
+    se_reduction: int = 16  # SE block reduction ratio
 
 
 @dataclass
@@ -68,9 +70,17 @@ class TrainingConfig:
     warmup_epochs: int = 5
     min_lr: float = 1e-6
     
-    # Loss weights
+    # Loss configuration
+    loss_type: str = "combined"  # "dice", "tversky", "combined"
     dice_weight: float = 1.0
-    bce_weight: float = 1.0
+    bce_weight: float = 0.5
+    tversky_weight: float = 1.0
+    boundary_weight: float = 0.5
+    # Tversky parameters (alpha < beta = more weight on FN reduction)
+    tversky_alpha: float = 0.3
+    tversky_beta: float = 0.7
+    # BCE pos_weight for class imbalance
+    pos_weight: float = 100.0
     
     # Early stopping
     early_stopping_patience: int = 15
@@ -90,10 +100,16 @@ class Config:
     
     # Experiment
     experiment_name: str = "unet3d_volume"
-    output_dir: str = "volume_output_unet3d"
+    output_dir: str = ""  # Will be set with timestamp in __post_init__
     seed: int = 42
     device: str = "cuda"
     num_workers: int = 4
+    
+    def __post_init__(self):
+        if not self.output_dir:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.output_dir = f"segmentation/video_result/3dunet_train_{timestamp}"
     
     def save(self, path: str):
         """Save config to JSON"""

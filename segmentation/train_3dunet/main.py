@@ -68,16 +68,30 @@ def cmd_train(args):
     
     config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
+    config.model.use_attention = getattr(args, 'attention', False)
     
     config.training.epochs = args.epochs
     config.training.batch_size = args.batch_size
     config.training.learning_rate = args.learning_rate
+    config.training.loss_type = getattr(args, 'loss_type', 'combined')
     
-    config.output_dir = args.output_dir
+    # Only override output_dir if explicitly provided
+    if args.output_dir is not None:
+        config.output_dir = args.output_dir
+    # Otherwise use the auto-generated timestamp path from Config.__post_init__
+    
     config.seed = args.seed
     config.device = args.device
     
     set_seed(config.seed)
+    
+    # Log model and loss info
+    logging.info(f"📁 Output directory: {config.output_dir}")
+    if config.model.use_attention:
+        logging.info("🧠 Using AttentionUNet3D (SE + Attention Gates)")
+    else:
+        logging.info("🔷 Using standard UNet3D")
+    logging.info(f"📉 Loss type: {config.training.loss_type}")
     
     trainer = UNet3DTrainer(config)
     trainer.train()
@@ -149,13 +163,15 @@ def cmd_fulltest(args):
     config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
     config.device = args.device
+    config.num_workers = 0  # Avoid multiprocessing issues on Windows
     
     trainer = UNet3DTrainer(config)
     trainer.load_checkpoint(args.checkpoint)
     
     summary = trainer.comprehensive_test(
         split=args.split,
-        save_visualizations=not args.no_viz
+        save_visualizations=not args.no_viz,
+        export_gif=not args.no_gif
     )
     
     logging.info("✅ Comprehensive test complete!")
@@ -182,7 +198,7 @@ def main():
     # TRAIN
     train = subparsers.add_parser('train')
     train.add_argument('--npz_dir', default='volume_npz')
-    train.add_argument('--output_dir', default='volume_output_unet3d')
+    train.add_argument('--output_dir', default=None, help='Output directory (default: segmentation/video_result/3dunet_train_TIMESTAMP)')
     train.add_argument('--epochs', type=int, default=50)
     train.add_argument('--batch_size', type=int, default=2)
     train.add_argument('--learning_rate', type=float, default=1e-4)
@@ -191,6 +207,13 @@ def main():
     train.add_argument('--image_size', type=int, default=256)
     train.add_argument('--device', default='cuda')
     train.add_argument('--seed', type=int, default=42)
+    # Model options
+    train.add_argument('--attention', action='store_true', 
+                       help='Enable SE + Attention Gate model')
+    # Loss options
+    train.add_argument('--loss_type', default='combined', 
+                       choices=['dice', 'tversky', 'combined'],
+                       help='Loss function type')
     
     # STATS
     stats = subparsers.add_parser('stats')
@@ -216,6 +239,7 @@ def main():
     fulltest.add_argument('--image_size', type=int, default=256)
     fulltest.add_argument('--device', default='cuda')
     fulltest.add_argument('--no_viz', action='store_true', help='Skip per-sample visualizations')
+    fulltest.add_argument('--no_gif', action='store_true', help='Skip GIF animation export')
     
     # VISUALIZE
     viz = subparsers.add_parser('visualize', help='Visualize predictions vs GT for all samples')

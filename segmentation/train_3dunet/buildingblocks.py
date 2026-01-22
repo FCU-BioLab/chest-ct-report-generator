@@ -4,6 +4,81 @@ import torch
 from torch import nn as nn
 from torch.nn import functional as F
 
+
+# ============ Attention Modules ============
+
+class SEBlock3D(nn.Module):
+    """
+    3D Squeeze-and-Excitation Block
+    Channel attention mechanism for 3D volumes
+    """
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.squeeze = nn.AdaptiveAvgPool3d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        b, c, _, _, _ = x.size()
+        # Squeeze: Global Average Pooling
+        y = self.squeeze(x).view(b, c)
+        # Excitation: FC -> ReLU -> FC -> Sigmoid
+        y = self.excitation(y).view(b, c, 1, 1, 1)
+        # Scale
+        return x * y.expand_as(x)
+
+
+class AttentionGate3D(nn.Module):
+    """
+    3D Attention Gate for skip connections
+    Highlights relevant features while suppressing irrelevant regions
+    """
+    def __init__(self, gate_channels, in_channels, inter_channels=None):
+        super().__init__()
+        if inter_channels is None:
+            inter_channels = in_channels // 2
+            if inter_channels == 0:
+                inter_channels = 1
+        
+        self.W_g = nn.Sequential(
+            nn.Conv3d(gate_channels, inter_channels, kernel_size=1, bias=True),
+            nn.GroupNorm(min(8, inter_channels), inter_channels)
+        )
+        
+        self.W_x = nn.Sequential(
+            nn.Conv3d(in_channels, inter_channels, kernel_size=1, bias=True),
+            nn.GroupNorm(min(8, inter_channels), inter_channels)
+        )
+        
+        self.psi = nn.Sequential(
+            nn.Conv3d(inter_channels, 1, kernel_size=1, bias=True),
+            nn.GroupNorm(1, 1),
+            nn.Sigmoid()
+        )
+        
+        self.relu = nn.ReLU(inplace=True)
+    
+    def forward(self, g, x):
+        """
+        Args:
+            g: gating signal from decoder (lower resolution)
+            x: skip connection from encoder (higher resolution)
+        """
+        # Upsample g to match x's spatial size
+        g_upsampled = F.interpolate(g, size=x.shape[2:], mode='trilinear', align_corners=False)
+        
+        g1 = self.W_g(g_upsampled)
+        x1 = self.W_x(x)
+        
+        psi = self.relu(g1 + x1)
+        psi = self.psi(psi)
+        
+        return x * psi
+
 def create_conv(
     in_channels: int,
     out_channels: int,

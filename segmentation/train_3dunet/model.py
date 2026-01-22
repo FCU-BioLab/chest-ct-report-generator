@@ -3,11 +3,14 @@
 3D U-Net Implementation (Refactored)
 ====================================
 Based on wolny/pytorch-3dunet
+With Attention mechanisms (SE blocks + Attention Gates)
 """
 
+import torch
 import torch.nn as nn
 from .buildingblocks import (
-    DoubleConv, ResNetBlock, create_encoders, create_decoders, NoUpsampling
+    DoubleConv, ResNetBlock, create_encoders, create_decoders, NoUpsampling,
+    SEBlock3D, AttentionGate3D
 )
 
 class UNet3D(nn.Module):
@@ -81,23 +84,141 @@ class UNet3D(nn.Module):
         x = self.final_activation(x)
         return x
 
+
+class AttentionUNet3D(nn.Module):
+    """
+    3D Attention U-Net with SE blocks and Attention Gates
+    
+    Features:
+    - SE (Squeeze-and-Excitation) blocks after each encoder/decoder
+    - Attention Gates for skip connections
+    """
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        f_maps=64,
+        layer_order='gcr',
+        num_groups=8,
+        num_levels=4,
+        is_segmentation=True,
+        conv_padding=1,
+        conv_kernel_size=3,
+        conv_upscale=2,
+        dropout_prob=0.1,
+        pool_kernel_size=2,
+        basic_module=DoubleConv,
+        se_reduction=16,
+        testing=False,
+    ):
+        super().__init__()
+
+        if isinstance(f_maps, int):
+            f_maps = [f_maps * 2 ** k for k in range(num_levels)]
+
+        self.f_maps = f_maps
+        assert isinstance(f_maps, list) or isinstance(f_maps, tuple)
+        assert len(f_maps) > 1, "Required at least 2 levels in the U-Net"
+
+        # Create Encoders
+        self.encoders = create_encoders(
+            in_channels, f_maps, basic_module, conv_kernel_size, conv_padding, conv_upscale, dropout_prob,
+            layer_order, num_groups, pool_kernel_size, is3d=True
+        )
+        
+        # SE blocks for encoders
+        self.encoder_se = nn.ModuleList([
+            SEBlock3D(f, reduction=min(se_reduction, f)) for f in f_maps
+        ])
+
+        # Create Decoders
+        self.decoders = create_decoders(
+            f_maps, basic_module, conv_kernel_size, conv_padding, layer_order, num_groups, upsample="default",
+            dropout_prob=dropout_prob, is3d=True
+        )
+        
+        # SE blocks for decoders
+        reversed_f_maps = list(reversed(f_maps))
+        self.decoder_se = nn.ModuleList([
+            SEBlock3D(reversed_f_maps[i + 1], reduction=min(se_reduction, reversed_f_maps[i + 1])) 
+            for i in range(len(reversed_f_maps) - 1)
+        ])
+        
+        # Attention Gates for skip connections
+        # Gate signal comes from decoder (lower level), input is encoder features
+        self.attention_gates = nn.ModuleList([
+            AttentionGate3D(
+                gate_channels=reversed_f_maps[i],  # decoder output channels
+                in_channels=reversed_f_maps[i + 1]  # encoder feature channels
+            )
+            for i in range(len(reversed_f_maps) - 1)
+        ])
+
+        # Final Convolution
+        self.final_conv = nn.Conv3d(f_maps[0], out_channels, 1)
+
+        if is_segmentation and not testing:
+            self.final_activation = nn.Identity()
+        else:
+            self.final_activation = nn.Identity()
+
+    def forward(self, x):
+        # Encoder path
+        encoders_features = []
+        for encoder, se_block in zip(self.encoders, self.encoder_se):
+            x = encoder(x)
+            x = se_block(x)  # Apply SE attention
+            encoders_features.insert(0, x)
+
+        # Remove last encoder's output (bottleneck)
+        encoders_features = encoders_features[1:]
+
+        # Decoder path with attention gates
+        for i, (decoder, enc_features) in enumerate(zip(self.decoders, encoders_features)):
+            # Apply attention gate to encoder features
+            attended_features = self.attention_gates[i](x, enc_features)
+            
+            # Decoder forward
+            x = decoder(attended_features, x)
+            
+            # Apply SE block
+            x = self.decoder_se[i](x)
+
+        x = self.final_conv(x)
+        x = self.final_activation(x)
+        return x
+
+
 def get_model(config) -> nn.Module:
     """Get model from config"""
     # Defaults or Config
-    f_maps = [32, 64, 128, 256] # Standard base 32, 4 levels
-    # Optional: check if config has these values
+    f_maps = [32, 64, 128, 256]  # Standard base 32, 4 levels
+    
     if hasattr(config.model, 'f_maps'):
         f_maps = config.model.f_maps
     
-    layer_order = 'gcr' # GroupNorm -> Conv -> ReLU (Standard in wolny/3dunet)
+    layer_order = 'gcr'  # GroupNorm -> Conv -> ReLU
     
-    return UNet3D(
-        in_channels=config.model.in_channels,
-        out_channels=config.model.out_channels,
-        f_maps=f_maps,
-        layer_order=layer_order,
-        basic_module=DoubleConv # or ResNetBlock
-    )
+    # Check if attention is enabled
+    use_attention = getattr(config.model, 'use_attention', False)
+    
+    if use_attention:
+        return AttentionUNet3D(
+            in_channels=config.model.in_channels,
+            out_channels=config.model.out_channels,
+            f_maps=f_maps,
+            layer_order=layer_order,
+            basic_module=DoubleConv,
+            se_reduction=16
+        )
+    else:
+        return UNet3D(
+            in_channels=config.model.in_channels,
+            out_channels=config.model.out_channels,
+            f_maps=f_maps,
+            layer_order=layer_order,
+            basic_module=DoubleConv
+        )
 
 if __name__ == "__main__":
     import torch
