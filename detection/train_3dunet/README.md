@@ -9,7 +9,7 @@
 將 LNDb 或 MSD 數據集轉換為 NPZ 體積格式：
 
 ```cmd
-python -m segmentation.train_3dunet.main convert ^
+python -m detection.train_3dunet.main convert ^
     --dataset lndb ^
     --input_dir E:\lung_ct_lesion_dataset\LNDb ^
     --output_dir cache/volume_npz ^
@@ -20,7 +20,7 @@ python -m segmentation.train_3dunet.main convert ^
 ### 2. 訓練
 
 ```cmd
-python -m segmentation.train_3dunet.main train ^
+python -m detection.train_3dunet.main train ^
     --npz_dir cache/volume_npz ^
     --epochs 100 ^
     --batch_size 4 ^
@@ -37,7 +37,7 @@ python -m segmentation.train_3dunet.main train ^
 運行完整測試，生成視覺化報告和 GIF 動畫：
 
 ```cmd
-python -m segmentation.train_3dunet.main fulltest ^
+python -m detection.train_3dunet.main fulltest ^
     --npz_dir cache/volume_npz ^
     --checkpoint path\to\best_model.pth ^
     --split test ^
@@ -59,7 +59,7 @@ python -m segmentation.train_3dunet.main fulltest ^
 只計算 Dice Score：
 
 ```cmd
-python -m segmentation.train_3dunet.main test ^
+python -m detection.train_3dunet.main test ^
     --npz_dir cache/volume_npz ^
     --checkpoint path\to\model.pth ^
     --attention
@@ -68,7 +68,7 @@ python -m segmentation.train_3dunet.main test ^
 ### 5. 統計
 
 ```cmd
-python -m segmentation.train_3dunet.main stats --npz_dir cache/volume_npz
+python -m detection.train_3dunet.main stats --npz_dir cache/volume_npz
 ```
 
 ---
