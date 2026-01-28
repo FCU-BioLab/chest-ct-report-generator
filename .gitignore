@@ -14,6 +14,7 @@ cache
 datasets
 detection/__pycache__
 detection/result
+detection/video_result
 models
 *.pt
 *.html

@@ -109,7 +109,7 @@ class Config:
         if not self.output_dir:
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.output_dir = f"segmentation/video_result/3dunet_train_{timestamp}"
+            self.output_dir = f"detection/video_result/3dunet_train_{timestamp}"
     
     def save(self, path: str):
         """Save config to JSON"""
