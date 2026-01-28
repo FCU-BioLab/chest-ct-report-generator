@@ -48,11 +48,11 @@ class VolumePreprocessor:
     def __init__(
         self,
         output_dir: str,
-        context_slices: int = 6,
-        min_depth: int = 5,
-        max_depth: int = 32,
-        min_nodule_diameter: float = 4.0,
-        image_size: int = 512,
+        context_slices: int = 16,
+        min_depth: int = 1,
+        max_depth: int = 33,
+        min_nodule_diameter: float = 0.0,
+        image_size: int = 256,
         window_center: float = -600,
         window_width: float = 1500,
     ):
@@ -612,16 +612,16 @@ def main():
                        help='Input dataset directory')
     parser.add_argument('--output_dir', type=str, default='volume_npz',
                        help='NPZ Output directory')
-    parser.add_argument('--context_slices', type=int, default=6,
+    parser.add_argument('--context_slices', type=int, default=16,
                        help='Slices before/after center')
-    parser.add_argument('--min_diameter', type=float, default=4.0,
+    parser.add_argument('--min_diameter', type=float, default=0.0,
                        help='Min nodule diameter (mm)')
-    parser.add_argument('--image_size', type=int, default=512,
+    parser.add_argument('--image_size', type=int, default=256,
                        help='Output image size')
     
     args = parser.parse_args()
     
-    preprocessor = VideoPreprocessor(
+    preprocessor = VolumePreprocessor(
         output_dir=args.output_dir,
         context_slices=args.context_slices,
         min_nodule_diameter=args.min_diameter,

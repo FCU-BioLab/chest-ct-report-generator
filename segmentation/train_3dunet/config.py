@@ -83,7 +83,7 @@ class TrainingConfig:
     pos_weight: float = 100.0
     
     # Early stopping
-    early_stopping_patience: int = 15
+    early_stopping_patience: int = 150
     
     # Hardware
     use_amp: bool = True
