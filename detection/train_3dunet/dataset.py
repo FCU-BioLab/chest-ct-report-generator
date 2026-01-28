@@ -89,6 +89,12 @@ class VolumetricDataset(Dataset):
         masks = data['masks']    # (D, H, W)
         center_idx = int(data['center_idx'])
         
+        # Load metadata
+        slice_indices = data.get('slice_indices')
+        spacing = data.get('spacing')
+        origin = data.get('origin')
+        original_shape = data.get('original_shape')
+        
         # Truncate/Pad to max_depth
         D = len(frames)
         if D > self.max_depth:
@@ -105,6 +111,8 @@ class VolumetricDataset(Dataset):
             
             frames = frames[start:end]
             masks = masks[start:end]
+            if slice_indices is not None:
+                slice_indices = slice_indices[start:end]
         
         # Resize
         frames, masks = self._resize_video(frames, masks)
@@ -124,13 +132,25 @@ class VolumetricDataset(Dataset):
         frames_tensor = torch.from_numpy(frames).unsqueeze(0)
         masks_tensor = torch.from_numpy(masks).long().unsqueeze(0)
         
-        return {
+        result = {
             'image': frames_tensor,
             'mask': masks_tensor,
             'patient_id': str(data.get('patient_id', '')),
             'lesion_id': int(data.get('lesion_id', 0)),
             'npz_path': str(npz_path)
         }
+        
+        # Add metadata if available
+        if slice_indices is not None:
+            result['slice_indices'] = torch.tensor(slice_indices, dtype=torch.long)
+        if spacing is not None:
+            result['spacing'] = torch.tensor(spacing, dtype=torch.float32)
+        if origin is not None:
+            result['origin'] = torch.tensor(origin, dtype=torch.float32)
+        if original_shape is not None:
+            result['original_shape'] = torch.tensor(original_shape, dtype=torch.long)
+            
+        return result
     
     def _resize_video(self, frames, masks):
         D, H, W = frames.shape
@@ -255,6 +275,13 @@ def collate_video_batch(batch: List[Dict]) -> Dict:
     
     images = []
     masks = []
+    slice_indices_list = []
+    has_slice_indices = 'slice_indices' in batch[0]
+    
+    # Metadata lists
+    spacings = []
+    origins = []
+    original_shapes = []
     
     for s in batch:
         img = s['image'] # (1, D, H, W)
@@ -267,12 +294,36 @@ def collate_video_batch(batch: List[Dict]) -> Dict:
             img = torch.nn.functional.pad(img, (0,0, 0,0, 0,pad_d))
             msk = torch.nn.functional.pad(msk, (0,0, 0,0, 0,pad_d))
             
+            if has_slice_indices and 'slice_indices' in s:
+                # Pad with -1
+                si = s['slice_indices']
+                si = torch.cat([si, torch.full((pad_d,), -1, dtype=si.dtype)])
+                slice_indices_list.append(si)
+        else:
+            if has_slice_indices and 'slice_indices' in s:
+                slice_indices_list.append(s['slice_indices'])
+            
         images.append(img)
         masks.append(msk)
+        
+        if 'spacing' in s: spacings.append(s['spacing'])
+        if 'origin' in s: origins.append(s['origin'])
+        if 'original_shape' in s: original_shapes.append(s['original_shape'])
     
-    return {
+    result = {
         'image': torch.stack(images), # (B, 1, D, H, W)
         'mask': torch.stack(masks),   # (B, 1, D, H, W)
         'patient_id': [s['patient_id'] for s in batch],
         'npz_path': [s['npz_path'] for s in batch]
     }
+    
+    if slice_indices_list:
+        result['slice_indices'] = torch.stack(slice_indices_list) # (B, D)
+    if spacings:
+        result['spacing'] = torch.stack(spacings)
+    if origins:
+        result['origin'] = torch.stack(origins)
+    if original_shapes:
+        result['original_shape'] = torch.stack(original_shapes)
+        
+    return result

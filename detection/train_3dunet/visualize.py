@@ -422,8 +422,9 @@ class DatasetVisualizer:
         self.max_depth = max_depth
         
         # Import Dataset
+        # Import Dataset
         try:
-            from segmentation.train_3dunet.dataset import VolumetricDataset
+            from .dataset import VolumetricDataset
             self.dataset = VolumetricDataset(
                 npz_dir=npz_dir,
                 split=split,
@@ -712,7 +713,7 @@ class DatasetVisualizer:
         Shows original + n_augments augmented versions side by side.
         """
         try:
-            from segmentation.train_3dunet.dataset import VolumetricDataset
+            from .dataset import VolumetricDataset
         except ImportError as e:
             print(f"❌ Failed to import: {e}")
             return

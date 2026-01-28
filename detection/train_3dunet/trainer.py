@@ -25,6 +25,8 @@ from typing import Dict, Tuple, Optional
 from .dataset import VolumetricDataset, collate_video_batch
 from .model import get_model
 from .config import Config
+from .detector import NoduleDetector
+from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
 
@@ -543,6 +545,9 @@ class UNet3DTrainer:
             self.focal = FocalLoss(alpha=0.90, gamma=2.0)
             self.dice = DiceLoss(smooth=1e-5)
             self.use_combined_loss = False
+        
+        # Detector
+        self.detector = NoduleDetector(threshold=0.5, min_size_mm3=30.0)
         
         # Datasets
         self.train_loader = self._create_loader("train", shuffle=True)
@@ -1215,6 +1220,36 @@ class UNet3DTrainer:
                         min_size_voxels=5, apply_closing=True
                     )
                     
+                    # Run Nodule Detector
+                    # Prepare metadata (need to unsquelch batch dims or handle batch index)
+                    # batch has keys like 'spacing', 'origin' if collate worked
+                    batch_metadata = {
+                        'slice_indices': batch.get('slice_indices'),
+                        'spacing': batch.get('spacing'),
+                        'origin': batch.get('origin'),
+                        'original_shape': batch.get('original_shape')
+                    }
+                    
+                    # process_batch expects batch logits (B, ...)
+                    # We are in a loop over B, but passing single items? 
+                    # No, process_batch takes full batch logits. 
+                    # But here we are iterating i in batch_size.
+                    # It's more efficient to run detector on full batch before loop.
+                    # However, to minimize code change, I can pass a mini-batch of size 1 or rewrite the loop.
+                    # Let's run detector for the specific sample i using slice on logits.
+                    
+                    # Or better: Run classifier ONCE for the batch outside data loop, then iterate.
+                    # Wait, logits is computed for batch at line 1198.
+                    # Let's run detector on the whole batch at once.
+                    
+                    # (See code change BELOW loop: wait, I need to do this inside loop because I need per-sample results)
+                    
+                    # Actually, let's call detector process_batch ONCE before the loop.
+                    # But existing code structure loops i.
+                    # I will insert the call before the loop and use index i.
+                    
+                    # See ReplacementContent logic below...
+                    
                     # Segmentation metrics
                     seg_m = calc_segmentation_metrics(pred_post, mask_np)
                     for k in seg_metrics:
@@ -1233,6 +1268,21 @@ class UNet3DTrainer:
                     case_dir = viz_dir / f'{sample_idx:03d}_{npz_name}'
                     case_dir.mkdir(parents=True, exist_ok=True)
                     
+                    # Get detections for this sample
+                    # We need to run detector on the single sample or full batch.
+                    # Let's run on single sample to fit this structure easily, 
+                    # constructing a 1-batch metadata dict.
+                    sample_meta = {
+                        'slice_indices': batch['slice_indices'][i:i+1] if 'slice_indices' in batch else None,
+                        'spacing': batch['spacing'][i:i+1] if 'spacing' in batch else None,
+                        'origin': batch['origin'][i:i+1] if 'origin' in batch else None,
+                        'original_shape': batch['original_shape'][i:i+1] if 'original_shape' in batch else None,
+                    }
+                    sample_logits = logits[i:i+1] # (1, 1, D, H, W)
+                    
+                    sample_detections = self.detector.process_batch(sample_logits, sample_meta)[0]
+                    detected_nodules_list = [asdict(d) for d in sample_detections]
+
                     # Per-case statistics
                     case_stats = {
                         'idx': sample_idx,
@@ -1253,7 +1303,8 @@ class UNet3DTrainer:
                             'precision': det_m['Precision'],
                             'recall': det_m['Recall'],
                             'f1': det_m['F1']
-                        }
+                        },
+                        'detected_nodules': detected_nodules_list
                     }
                     
                     # Save per-case JSON
@@ -1305,6 +1356,19 @@ class UNet3DTrainer:
         json_path = output_dir / "test_results.json"
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
+            
+        # Save flat detections.json (for easier parsing)
+        all_detections = []
+        for sample in sample_results:
+            pid = sample['name']
+            for nodule in sample.get('detected_nodules', []):
+                nodule_copy = nodule.copy()
+                nodule_copy['patient_id'] = pid
+                all_detections.append(nodule_copy)
+        
+        with open(output_dir / "detections.json", 'w', encoding='utf-8') as f:
+            json.dump(all_detections, f, indent=2, ensure_ascii=False)
+            logger.info(f"📋 Saved {len(all_detections)} detections to detections.json")
         
         # Generate summary plots
         self._generate_test_summary_plots(summary, output_dir)
