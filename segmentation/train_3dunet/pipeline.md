@@ -120,7 +120,8 @@ REM 完整測試 (含視覺化 + GIF)
 python -m segmentation.train_3dunet.main fulltest ^
     --npz_dir cache/volume_npz ^
     --checkpoint segmentation\video_result\3dunet_train_XXXXXX\best_model.pth ^
-    --split test
+    --split test ^
+    --attention
 
 REM 跳過 GIF 輸出 (加快速度)
 python -m segmentation.train_3dunet.main fulltest ^
@@ -145,7 +146,8 @@ python -m segmentation.train_3dunet.main fulltest ^
 python -m segmentation.train_3dunet.main test ^
     --checkpoint path\to\best_model.pth ^
     --npz_dir cache/volume_npz ^
-    --split test
+    --split test ^
+    --attention
 ```
 
 ---
@@ -168,7 +170,8 @@ python -m segmentation.train_3dunet.main stats --npz_dir cache/volume_npz
 python -m segmentation.train_3dunet.main visualize ^
     --checkpoint path\to\model.pth ^
     --npz_dir cache/volume_npz ^
-    --split test
+    --split test ^
+    --attention
 ```
 
 ---

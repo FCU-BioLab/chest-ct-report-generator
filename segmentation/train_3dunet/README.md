@@ -40,8 +40,10 @@ python -m segmentation.train_3dunet.main train ^
 python -m segmentation.train_3dunet.main fulltest ^
     --npz_dir cache/volume_npz ^
     --checkpoint path\to\best_model.pth ^
-    --split test
+    --split test ^
+    --attention
 ```
+*註: 若模型使用 `--attention` 訓練，測試時必須加上此參數。*
 
 **輸出**:
 - `test_results.json`: 每個樣本的指標
@@ -59,7 +61,8 @@ python -m segmentation.train_3dunet.main fulltest ^
 ```cmd
 python -m segmentation.train_3dunet.main test ^
     --npz_dir cache/volume_npz ^
-    --checkpoint path\to\model.pth
+    --checkpoint path\to\model.pth ^
+    --attention
 ```
 
 ### 5. 統計

@@ -1638,6 +1638,7 @@ class UNet3DTrainer:
     def _generate_test_summary_plots(self, summary, output_dir):
         """Generate summary plots for test results"""
         import matplotlib.pyplot as plt
+        import json
         
         sample_results = summary['sample_results']
         
@@ -1646,6 +1647,104 @@ class UNet3DTrainer:
         ious = [s['segmentation']['iou'] if 'segmentation' in s else s.get('iou', 0) for s in sample_results]
         precisions = [s['segmentation']['precision'] if 'segmentation' in s else s.get('precision', 0) for s in sample_results]
         recalls = [s['segmentation']['recall'] if 'segmentation' in s else s.get('recall', 0) for s in sample_results]
+        
+        
+        # Identify Detection Error Cases (FP > 0 or FN > 0)
+        error_cases = []
+        clean_cases = []
+        
+        # For recalculating detection metrics
+        clean_tp_sum = 0
+        clean_fp_sum = 0
+        clean_fn_sum = 0
+        
+        # For recalculating segmentation stats (lists)
+        clean_dices = []
+        clean_ious = []
+        clean_precisions = []
+        clean_recalls = []
+        
+        for s in sample_results:
+            # Check if detection info exists
+            det = s.get('detection', {})
+            fp = det.get('FP', 0)
+            fn = det.get('FN', 0)
+            
+            if fp > 0 or fn > 0:
+                error_cases.append(s)
+            else:
+                clean_cases.append(s)
+                # Sum up TP/FP/FN for clean cases detection rate
+                clean_tp_sum += det.get('TP', 0)
+                clean_fp_sum += fp
+                clean_fn_sum += fn
+                
+                # Segmentation metrics stats
+                seg = s.get('segmentation', {})
+                clean_dices.append(seg.get('dice', 0))
+                clean_ious.append(seg.get('iou', 0))
+                clean_precisions.append(seg.get('precision', 0))
+                clean_recalls.append(seg.get('recall', 0))
+                
+        # Calculate Filtered Detection Metrics
+        # Det Rate = TP / (TP + FN)
+        if (clean_tp_sum + clean_fn_sum) > 0:
+            filt_det_rate = clean_tp_sum / (clean_tp_sum + clean_fn_sum)
+        else:
+            filt_det_rate = 0.0
+            
+        # Det Precision = TP / (TP + FP)
+        if (clean_tp_sum + clean_fp_sum) > 0:
+            filt_det_precision = clean_tp_sum / (clean_tp_sum + clean_fp_sum)
+        else:
+            filt_det_precision = 0.0
+            
+        # Det Recall = TP / (TP + FN)  (Same as Det Rate, but keeping terminology)
+        if (clean_tp_sum + clean_fn_sum) > 0:
+            filt_det_recall = clean_tp_sum / (clean_tp_sum + clean_fn_sum)
+        else:
+            filt_det_recall = 0.0
+            
+        # Det F1
+        if (filt_det_precision + filt_det_recall) > 0:
+            filt_det_f1 = 2 * (filt_det_precision * filt_det_recall) / (filt_det_precision + filt_det_recall)
+        else:
+            filt_det_f1 = 0.0
+
+        # Calculate Segmentation metrics excluding error cases
+        filtered_seg_metrics = {
+            'dice': float(np.mean(clean_dices)) if clean_dices else 0,
+            'iou': float(np.mean(clean_ious)) if clean_ious else 0,
+            'precision': float(np.mean(clean_precisions)) if clean_precisions else 0,
+            'recall': float(np.mean(clean_recalls)) if clean_recalls else 0,
+            'count': len(clean_cases)
+        }
+        
+        filtered_det_metrics = {
+            'detection_rate': float(filt_det_rate),
+            'precision': float(filt_det_precision),
+            'recall': float(filt_det_recall),  # Adding explicit recall
+            'f1': float(filt_det_f1),
+            'sum_tp': int(clean_tp_sum),
+            'sum_fp': int(clean_fp_sum),
+            'sum_fn': int(clean_fn_sum)
+        }
+        
+        # Save error cases and filtered metrics to JSON
+        error_cases_path = output_dir / 'detection_error_cases.json'
+        with open(error_cases_path, 'w') as f:
+            json.dump({
+                'criteria': 'FP > 0 or FN > 0',
+                'error_case_count': len(error_cases),
+                'total_cases': len(sample_results),
+                'clean_case_count': len(clean_cases),
+                'filtered_segmentation_metrics': filtered_seg_metrics,
+                'filtered_detection_metrics': filtered_det_metrics,
+                'error_cases': error_cases
+            }, f, indent=2)
+        logger.info(f"💾 Saved {len(error_cases)} detection error cases to {error_cases_path}")
+        logger.info(f"📈 Filtered (Clean) Seg Dice: {filtered_seg_metrics['dice']:.4f}")
+        logger.info(f"📈 Filtered (Clean) Det Rate: {filtered_det_metrics['detection_rate']:.4f}, Det F1: {filtered_det_metrics['f1']:.4f}")
         
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         

@@ -124,6 +124,7 @@ def cmd_test(args):
     config.data.npz_dir = args.npz_dir
     config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
+    config.model.use_attention = getattr(args, 'attention', False)
     config.device = args.device
     
     trainer = UNet3DTrainer(config)
@@ -146,6 +147,7 @@ def cmd_visualize(args):
     config.data.npz_dir = args.npz_dir
     config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
+    config.model.use_attention = getattr(args, 'attention', False)
     config.device = args.device
     
     trainer = UNet3DTrainer(config)
@@ -162,6 +164,7 @@ def cmd_fulltest(args):
     config.data.npz_dir = args.npz_dir
     config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
+    config.model.use_attention = getattr(args, 'attention', False)
     config.device = args.device
     config.num_workers = 0  # Avoid multiprocessing issues on Windows
     
@@ -229,6 +232,8 @@ def main():
     test.add_argument('--device', default='cuda')
     test.add_argument('--no_postprocess', action='store_true', 
                       help='Disable lung mask and postprocessing')
+    test.add_argument('--attention', action='store_true', 
+                      help='Use Attention UNet model')
     
     # FULLTEST (comprehensive test with visualization)
     fulltest = subparsers.add_parser('fulltest', help='Full test with segmentation & detection metrics + visualization')
@@ -240,6 +245,8 @@ def main():
     fulltest.add_argument('--device', default='cuda')
     fulltest.add_argument('--no_viz', action='store_true', help='Skip per-sample visualizations')
     fulltest.add_argument('--no_gif', action='store_true', help='Skip GIF animation export')
+    fulltest.add_argument('--attention', action='store_true', 
+                          help='Use Attention UNet model')
     
     # VISUALIZE
     viz = subparsers.add_parser('visualize', help='Visualize predictions vs GT for all samples')
@@ -250,6 +257,8 @@ def main():
     viz.add_argument('--image_size', type=int, default=256)
     viz.add_argument('--device', default='cuda')
     viz.add_argument('--output_dir', default=None, help='Output directory for images')
+    viz.add_argument('--attention', action='store_true', 
+                     help='Use Attention UNet model')
     
     args = parser.parse_args()
     setup_logging(args.log_level)
