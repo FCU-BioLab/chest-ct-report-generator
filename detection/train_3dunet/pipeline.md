@@ -1,6 +1,6 @@
 # 3D U-Net Segmentation Pipeline
 
-本文件詳細說明了 3D U-Net 肺結節分割模組的完整工作流程。該模組位於 `segmentation/train_3dunet` 目錄下。
+本文件詳細說明了 3D U-Net 肺結節偵測與分割模組的完整工作流程。該模組位於 `detection/train_3dunet` 目錄下。
 
 ## 總覽
 
@@ -33,7 +33,7 @@
 
 ```cmd
 REM 轉換 LNDb 數據集
-python -m segmentation.train_3dunet.main convert ^
+python -m detection.train_3dunet.main convert ^
     --dataset lndb ^
     --input_dir E:\lung_ct_lesion_dataset\LNDb ^
     --output_dir cache/volume_npz ^
@@ -41,7 +41,7 @@ python -m segmentation.train_3dunet.main convert ^
     --image_size 256
 
 REM 轉換 MSD Lung 數據集
-python -m segmentation.train_3dunet.main convert ^
+python -m detection.train_3dunet.main convert ^
     --dataset msd ^
     --input_dir E:\lung_ct_lesion_dataset\Task06_Lung ^
     --output_dir cache/volume_npz
@@ -80,7 +80,7 @@ python -m segmentation.train_3dunet.main convert ^
 
 ```cmd
 REM 基礎訓練
-python -m segmentation.train_3dunet.main train ^
+python -m detection.train_3dunet.main train ^
     --npz_dir cache/volume_npz ^
     --epochs 50 ^
     --batch_size 4 ^
@@ -88,7 +88,7 @@ python -m segmentation.train_3dunet.main train ^
     --image_size 256
 
 REM 啟用 Attention 模型 + Combined Loss
-python -m segmentation.train_3dunet.main train ^
+python -m detection.train_3dunet.main train ^
     --npz_dir cache/volume_npz ^
     --epochs 100 ^
     --attention ^
@@ -117,20 +117,20 @@ python -m segmentation.train_3dunet.main train ^
 
 ```cmd
 REM 完整測試 (含視覺化 + GIF)
-python -m segmentation.train_3dunet.main fulltest ^
+python -m detection.train_3dunet.main fulltest ^
     --npz_dir cache/volume_npz ^
-    --checkpoint segmentation\video_result\3dunet_train_XXXXXX\best_model.pth ^
+    --checkpoint detection\video_result\3dunet_train_XXXXXX\best_model.pth ^
     --split test ^
     --attention
 
 REM 跳過 GIF 輸出 (加快速度)
-python -m segmentation.train_3dunet.main fulltest ^
+python -m detection.train_3dunet.main fulltest ^
     --checkpoint path\to\model.pth ^
     --npz_dir cache/volume_npz ^
     --no_gif
 
 REM 只計算指標，不生成視覺化
-python -m segmentation.train_3dunet.main fulltest ^
+python -m detection.train_3dunet.main fulltest ^
     --checkpoint path\to\model.pth ^
     --npz_dir cache/volume_npz ^
     --no_viz
@@ -143,7 +143,7 @@ python -m segmentation.train_3dunet.main fulltest ^
 **目標**: 快速評估模型 Dice Score。
 
 ```cmd
-python -m segmentation.train_3dunet.main test ^
+python -m detection.train_3dunet.main test ^
     --checkpoint path\to\best_model.pth ^
     --npz_dir cache/volume_npz ^
     --split test ^
@@ -157,7 +157,7 @@ python -m segmentation.train_3dunet.main test ^
 查看數據集的分佈情況（樣本數、平均深度等）。
 
 ```cmd
-python -m segmentation.train_3dunet.main stats --npz_dir cache/volume_npz
+python -m detection.train_3dunet.main stats --npz_dir cache/volume_npz
 ```
 
 ---
@@ -167,7 +167,7 @@ python -m segmentation.train_3dunet.main stats --npz_dir cache/volume_npz
 生成預測對比 GT 的視覺化圖像（不計算 Detection 指標）。
 
 ```cmd
-python -m segmentation.train_3dunet.main visualize ^
+python -m detection.train_3dunet.main visualize ^
     --checkpoint path\to\model.pth ^
     --npz_dir cache/volume_npz ^
     --split test ^
@@ -179,7 +179,7 @@ python -m segmentation.train_3dunet.main visualize ^
 ## 目錄結構
 
 ```
-segmentation/train_3dunet/
+detection/train_3dunet/
 ├── main.py          # 入口程式 (CLI)
 ├── config.py        # 配置定義
 ├── preprocess.py    # 數據預處理 (ETL)
