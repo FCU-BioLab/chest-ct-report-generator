@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 import torch
+import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
-from PIL import Image
-import scipy.ndimage
 import warnings
 
 logger = logging.getLogger(__name__)
@@ -31,26 +31,29 @@ class VolumetricDataset(Dataset):
         image_size: int = 256, # 3D U-Net usually works on smaller patches to fit in memory
         max_depth: int = 32,
         augmentation: bool = False,
+        split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
+        split_seed: int = 42,
     ):
         self.npz_dir = Path(npz_dir)
         self.split = split
         self.image_size = image_size
         self.max_depth = max_depth
         self.augmentation = augmentation
+        self.split_ratios = split_ratios
+        self.split_seed = split_seed
         
         # Load file list
         self.samples = self._load_file_list()
         logger.info(f"📹 Loading {len(self.samples)} samples (split={split})")
     
     def _load_file_list(self) -> List[Path]:
-        split_dir = self.npz_dir / self.split
-        if not split_dir.exists():
-            split_dir = self.npz_dir
-        
-        npz_files = sorted(split_dir.glob("*.npz"))
-        if not npz_files:
-            logger.warning(f"⚠️ No NPZ files found in: {split_dir}")
-        return npz_files
+        from .utils import get_split_files
+        return get_split_files(
+            npz_dir=self.npz_dir,
+            split=self.split,
+            ratios=self.split_ratios,
+            seed=self.split_seed
+        )
     
     def __len__(self) -> int:
         return len(self.samples)
@@ -95,46 +98,40 @@ class VolumetricDataset(Dataset):
         origin = data.get('origin')
         original_shape = data.get('original_shape')
         
-        # Truncate/Pad to max_depth
+        
+        # Determine crop range
         D = len(frames)
+        start, end = 0, D
+        
         if D > self.max_depth:
-            # Crop around center
             half = self.max_depth // 2
             start = max(0, center_idx - half)
             end = min(D, start + self.max_depth)
-            # Adjust if at boundaries
             if end - start < self.max_depth:
-                if start == 0:
-                    end = min(D, self.max_depth)
-                elif end == D:
-                    start = max(0, D - self.max_depth)
-            
-            frames = frames[start:end]
-            masks = masks[start:end]
-            if slice_indices is not None:
-                slice_indices = slice_indices[start:end]
+                if start == 0: end = min(D, self.max_depth)
+                elif end == D: start = max(0, D - self.max_depth)
         
-        # Resize
-        frames, masks = self._resize_video(frames, masks)
+        # Crop (numpy)
+        frames = frames[start:end]
+        masks = masks[start:end]
+        if slice_indices is not None:
+             slice_indices = slice_indices[start:end]
+
+        # Convert to Tensor (Float) immediately
+        # (D, H, W) -> (1, D, H, W) normalized [0,1]
+        frames_t = torch.from_numpy(frames).float().unsqueeze(0) / 255.0
+        masks_t = torch.from_numpy(masks).float().unsqueeze(0)
         
-        # Augmentation (ToDo)
+        # Resize using torch (much faster than PIL loop)
+        frames_t, masks_t = self._resize_video_torch(frames_t, masks_t)
+        
+        # Augmentation (Torch)
         if self.augmentation and self.split == "train":
-            frames, masks = self._augment(frames, masks)
-        
-        # Normalize to 0-1
-        frames = frames.astype(np.float32) / 255.0
-        
-        # To Tensor (1, D, H, W)
-        # Ensure positive strides for torch
-        frames = np.ascontiguousarray(frames)
-        masks = np.ascontiguousarray(masks)
-        
-        frames_tensor = torch.from_numpy(frames).unsqueeze(0)
-        masks_tensor = torch.from_numpy(masks).long().unsqueeze(0)
+            frames_t, masks_t = self._augment_torch(frames_t, masks_t)
         
         result = {
-            'image': frames_tensor,
-            'mask': masks_tensor,
+            'image': frames_t,         # (1, D, H, W)
+            'mask': masks_t.long(),    # (1, D, H, W)
             'patient_id': str(data.get('patient_id', '')),
             'lesion_id': int(data.get('lesion_id', 0)),
             'npz_path': str(npz_path)
@@ -152,113 +149,62 @@ class VolumetricDataset(Dataset):
             
         return result
     
-    def _resize_video(self, frames, masks):
-        D, H, W = frames.shape
+    def _resize_video_torch(self, frames, masks):
+        """
+        Resize using torch interpolation.
+        Input: (C, D, H, W)
+        """
+        D, H, W = frames.shape[1], frames.shape[2], frames.shape[3]
         if H == self.image_size and W == self.image_size:
             return frames, masks
-        
-        r_frames = np.zeros((D, self.image_size, self.image_size), dtype=frames.dtype)
-        r_masks = np.zeros((D, self.image_size, self.image_size), dtype=masks.dtype)
-        
-        for i in range(D):
-            f_img = Image.fromarray(frames[i])
-            m_img = Image.fromarray(masks[i])
-            r_frames[i] = np.array(f_img.resize((self.image_size, self.image_size), Image.BILINEAR))
-            r_masks[i] = np.array(m_img.resize((self.image_size, self.image_size), Image.NEAREST))
             
-        return r_frames, r_masks
+        # F.interpolate takes (N, C, D, H, W) or (N, C, H, W)
+        # Here we have (1, D, H, W) -> Treat as (1, D, H, W) or usually (N, C, D, H, W)
+        # For simple 2D resizing on D slices, we can merge N and D or use 3D interpolate
+        
+        # 3D Interpolation causes depth mixing? No, if we use trilinear it mixes.
+        # We want to resize H, W only, keeping D intact.
+        # Reshape to (D, C, H, W) -> (D, 1, H, W)
+        
+        f_in = frames.permute(1, 0, 2, 3) # (D, 1, H, W)
+        m_in = masks.permute(1, 0, 2, 3)  # (D, 1, H, W)
+        
+        # Bilinear for image
+        f_out = F.interpolate(f_in, size=(self.image_size, self.image_size), mode='bilinear', align_corners=False)
+        # Nearest for mask
+        m_out = F.interpolate(m_in, size=(self.image_size, self.image_size), mode='nearest')
+        
+        # Permute back to (1, D, H, W)
+        return f_out.permute(1, 0, 2, 3), m_out.permute(1, 0, 2, 3)
 
-    def _augment(self, frames, masks):
+    def _augment_torch(self, frames, masks):
         """
-        3D Data Augmentation
-        - Random Flip (H/V)
-        - Random Rotate (-15, 15 degrees)
-        - Random Scale (0.8, 1.2)
-        - Random Intensity Shift
+        Fast GPU-ready augmentation using Torch tensors
         """
         # 1. Flip
         if np.random.rand() > 0.5:
-            frames = np.flip(frames, axis=2) # Horizontal
-            masks = np.flip(masks, axis=2)
+            frames = torch.flip(frames, dims=[3]) # Horizontal (W)
+            masks = torch.flip(masks, dims=[3])
         if np.random.rand() > 0.5:
-            frames = np.flip(frames, axis=1) # Vertical
-            masks = np.flip(masks, axis=1)
+            frames = torch.flip(frames, dims=[2]) # Vertical (H)
+            masks = torch.flip(masks, dims=[2])
             
-        # 2. Random Rotate (affine on H-W plane)
-        # We rotate the whole volume along the Z-axis (depth)
+        # 2. Intensity Shift (offset)
         if np.random.rand() > 0.5:
-            angle = np.random.uniform(-15, 15)
-            # scipy.ndimage.rotate rotates in the plane defined by axes. axes=(1,2) is H-W plane
-            # reshape=False to keep original size
-            frames = scipy.ndimage.rotate(frames, angle, axes=(1, 2), reshape=False, mode='nearest')
-            masks = scipy.ndimage.rotate(masks, angle, axes=(1, 2), reshape=False, order=0, mode='constant', cval=0)
+            shift = (np.random.rand() * 0.2 - 0.1) # -0.1 to 0.1
+            frames = torch.clamp(frames + shift, 0.0, 1.0)
             
-        # 3. Random Scale (Zoom)
+        # 3. Simple 90 degree rotations (fast, no artifacts)
+        # Replacing slow scipy rotation with simple 90deg steps
         if np.random.rand() > 0.5:
-            scale = np.random.uniform(0.8, 1.2)
-            # We want to scale H and W, but keep D same usually, or scale all? 
-            # Usually for fixed input size models, scaling is tricky if we don't pad/crop back.
-            # But here we resize AFTER augmentation? No, wait.
-            # The pipeline is: Load -> Crop Depth -> Resize -> Augment -> Normalize.
-            # So frames is (D, 256, 256).
-            # If we zoom, the shape changes. We must crop or pad back to 256x256.
+            k = np.random.randint(1, 4) # 1, 2, or 3
+            frames = torch.rot90(frames, k, dims=[2, 3])
+            masks = torch.rot90(masks, k, dims=[2, 3])
             
-            # Let's use a simpler approach for now: modifying the resize step or just doing random crop/pad is standard.
-            # But since we already resized, doing affine zoom means we crop center or pad.
-            
-            # Using scipy zoom
-            # Zoom factors: (1, scale, scale) -> Keep depth, scale spatial
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                frames_zoomed = scipy.ndimage.zoom(frames, (1, scale, scale), order=1)
-                masks_zoomed = scipy.ndimage.zoom(masks, (1, scale, scale), order=0)
-            
-            # Crop or Pad back to (D, 256, 256)
-            d, h, w = frames.shape
-            zd, zh, zw = frames_zoomed.shape
-            
-            # Create container
-            new_frames = np.zeros_like(frames)
-            new_masks = np.zeros_like(masks)
-            
-            # Calculate offsets to center
-            dh = (zh - h) // 2
-            dw = (zw - w) // 2
-            
-            # Source slice
-            src_y1 = max(0, dh)
-            src_y2 = min(zh, dh + h)
-            src_x1 = max(0, dw)
-            src_x2 = min(zw, dw + w)
-            
-            # Target slice
-            dst_y1 = max(0, -dh)
-            dst_y2 = min(h, h - dh) # This logic can be tricky, let's simplify:
-            
-            # If zoomed in (scale > 1), crop center.
-            if scale > 1.0:
-                 start_y = (zh - h) // 2
-                 start_x = (zw - w) // 2
-                 new_frames = frames_zoomed[:, start_y:start_y+h, start_x:start_x+w]
-                 new_masks = masks_zoomed[:, start_y:start_y+h, start_x:start_x+w]
-            else:
-                # If zoomed out (scale < 1), pad center
-                start_y = (h - zh) // 2
-                start_x = (w - zw) // 2
-                new_frames[:, start_y:start_y+zh, start_x:start_x+zw] = frames_zoomed
-                new_masks[:, start_y:start_y+zh, start_x:start_x+zw] = masks_zoomed
-                
-            frames = new_frames
-            masks = new_masks
-
-        # 4. Intensity Shift
-        if np.random.rand() > 0.5:
-            shift = np.random.uniform(-0.1, 0.1) * 255.0 # Since it's still 0-255 range here roughly?
-            # Actually input is uint8? No, let's check.
-            # In __getitem__, frames is loaded from npz. Preprocess saves as uint8. 
-            # So frames is uint8 (0-255).
-            frames = frames.astype(np.float32) + shift
-            frames = np.clip(frames, 0, 255) # Keep in range
+        # Note: Removing Affine (Rotate/Scale) for now as it's complex to implement purely in Torch 
+        # without introducing interpolation artifacts or needing GridSample logic, 
+        # which is overkill if speed is the priority. 
+        # Rot90 + Flips covers 8 symmetries which is good for medical data.
         
         return frames, masks
 

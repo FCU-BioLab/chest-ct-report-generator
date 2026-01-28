@@ -209,21 +209,21 @@ class NoduleDetector:
                             vol_slice_indices.append(int(slice_indices[z]))
                 
                 geo = NoduleGeometry(
-                    centroid_xyz=centroid,
-                    centroid_world=centroid_world,
-                    bbox=(z_min, y_min, x_min, z_max, y_max, x_max),
-                    volume_mm3=vol_mm3,
-                    diameter_mm=diameter_mm,
-                    voxel_count=region.area
+                    centroid_xyz=tuple(float(c) for c in centroid),
+                    centroid_world=tuple(float(c) for c in centroid_world),
+                    bbox=(int(z_min), int(y_min), int(x_min), int(z_max), int(y_max), int(x_max)),
+                    volume_mm3=float(vol_mm3),
+                    diameter_mm=float(diameter_mm),
+                    voxel_count=int(region.area)
                 )
                 
                 nodule = DetectedNodule(
-                    id=region.label,
-                    probability=region.mean_intensity, # Mean prob in region
+                    id=int(region.label),
+                    probability=float(region.mean_intensity), # Mean prob in region
                     location=location,
                     geometry=geo,
-                    slice_range=z_range_local,
-                    slice_indices=vol_slice_indices
+                    slice_range=(int(z_range_local[0]), int(z_range_local[1])),
+                    slice_indices=[int(idx) for idx in vol_slice_indices]
                 )
                 
                 sample_detections.append(nodule)
