@@ -43,14 +43,11 @@ class NPZVisualizer:
     
     def _load_samples(self) -> List[Path]:
         """Load sample list from split directory"""
-        split_dir = self.npz_dir / self.split
-        if not split_dir.exists():
-            split_dir = self.npz_dir
-        
-        npz_files = sorted(split_dir.glob("*.npz"))
-        if not npz_files:
-            logger.warning(f"⚠️ No NPZ files found in: {split_dir}")
-        return npz_files
+        from .utils import get_split_files
+        return get_split_files(
+            npz_dir=self.npz_dir,
+            split=self.split
+        )
     
     def load_sample(self, idx: int) -> dict:
         """Load a single sample"""
@@ -811,33 +808,12 @@ class DatasetVisualizer:
         plt.close()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Visualize 3D U-Net Training Data")
-    parser.add_argument("--npz_dir", type=str, default="cache/volume_npz",
-                        help="Directory containing NPZ files")
-    parser.add_argument("--split", type=str, default="train", choices=["train", "val", "test"],
-                        help="Data split to visualize")
-    parser.add_argument("--mode", type=str, default="stats",
-                        choices=["stats", "view", "interactive", "browse", "batch", "gif",
-                                 "dataset", "dataset_view", "dataset_batch", "dataset_augment"],
-                        help="Visualization mode. Use 'dataset*' modes to see data as fed to training")
-    parser.add_argument("--idx", type=int, default=0,
-                        help="Sample index for view/interactive/gif modes")
-    parser.add_argument("--n_samples", type=int, default=9,
-                        help="Number of samples for batch mode")
-    parser.add_argument("--n_augments", type=int, default=4,
-                        help="Number of augmented versions to show in dataset_augment mode")
-    parser.add_argument("--save", type=str, default=None,
-                        help="Save path for output image/gif")
-    parser.add_argument("--image_size", type=int, default=256,
-                        help="Image size for dataset modes (should match training config)")
-    parser.add_argument("--max_depth", type=int, default=32,
-                        help="Max depth for dataset modes (should match training config)")
-    
-    args = parser.parse_args()
-    
+def run_visualization(args):
+    """Execute visualization based on arguments"""
     # Dataset modes - show data as fed to training
     if args.mode.startswith("dataset"):
+        from .visualize import DatasetVisualizer # Import here to avoid circular dependency if needed
+        # Or just use the class defined in this file (which is safe)
         viz = DatasetVisualizer(args.npz_dir, args.split, args.image_size, args.max_depth)
         
         if args.mode == "dataset":
@@ -872,6 +848,31 @@ def main():
         save_path = args.save or f"sample_{args.idx:04d}.gif"
         viz.export_gif(args.idx, save_path)
 
+def main():
+    parser = argparse.ArgumentParser(description="Visualize 3D U-Net Training Data")
+    parser.add_argument("--npz_dir", type=str, default="cache/volume_npz",
+                        help="Directory containing NPZ files")
+    parser.add_argument("--split", type=str, default="train", choices=["train", "val", "test"],
+                        help="Data split to visualize")
+    parser.add_argument("--mode", type=str, default="stats",
+                        choices=["stats", "view", "interactive", "browse", "batch", "gif",
+                                 "dataset", "dataset_view", "dataset_batch", "dataset_augment"],
+                        help="Visualization mode. Use 'dataset*' modes to see data as fed to training")
+    parser.add_argument("--idx", type=int, default=0,
+                        help="Sample index for view/interactive/gif modes")
+    parser.add_argument("--n_samples", type=int, default=9,
+                        help="Number of samples for batch mode")
+    parser.add_argument("--n_augments", type=int, default=4,
+                        help="Number of augmented versions to show in dataset_augment mode")
+    parser.add_argument("--save", type=str, default=None,
+                        help="Save path for output image/gif")
+    parser.add_argument("--image_size", type=int, default=256,
+                        help="Image size for dataset modes (should match training config)")
+    parser.add_argument("--max_depth", type=int, default=32,
+                        help="Max depth for dataset modes (should match training config)")
+    
+    args = parser.parse_args()
+    run_visualization(args)
 
 if __name__ == "__main__":
     main()

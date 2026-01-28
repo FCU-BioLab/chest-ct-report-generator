@@ -19,19 +19,20 @@ class DataConfig:
     msd_dir: str = ""   # MSD Lung dataset directory
     npz_dir: str = "../../cache/video_npz"  # NPZ output directory
     
+    # Split
+    train_ratio: float = 0.7
+    val_ratio: float = 0.15
+    test_ratio: float = 0.15
+    split_seed: int = 42
+    
     # Volume parameters
-    context_slices: int = 6  # Slices before/after center
+    context_slices: int = 32  # Slices before/after center
     min_depth: int = 5
     max_depth: int = 32  # Limited by memory, usually 16-32 for 3D U-Net
     
     # Filtering
     min_nodule_diameter: float = 4.0  # mm
     max_nodule_diameter: float = 100.0  # mm
-    
-    # Split
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
     
     # Cache
     use_cache: bool = True
@@ -88,7 +89,17 @@ class TrainingConfig:
     # Hardware
     use_amp: bool = True
     grad_clip: float = 1.0
+    grad_clip: float = 1.0
     accumulation_steps: int = 1
+
+
+@dataclass
+class PostProcessingConfig:
+    """Post-processing and detection thresholds"""
+    det_threshold: float = 0.5  # Probability threshold
+    det_min_size: float = 30.0  # mm^3
+    apply_closing: bool = True
+
 
 
 @dataclass
@@ -97,13 +108,15 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    postprocessing: PostProcessingConfig = field(default_factory=PostProcessingConfig)
+
     
     # Experiment
     experiment_name: str = "unet3d_volume"
     output_dir: str = ""  # Will be set with timestamp in __post_init__
     seed: int = 42
     device: str = "cuda"
-    num_workers: int = 4
+    num_workers: int = 0
     
     def __post_init__(self):
         if not self.output_dir:
@@ -116,8 +129,11 @@ class Config:
         config_dict = {
             'data': self.data.__dict__,
             'model': self.model.__dict__,
+            'model': self.model.__dict__,
             'training': self.training.__dict__,
+            'postprocessing': self.postprocessing.__dict__,
             'experiment_name': self.experiment_name,
+
             'output_dir': self.output_dir,
             'seed': self.seed,
             'device': self.device,
@@ -136,8 +152,11 @@ class Config:
         config = cls()
         config.data = DataConfig(**config_dict.get('data', {}))
         config.model = ModelConfig(**config_dict.get('model', {}))
+        config.model = ModelConfig(**config_dict.get('model', {}))
         config.training = TrainingConfig(**config_dict.get('training', {}))
+        config.postprocessing = PostProcessingConfig(**config_dict.get('postprocessing', {}))
         config.experiment_name = config_dict.get('experiment_name', 'unet3d_video')
+
         config.output_dir = config_dict.get('output_dir', 'video_output_unet3d')
         config.seed = config_dict.get('seed', 42)
         config.device = config_dict.get('device', 'cuda')

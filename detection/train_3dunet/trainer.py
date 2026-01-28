@@ -9,6 +9,7 @@ Trainer logic for 3D U-Net.
 import logging
 import os
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
 import torch
@@ -547,7 +548,11 @@ class UNet3DTrainer:
             self.use_combined_loss = False
         
         # Detector
-        self.detector = NoduleDetector(threshold=0.5, min_size_mm3=30.0)
+        # Detector
+        self.detector = NoduleDetector(
+            threshold=getattr(config.postprocessing, 'det_threshold', 0.5), 
+            min_size_mm3=getattr(config.postprocessing, 'det_min_size', 30.0)
+        )
         
         # Datasets
         self.train_loader = self._create_loader("train", shuffle=True)
@@ -590,7 +595,9 @@ class UNet3DTrainer:
             shuffle=shuffle,
             num_workers=self.config.num_workers,
             collate_fn=collate_video_batch,
-            pin_memory=True
+            pin_memory=True,
+            persistent_workers=(self.config.num_workers > 0),
+            prefetch_factor=2 if self.config.num_workers > 0 else None
         )
 
     def export_dataset_info(self):
@@ -1214,10 +1221,20 @@ class UNet3DTrainer:
                     prob_np = probs[i, 0].cpu().numpy()
                     
                     # Predictions
-                    pred_raw = (prob_np > 0.5).astype(np.uint8)
+                    # Calculate min size in voxels
+                    spacing = batch['spacing'][i].cpu().numpy()
+                    voxel_vol = np.prod(spacing)
+                    min_vol_mm3 = getattr(self.config.postprocessing, 'det_min_size', 30.0)
+                    min_voxels = int(min_vol_mm3 / voxel_vol) if voxel_vol > 0 else 5
+                    
+                    # Predictions with config values
+                    thresh = getattr(self.config.postprocessing, 'det_threshold', 0.5)
+                    do_closing = getattr(self.config.postprocessing, 'apply_closing', True)
+
+                    pred_raw = (prob_np > thresh).astype(np.uint8)
                     pred_post = postprocess_prediction(
-                        prob_np, lung_mask=None, threshold=0.5,
-                        min_size_voxels=5, apply_closing=True
+                        prob_np, lung_mask=None, threshold=thresh,
+                        min_size_voxels=min_voxels, apply_closing=do_closing
                     )
                     
                     # Run Nodule Detector
@@ -1372,6 +1389,45 @@ class UNet3DTrainer:
         
         # Generate summary plots
         self._generate_test_summary_plots(summary, output_dir)
+
+        # Extract FP/FN cases for analysis
+        try:
+            logger.info("🔍 Coping FP/FN cases for analysis...")
+            analysis_dir = output_dir / "analysis_fp_fn"
+            fp_dir = analysis_dir / "FP"
+            fn_dir = analysis_dir / "FN"
+            
+            if analysis_dir.exists():
+                shutil.rmtree(analysis_dir)
+            fp_dir.mkdir(parents=True, exist_ok=True)
+            fn_dir.mkdir(parents=True, exist_ok=True)
+            
+            fp_count = 0
+            fn_count = 0
+            
+            for sample in sample_results:
+                idx = sample['idx']
+                name = sample['name']
+                folder_name = f"{idx:03d}_{name}"
+                src_path = viz_dir / folder_name
+                
+                if not src_path.exists():
+                    continue
+                    
+                detection = sample.get('detection', {})
+                # Copy to FP folder if has FP
+                if detection.get('FP', 0) > 0:
+                    shutil.copytree(src_path, fp_dir / folder_name)
+                    fp_count += 1
+                
+                # Copy to FN folder if has FN
+                if detection.get('FN', 0) > 0:
+                    shutil.copytree(src_path, fn_dir / folder_name)
+                    fn_count += 1
+            
+            logger.info(f"✅ Copied {fp_count} FP cases and {fn_count} FN cases to {analysis_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to copy FP/FN cases: {e}")
         
         # Log results
         logger.info(f"\n{'='*70}")

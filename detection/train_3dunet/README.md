@@ -1,6 +1,6 @@
-# 3D U-Net 體積分割 (Volume Segmentation)
+# 肺結節偵測模組 (Nodule Detection Module)
 
-本模組實現了基於 3D U-Net 的肺結節/病灶體積分割，使用視頻（切片序列）數據進行訓練。
+本模組實現了基於 3D U-Net 的肺結節偵測與分割系統。除了精確分割病灶體積外，還包含完整的後處理流程，能輸出結構化的病灶報告（包含解剖位置、體積、直徑與信心度）。
 
 ## 快速開始 (Quick Start)
 
@@ -9,11 +9,12 @@
 將 LNDb 或 MSD 數據集轉換為 NPZ 體積格式：
 
 ```cmd
+REM 使用 Full Volume 轉換
 python -m detection.train_3dunet.main convert ^
     --dataset lndb ^
     --input_dir E:\lung_ct_lesion_dataset\LNDb ^
     --output_dir cache/volume_npz ^
-    --context_slices 16 ^
+    --full_volume ^
     --image_size 256
 ```
 
@@ -25,30 +26,41 @@ python -m detection.train_3dunet.main train ^
     --epochs 100 ^
     --batch_size 4 ^
     --attention ^
+    --train_ratio 0.8 ^
+    --val_ratio 0.1 ^
+    --test_ratio 0.1 ^
+    --split_seed 42 ^
     --loss_type combined
 ```
 
 **參數說明**:
 - `--attention`: 啟用 SE Block + Attention Gate
 - `--loss_type`: `combined`(預設) / `tversky` / `dice`
+- `--split_seed`: 分割數據集的隨機種子
+- `--train_ratio` (等): 訓練/驗證/測試集比例
 
-### 3. 完整測試
+### 3. 完整測試 (含偵測報告)
 
-運行完整測試，生成視覺化報告和 GIF 動畫：
+運行完整測試，生成視覺化報告、GIF 動畫及偵測指標：
 
 ```cmd
 python -m detection.train_3dunet.main fulltest ^
     --npz_dir cache/volume_npz ^
     --checkpoint path\to\best_model.pth ^
     --split test ^
-    --attention
+    --attention ^
+    --det_prob_threshold 0.9 ^
+    --det_min_size 1.0
 ```
-*註: 若模型使用 `--attention` 訓練，測試時必須加上此參數。*
+*註: `det_prob_threshold 0.9` 與 `det_min_size 1.0` 為實驗驗證後的最佳參數，能在保留小結節的同時過濾誤報。*
 
-**輸出**:
-- `test_results.json`: 每個樣本的指標
+**輸出內容**:
+- `test_results.json`: 每個樣本的指標 (Dice, IoU, Precision, Recall)
+- `detections.json`: **所有偵測到的結節總表** (含解剖位置與幾何資訊)
 - `test_summary.png`: 彙總統計圖
-- 每個 Case 的 `animation.gif`: Overlay GIF 動畫
+- 每個 Case 資料夾:
+  - `animation.gif`: Overlay GIF 動畫
+  - `stats.json`: 該案例的詳細偵測數據
 
 **選項**:
 - `--no_gif`: 跳過 GIF 輸出
@@ -83,6 +95,8 @@ python -m detection.train_3dunet.main stats --npz_dir cache/volume_npz
 | `buildingblocks.py` | 模型組件 (SE, Attention Gate) |
 | `dataset.py` | PyTorch Dataset |
 | `trainer.py` | 訓練/測試邏輯 |
+| `detector.py` | 結節偵測與後處理 (NoduleDetector) |
+| `location_estimator.py` | 肺葉位置估算 |
 | `preprocess.py` | 數據轉換 (LNDb/MSD → NPZ) |
 | `visualize.py` | 數據視覺化工具 |
 | `pipeline.md` | 詳細 Pipeline 說明 |
