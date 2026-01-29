@@ -39,6 +39,15 @@ class DetectedNodule:
     geometry: NoduleGeometry
     slice_range: Tuple[int, int]
     slice_indices: List[int] # Absolute slice indices in original scan
+    match_status: Optional[str] = None # TP, FP, or None
+
+@dataclass
+class GroundTruthNodule:
+    id: int
+    geometry: NoduleGeometry
+    slice_range: Tuple[int, int]
+    slice_indices: List[int]
+    match_status: Optional[str] = None # Matched (TP) or Missed (FN)
 
 class NoduleDetector:
     def __init__(self, 
@@ -233,3 +242,94 @@ class NoduleDetector:
             all_detections.append(sample_detections)
             
         return all_detections
+
+    def analyze_gt(self, 
+                   gt_mask: torch.Tensor, 
+                   batch_metadata: Dict) -> List[List[GroundTruthNodule]]:
+        """
+        Analyze Ground Truth masks to extract nodule properties (for FN analysis).
+        
+        Args:
+            gt_mask: (B, 1, D, H, W) GT mask
+            batch_metadata: Dictionary containing 'slice_indices', 'spacing', 'origin', 'original_shape'
+        
+        Returns:
+            List of lists, where each inner list contains GT nodules for one sample.
+        """
+        all_gt_nodules = []
+        batch_size = gt_mask.shape[0]
+        
+        # Move to CPU
+        masks_np = gt_mask.cpu().numpy()
+        
+        slice_indices_batch = batch_metadata.get('slice_indices')
+        spacings_batch = batch_metadata.get('spacing')
+        origins_batch = batch_metadata.get('origin')
+        
+        for i in range(batch_size):
+            sample_nodules = []
+            mask_vol = masks_np[i, 0].astype(np.uint8)
+            
+            if mask_vol.sum() == 0:
+                all_gt_nodules.append([])
+                continue
+                
+            # Connected Components
+            labels = measure.label(mask_vol)
+            regions = measure.regionprops(labels)
+            
+            # Metadata
+            spacing = spacings_batch[i].numpy() if spacings_batch is not None else np.array([1.0, 1.0, 1.0])
+            origin = origins_batch[i].numpy() if origins_batch is not None else np.array([0.0, 0.0, 0.0])
+            slice_indices = slice_indices_batch[i].numpy() if slice_indices_batch is not None else None
+            
+            voxel_vol_mm3 = np.prod(spacing)
+            
+            for region in regions:
+                vol_mm3 = region.area * voxel_vol_mm3
+                diameter_mm = 2 * (3 * vol_mm3 / (4 * np.pi))**(1/3)
+                
+                # Geometry
+                z_min, y_min, x_min, z_max, y_max, x_max = region.bbox
+                centroid = region.centroid
+                
+                centroid_world = (
+                    origin[0] + centroid[2] * spacing[2],
+                    origin[1] + centroid[1] * spacing[1],
+                    origin[2] + centroid[0] * spacing[0]
+                )
+                
+                geo = NoduleGeometry(
+                    centroid_xyz=tuple(float(c) for c in centroid),
+                    centroid_world=tuple(float(c) for c in centroid_world),
+                    bbox=(int(z_min), int(y_min), int(x_min), int(z_max), int(y_max), int(x_max)),
+                    volume_mm3=float(vol_mm3),
+                    diameter_mm=float(diameter_mm),
+                    voxel_count=int(region.area)
+                )
+                
+                 # Slice Range (Local)
+                z_range_local = (z_min, z_max)
+                # Slice Indices (Absolute)
+                vol_slice_indices = []
+                if slice_indices is not None:
+                    # Collect valid indices in range
+                    for z in range(z_min, z_max):
+                        if z < len(slice_indices) and slice_indices[z] != -1:
+                            vol_slice_indices.append(int(slice_indices[z]))
+                
+                nodule = GroundTruthNodule(
+                    id=int(region.label),
+                    geometry=geo,
+                    slice_range=(int(z_range_local[0]), int(z_range_local[1])),
+                    slice_indices=[int(idx) for idx in vol_slice_indices],
+                    match_status="Missed" # Default to Missed, update to Matched later
+                )
+                
+                sample_nodules.append(nodule)
+            
+            # Sort by size
+            sample_nodules.sort(key=lambda x: x.geometry.volume_mm3, reverse=True)
+            all_gt_nodules.append(sample_nodules)
+            
+        return all_gt_nodules

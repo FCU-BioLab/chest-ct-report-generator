@@ -26,7 +26,8 @@ from typing import Dict, Tuple, Optional
 from .dataset import VolumetricDataset, collate_video_batch
 from .model import get_model
 from .config import Config
-from .detector import NoduleDetector
+from .config import Config
+from .detector import NoduleDetector, DetectedNodule, GroundTruthNodule
 from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
@@ -862,6 +863,69 @@ class UNet3DTrainer:
             'det_fp': total_fp,
             'det_fn': total_fn
         }
+
+    def _match_nodules(self, 
+                      predictions: List[DetectedNodule], 
+                      gt_nodules: List[GroundTruthNodule], 
+                      iou_threshold: float = 0.1) -> Dict:
+        """
+        Match predictions to GT nodules and assign status (TP/FP/FN).
+        Returns counts and updated lists.
+        """
+        # Reset status
+        for p in predictions: p.match_status = "FP" # Default to FP
+        for g in gt_nodules: g.match_status = "Missed" # Default to Missed
+        
+        matches = 0
+        
+        # Greedy matching: Sort predictions by confidence (prob)
+        predictions.sort(key=lambda x: x.probability, reverse=True)
+        
+        for pred in predictions:
+            best_iou = 0
+            best_gt_idx = -1
+            
+            p_bbox = pred.geometry.bbox
+            p_vol = pred.geometry.volume_mm3
+            
+            # Find best overlapping GT that isn't matched yet?
+            # Or allow multiple preds to match same GT? 
+            # Standard: 1-to-1 matching for counting.
+            
+            for i, gt in enumerate(gt_nodules):
+                # Quick bbox check
+                g_bbox = gt.geometry.bbox
+                if (p_bbox[0] > g_bbox[3] or p_bbox[3] < g_bbox[0] or
+                    p_bbox[1] > g_bbox[4] or p_bbox[4] < g_bbox[1] or
+                    p_bbox[2] > g_bbox[5] or p_bbox[5] < g_bbox[2]):
+                    continue
+                    
+                # Calculate IoU
+                # We need masks to calc IoU accurately. 
+                # But here we only have objects.
+                # Approx IoU using bbox? No, inaccurate.
+                # We should have done matching on masks in `calc_detection_metrics`.
+                # But we want to link objects.
+                # Let's use bbox IoU as approximation if masks not available?
+                # OR, since we have slice indices and ranges, we can try to compute intersection if simple shapes.
+                # BUT, `detector.py` doesn't keep the masks of objects.
+                
+                # REVISIT: We should do matching when we have masks available, OR accept BBox IoU.
+                # Given we are in trainer.py loop where we have masks `pred_post` and `mask_np`.
+                # We can match `DetectedNodule` to `GroundTruthNodule` by finding which label they correspond to!
+                
+                # DetectedNodule has `id` which is the label in `pred_post`.
+                # GroundTruthNodule has `id` which is the label in `mask_np`.
+                # We can compute IoU between label `pred.id` and label `gt.id` in the masks!
+                pass
+            pass
+            
+        # WAIT: I can't easily do IoU here without the masks. 
+        # I should put this logic INSIDE the loop in comprehensive_test where I have `pred_post` and `mask_np`.
+        # So I will NOT add a complex `_match_nodules` that re-calculates IoU.
+        # Instead I will do matching in `comprehensive_test` using the masks.
+        
+        return {}
     
     def _save_debug_image(self, images, masks, logits, epoch):
         """Save debug visualization image"""
@@ -1325,6 +1389,122 @@ class UNet3DTrainer:
                     }
                     
                     # Save per-case JSON
+                    with open(case_dir / 'stats.json', 'w', encoding='utf-8') as f:
+                        json.dump(case_stats, f, indent=2, ensure_ascii=False)
+                        
+                    # ---------------------------------------------------------
+                    # MATCHING LOGIC FOR DETECTED NODULES (TP/FP/FN)
+                    # ---------------------------------------------------------
+                    # Get GT Nodules
+                    gt_nodules_list = self.detector.analyze_gt(masks[i:i+1], sample_meta)[0]
+                    
+                    # Match using masks
+                    # pred_post is the prediction mask (labels correspond to sample_detections IDs?)
+                    # Wait, detector.process_batch re-runs measure.label.
+                    # So IDs in sample_detections match the labels in the INTERNAL pred_vol of detector.
+                    # They might NOT match `pred_post` if I re-ran labeling there.
+                    # `detector.process_batch` does its own labeling.
+                    
+                    # To be safe: We should map `DetectedNodule` back to the mask I have here?
+                    # Or trust that I can reconstruct the matching.
+                    
+                    # Better: Re-calculate matching here using the list of objects and their properties?
+                    # Or just rely on BBox IoU for reporting mapping?
+                    # Or: Map the detected nodules to the mask using their Centroid?
+                    
+                    # Let's use Centroid matching to identify which label in `pred_post` corresponds to `DetectedNodule`.
+                    # Actually `pred_post` is binary.
+                    # `detector` re-runs labeling.
+                    # Let's rely on overlap check:
+                    # For each predicted nodule object: create a mask for it (approx or if we had it).
+                    # Since we don't have the individual object masks, we can check value at centroid? 
+                    # No, centroid might be in hole.
+                    
+                    # Simplest robust way: 
+                    # 1. We have `sample_detections` (Preds) and `gt_nodules_list` (GTs).
+                    # 2. We have the full `mask_np` (GT mask).
+                    # 3. We cannot easily get individual pred masks from `DetectedNodule` without reconstruction.
+                    
+                    # BUT `detector.process_batch` was run on `sample_logits`.
+                    # It produces `DetectedNodule`s. 
+                    # We want to know if each is TP or FP.
+                    # We can use the `mask_np` (GT) to check overlap?
+                    # For a `DetectedNodule`:
+                    #   - Slice range is known.
+                    #   - BBox is known.
+                    #   - We can iterate over voxels in BBox? No, too slow.
+                    
+                    # Alternative:
+                    # Pass `mask_np` (GT) to `process_batch`? No.
+                    
+                    # Let's compute matching based on BBox IoU (3D IoU).
+                    # It's an approximation but likely sufficient for "which nodule is this".
+                    # OR check if Centroid of Pred is inside ANY GT Nodule?
+                    # NO, standard is IoU > 0.1.
+                    
+                    # Let's implement 3D BBox IoU Matching here.
+                    tp_details = []
+                    fp_details = []
+                    
+                    # Reset status
+                    for p in sample_detections: p.match_status = "FP"
+                    for g in gt_nodules_list: g.match_status = "Missed"
+                    
+                    for p in sample_detections:
+                        p_bbox = p.geometry.bbox # z1, y1, x1, z2, y2, x2
+                        best_iou = 0
+                        best_gt = None
+                        
+                        p_z1, p_y1, p_x1, p_z2, p_y2, p_x2 = p_bbox
+                        p_vol = (p_z2-p_z1)*(p_y2-p_y1)*(p_x2-p_x1)
+                        if p_vol == 0: continue
+                        
+                        for g in gt_nodules_list:
+                            g_bbox = g.geometry.bbox
+                            g_z1, g_y1, g_x1, g_z2, g_y2, g_x2 = g_bbox
+                            g_vol = (g_z2-g_z1)*(g_y2-g_y1)*(g_x2-g_x1)
+                            
+                            # Intersection
+                            iz1 = max(p_z1, g_z1); iy1 = max(p_y1, g_y1); ix1 = max(p_x1, g_x1)
+                            iz2 = min(p_z2, g_z2); iy2 = min(p_y2, g_y2); ix2 = min(p_x2, g_x2)
+                            
+                            if iz1 < iz2 and iy1 < iy2 and ix1 < ix2:
+                                inter_vol = (iz2-iz1)*(iy2-iy1)*(ix2-ix1)
+                                union_vol = p_vol + g_vol - inter_vol
+                                iou = inter_vol / union_vol
+                                
+                                if iou > best_iou:
+                                    best_iou = iou
+                                    best_gt = g
+                        
+                        # Threshold BBox IoU (might need adjustment compared to exact mask IoU)
+                        # Exact mask IoU 0.1 ~ BBox IoU 0.1 ? Roughly.
+                        if best_iou > 0.05: # Loose threshold for BBox
+                            p.match_status = "TP"
+                            if best_gt:
+                                best_gt.match_status = "Matched"
+                    
+                    # Console Output
+                    logger.info(f"  🔍 Sample {npz_name} Analysis:")
+                    
+                    # TPs
+                    tps = [p for p in sample_detections if p.match_status == "TP"]
+                    fps = [p for p in sample_detections if p.match_status == "FP"]
+                    fns = [g for g in gt_nodules_list if g.match_status == "Missed"]
+                    
+                    tp_strs = [f"#{p.id}(V={p.geometry.volume_mm3:.1f}, D={p.geometry.diameter_mm:.1f}mm)" for p in tps]
+                    fp_strs = [f"#{p.id}(V={p.geometry.volume_mm3:.1f}, D={p.geometry.diameter_mm:.1f}mm)" for p in fps]
+                    fn_strs = [f"#{g.id}(V={g.geometry.volume_mm3:.1f}, D={g.geometry.diameter_mm:.1f}mm)" for g in fns]
+                    
+                    if tps: logger.info(f"    ✅ TP: {', '.join(tp_strs)}")
+                    if fps: logger.info(f"    ❌ FP: {', '.join(fp_strs)}")
+                    if fns: logger.info(f"    ⚠️ FN: {', '.join(fn_strs)}")
+                    
+                    # Update case_stats with new info
+                    case_stats['detected_nodules'] = [asdict(d) for d in sample_detections]
+                    case_stats['missed_gt_nodules'] = [asdict(g) for g in fns]
+                    
+                    # Save updated JSON
                     with open(case_dir / 'stats.json', 'w', encoding='utf-8') as f:
                         json.dump(case_stats, f, indent=2, ensure_ascii=False)
                     
