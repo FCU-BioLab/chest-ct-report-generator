@@ -317,17 +317,39 @@ class VolumePreprocessor:
                     0 <= x_center_int < mask_arr.shape[2]):
                         
                     # 如果中心點剛好是 0 (醫師可能畫歪了一點)，嘗試搜尋附近
-                    # 簡單版：只看中心點是否有值
-                    # 進階版：做 label region props，找距離最近的 region
-                    
                     val = mask_arr[z_center_int, y_center_int, x_center_int]
+                    target_label = 0
+                    
                     if val > 0:
-                        # 找出該連通區域
-                        labeled_temp = measure.label(mask_arr == val) # 假設 mask 值區分病灶
-                        # 找出中心點所在的 label
-                        target_label = labeled_temp[z_center_int, y_center_int, x_center_int]
-                        if target_label > 0:
-                            fused_mask_bool |= (labeled_temp == target_label)
+                        target_label = val
+                    else:
+                        # Fallback: Search small radius (5x5x5)
+                        found_val, found_pos = self._find_nearest_label(mask_arr, (z_center_int, y_center_int, x_center_int), radius=2)
+                        if found_val > 0:
+                            target_label = found_val
+                            # Update center to found position to ensure we pick the right component
+                            # z_center_int, y_center_int, x_center_int = found_pos 
+                            
+                    if target_label > 0:
+                        # 找出該連通區域 (如果 mask 是 binary 0/1, label 之後可能有由多個區域)
+                        # 如果 mask 已經是 instance label (1, 2...), 則直接用
+                        # LNDb mask 通常是 binary (1=nodule)，但也可能有由多個
+                        
+                        # 這裡假設 mask_arr 是 binary 或 label map
+                        # 為了安全，我們針對 target_label 做二值化後再 label
+                        binary_mask = (mask_arr == target_label)
+                        labeled_temp = measure.label(binary_mask)
+                        
+                        # 看中心點 (或找到的點) 在哪個 label
+                        # 簡單起見，如果我們剛剛是用 search 找到的，我們需要那個點的 label
+                        if val > 0:
+                            comp_label = labeled_temp[z_center_int, y_center_int, x_center_int]
+                        else:
+                            # Use the found position from search
+                             comp_label = labeled_temp[found_pos[0], found_pos[1], found_pos[2]]
+                             
+                        if comp_label > 0:
+                            fused_mask_bool |= (labeled_temp == comp_label)
                             has_valid_mask = True
                     else:
                         # Fallback: Search small radius? 
@@ -369,23 +391,55 @@ class VolumePreprocessor:
             z_center = (z_min + z_max) // 2
             
             # 計算視頻範圍
+            # 計算視頻範圍
+            pad_before = 0
+            pad_after = 0
+            
             if self.full_volume:
                  z_start = 0
                  z_end = ct_array.shape[0]
             else:
-                z_start = max(0, z_center - self.context_slices)
-                z_end = min(ct_array.shape[0], z_center + self.context_slices + 1)
+                z_start = z_center - self.context_slices
+                z_end = z_center + self.context_slices + 1
                 
-                depth = z_end - z_start
-                if depth < self.min_depth:
-                    self.stats['filtered_edge'] += 1
-                    continue
+                # Check for boundary padding
+                if z_start < 0:
+                    pad_before = abs(z_start)
+                    z_start = 0
+                
+                if z_end > ct_array.shape[0]:
+                    pad_after = z_end - ct_array.shape[0]
+                    z_end = ct_array.shape[0]
+                
+                # We calculate depth based on REQUESTED range (including padding)
+                # depth = (z_end_original - z_start_original) = 2*context + 1
+                # But here we assume we always want fixed context if possible.
+                
+                # Check if even with padding it is surprisingly small (e.g. extremely flat volume?)
+                # Usually max_depth is handled in dataset, here we output what we have.
+                # If we pad, the saved array will have the full size.
+                
+                # If min_depth is set (e.g. 1), we should pass.
+                current_depth = z_end - z_start + pad_before + pad_after
+                if current_depth < self.min_depth:
+                     self.stats['filtered_edge'] += 1
+                     continue
             
             # 截取視頻區間
             video_frames = ct_normalized[z_start:z_end]  # (D, Y, X)
             video_masks = final_mask_uint8[z_start:z_end]
             
-            center_idx = z_center - z_start
+            # Apply padding if needed
+            if pad_before > 0 or pad_after > 0:
+                # Pad with 0 for frames (since normalized 0 is black/air roughly) and masks
+                video_frames = np.pad(video_frames, ((pad_before, pad_after), (0,0), (0,0)), mode='constant', constant_values=0)
+                video_masks = np.pad(video_masks, ((pad_before, pad_after), (0,0), (0,0)), mode='constant', constant_values=0)
+            
+            # Adjust center index relative to the new padded volume
+            # Original z_center relative to z_start (unpadded) was z_center - z_start
+            # With padding before, the new start is virtual.
+            # center pos in new array = pad_before + (z_center - z_start_real)
+            center_idx = pad_before + (z_center - z_start)
             
             # 調整大小到 image_size
             video_frames = self._resize_volume(video_frames)
@@ -623,26 +677,38 @@ class VolumePreprocessor:
         
         return resized
     
-    def _compute_bbox_from_mask(self, mask: np.ndarray) -> np.ndarray:
-        """從 mask 計算 bounding box"""
-        if mask.max() == 0:
-            h, w = mask.shape
-            cx, cy = w // 2, h // 2
-            return np.array([cx - 10, cy - 10, cx + 10, cy + 10], dtype=np.float32)
-        
-        ys, xs = np.where(mask > 0)
-        x1, x2 = xs.min(), xs.max()
-        y1, y2 = ys.min(), ys.max()
-        
-        # 稍微擴大
-        pad = 5
-        h, w = mask.shape
-        x1 = max(0, x1 - pad)
-        y1 = max(0, y1 - pad)
-        x2 = min(w, x2 + pad)
-        y2 = min(h, y2 + pad)
-        
         return np.array([x1, y1, x2, y2], dtype=np.float32)
+    
+    def _find_nearest_label(self, mask_arr: np.ndarray, center: Tuple[int, int, int], radius: int = 2) -> Tuple[int, Tuple[int, int, int]]:
+        """
+        在中心點周圍搜尋最近的非零值
+        Returns: (found_value, (found_z, found_y, found_x))
+        """
+        cz, cy, cx = center
+        D, H, W = mask_arr.shape
+        
+        # Define ranges
+        z_min = max(0, cz - radius); z_max = min(D, cz + radius + 1)
+        y_min = max(0, cy - radius); y_max = min(H, cy + radius + 1)
+        x_min = max(0, cx - radius); x_max = min(W, cx + radius + 1)
+        
+        best_dist = float('inf')
+        best_val = 0
+        best_pos = center
+        
+        # Scan the cube
+        for z in range(z_min, z_max):
+            for y in range(y_min, y_max):
+                for x in range(x_min, x_max):
+                    val = mask_arr[z, y, x]
+                    if val > 0:
+                        dist = (z-cz)**2 + (y-cy)**2 + (x-cx)**2
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_val = val
+                            best_pos = (z, y, x)
+                            
+        return best_val, best_pos
     
     def save_manifest(self):
         """Save a log of generated files and statistics"""

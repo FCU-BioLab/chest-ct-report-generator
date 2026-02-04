@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import numpy as np
 from scipy import ndimage
 from skimage import measure, morphology
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 
 from .dataset import VolumetricDataset, collate_video_batch
 from .model import get_model
@@ -588,7 +588,8 @@ class UNet3DTrainer:
             split=split,
             image_size=self.config.model.image_size,
             max_depth=self.config.data.max_depth,
-            augmentation=(split == 'train')
+            augmentation=(split == 'train'),
+            positive_ratio=getattr(self.config.data, 'positive_ratio', 0.7)
         )
         return DataLoader(
             dataset,
@@ -1233,16 +1234,20 @@ class UNet3DTrainer:
             'sample_results': sample_results
         }
 
-    def comprehensive_test(self, split: str = 'test', save_visualizations: bool = True, export_gif: bool = True):
+    def comprehensive_test(self, split: str = 'test', save_visualizations: bool = True, export_gif: bool = True,
+                         det_min_size: Optional[float] = None, det_threshold: Optional[float] = None, 
+                         no_postprocess: bool = False):
         """
-        Complete test evaluation with segmentation metrics, detection metrics, 
-        and per-sample visualizations.
+        Run comprehensive testing with detailed metrics and visualization.
         
         Args:
-            split: Dataset split to evaluate
-            save_visualizations: Whether to save visualization images
-            export_gif: Whether to export GIF animations for each case
-            
+            split: Dataset split to test
+            save_visualizations: Whether to save visualization files
+            export_gif: Whether to save GIF animations
+            det_min_size: Min nodule size (mm3) override
+            det_threshold: Detection probability threshold override
+            no_postprocess: Disable lung mask and postprocessing
+        
         Returns:
             Dict with all metrics and paths to saved files
         """
@@ -1271,9 +1276,12 @@ class UNet3DTrainer:
                 images = batch['image'].to(self.device).float()
                 masks = batch['mask'].to(self.device).float()
                 
-                logits = self.model(images)
-                if isinstance(logits, list):
-                    logits = logits[0]
+                if images.shape[2] > 64:
+                    logits = self._sliding_window_inference(images, window_size=64, overlap=32)
+                else:
+                    logits = self.model(images)
+                    if isinstance(logits, list):
+                        logits = logits[0]
                 
                 probs = torch.sigmoid(logits)
                 
@@ -1287,17 +1295,22 @@ class UNet3DTrainer:
                     # Predictions
                     # Calculate min size in voxels
                     spacing = batch['spacing'][i].cpu().numpy()
+                    # Use provided args or config defaults
+                    min_vol_mm3 = det_min_size if det_min_size is not None else getattr(self.config.postprocessing, 'det_min_size', 30.0)
+                    thresh = det_threshold if det_threshold is not None else getattr(self.config.postprocessing, 'det_threshold', 0.5)
+                    do_closing = getattr(self.config.postprocessing, 'apply_closing', True)
+
                     voxel_vol = np.prod(spacing)
-                    min_vol_mm3 = getattr(self.config.postprocessing, 'det_min_size', 30.0)
                     min_voxels = int(min_vol_mm3 / voxel_vol) if voxel_vol > 0 else 5
                     
-                    # Predictions with config values
-                    thresh = getattr(self.config.postprocessing, 'det_threshold', 0.5)
-                    do_closing = getattr(self.config.postprocessing, 'apply_closing', True)
+                    # Generate lung mask
+                    lung_mask = None
+                    if not no_postprocess:
+                        lung_mask = generate_lung_mask(img_np, dilate_mm=10.0)
 
                     pred_raw = (prob_np > thresh).astype(np.uint8)
                     pred_post = postprocess_prediction(
-                        prob_np, lung_mask=None, threshold=thresh,
+                        prob_np, lung_mask=lung_mask, threshold=thresh,
                         min_size_voxels=min_voxels, apply_closing=do_closing
                     )
                     
@@ -2293,3 +2306,76 @@ class UNet3DTrainer:
         
         logger.info(f"✅ Saved {sample_idx} visualization images to {save_dir}")
         return save_dir
+
+    def _sliding_window_inference(self, volume: torch.Tensor, window_size: int = 64, overlap: int = 32) -> torch.Tensor:
+        """
+        Run inference using sliding window with Gaussian blending.
+        Args:
+            volume: (B, C, D, H, W) - B should be 1
+            window_size: Depth window size
+            overlap: Overlap size
+        Returns:
+            logits: (B, C, D, H, W)
+        """
+        B, C, D, H, W = volume.shape
+        stride = window_size - overlap
+        
+        # Output buffer
+        # Assuming output channels = 1 (logits)
+        logits = torch.zeros((B, 1, D, H, W), device=volume.device)
+        count_map = torch.zeros((B, 1, D, H, W), device=volume.device)
+        
+        # Generate gaussian weight map for blending
+        # 1D gaussian along depth
+        import math
+        def get_gaussian(window_size, sigma_scale=1.0/8):
+            tmp = torch.arange(window_size, device=volume.device).float() - (window_size - 1) / 2
+            sigma = sigma_scale * (window_size - 1)
+            gauss = torch.exp(-0.5 * (tmp / (sigma ** 2)))
+            return gauss
+            
+        weight = get_gaussian(window_size).view(1, 1, -1, 1, 1) # (1, 1, W, 1, 1)
+        weight = weight.expand(B, 1, window_size, H, W)
+        
+        for z in range(0, D, stride):
+            z_start = z
+            z_end = z + window_size
+            
+            if z_end > D:
+                z_start = max(0, D - window_size)
+                z_end = D
+            
+            # Crop
+            chunk = volume[:, :, z_start:z_end, :, :]
+            
+            # Pad if chunk is smaller than window_size (at very start if D < window_size)
+            # But logic above handles z_start for end case.
+            # Handle D < window_size case
+            if chunk.shape[2] < window_size:
+                 pad_d = window_size - chunk.shape[2]
+                 chunk = F.pad(chunk, (0,0, 0,0, 0,pad_d))
+            
+            # Inference
+            with torch.no_grad():
+                chunk_logits = self.model(chunk)
+                if isinstance(chunk_logits, list):
+                    chunk_logits = chunk_logits[0]
+            
+            # Unpad
+            if z_end - z_start < window_size:
+                chunk_logits = chunk_logits[:, :, :z_end-z_start, :, :]
+                
+            # Accumulate
+            # Safe check shapes
+            d_len = z_end - z_start
+            w_chunk = weight[:, :, :d_len, :, :]
+            
+            logits[:, :, z_start:z_end, :, :] += chunk_logits * w_chunk
+            count_map[:, :, z_start:z_end, :, :] += w_chunk
+            
+            if z_end == D:
+                break
+                
+        # Average
+        logits /= (count_map + 1e-8)
+        return logits
