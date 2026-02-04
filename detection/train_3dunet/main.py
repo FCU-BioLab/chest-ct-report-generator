@@ -152,7 +152,15 @@ def cmd_test(args):
     
     config = Config()
     config.data.npz_dir = args.npz_dir
-    config.data.max_depth = args.max_depth
+    config.data.npz_dir = args.npz_dir
+    if getattr(args, 'full_volume', False):
+         config.data.max_depth = 10000 # Large enough for full volume
+         config.training.batch_size = 1 # Force batch size 1 to avoid OOM
+         torch.cuda.empty_cache()
+         logging.info("ℹ️ Full volume testing enabled (max_depth=10000, batch_size=1)")
+    else:
+        config.data.max_depth = args.max_depth
+    config.model.base_filters = args.base_filters
     config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
     config.model.use_attention = getattr(args, 'attention', False)
@@ -208,7 +216,15 @@ def cmd_fulltest(args):
     config = Config()
     config = Config()
     config.data.npz_dir = args.npz_dir
-    config.data.max_depth = args.max_depth
+    config.data.npz_dir = args.npz_dir
+    if getattr(args, 'full_volume', False):
+         config.data.max_depth = 10000
+         config.training.batch_size = 1 # Force batch size 1 to avoid OOM
+         torch.cuda.empty_cache()
+         logging.info("ℹ️ Full volume testing enabled (max_depth=10000, batch_size=1)")
+    else:
+        config.data.max_depth = args.max_depth
+    config.model.base_filters = args.base_filters
     config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
     config.model.use_attention = getattr(args, 'attention', False)
@@ -227,7 +243,10 @@ def cmd_fulltest(args):
     summary = trainer.comprehensive_test(
         split=args.split,
         save_visualizations=not args.no_viz,
-        export_gif=not args.no_gif
+        export_gif=not args.no_gif,
+        det_min_size=args.det_min_size,
+        det_threshold=args.det_prob_threshold,
+        no_postprocess=getattr(args, 'no_postprocess', False)
     )
     
     logging.info("✅ Comprehensive test complete!")
@@ -300,6 +319,8 @@ def main():
                       help='Detection minimum size (mm3)')
     test.add_argument('--no_closing', action='store_true',
                       help='Disable morphological closing')
+    test.add_argument('--full_volume', action='store_true',
+                      help='Test on full volume (overrides max_depth)')
 
     
     # FULLTEST (comprehensive test with visualization)
@@ -317,10 +338,12 @@ def main():
                           help='Use Attention UNet model')
     fulltest.add_argument('--det_prob_threshold', type=float, default=0.5,
                           help='Detection probability threshold')
-    fulltest.add_argument('--det_min_size', type=float, default=5.0,
+    fulltest.add_argument('--det_min_size', type=float, default=10.0,
                           help='Detection minimum size (mm3)')
     fulltest.add_argument('--no_closing', action='store_true',
                           help='Disable morphological closing')
+    fulltest.add_argument('--full_volume', action='store_true',
+                          help='Test on full volume (overrides max_depth)')
 
     
     # VISUALIZE

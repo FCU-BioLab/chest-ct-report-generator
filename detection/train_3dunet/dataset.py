@@ -33,11 +33,16 @@ class VolumetricDataset(Dataset):
         augmentation: bool = False,
         split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
         split_seed: int = 42,
+        positive_ratio: float = 0.7, # 70% chance to pick nodule center, 30% random crop
     ):
         self.npz_dir = Path(npz_dir)
         self.split = split
         self.image_size = image_size
         self.max_depth = max_depth
+        self.augmentation = augmentation
+        self.split_ratios = split_ratios
+        self.split_seed = split_seed
+        self.positive_ratio = positive_ratio
         self.augmentation = augmentation
         self.split_ratios = split_ratios
         self.split_seed = split_seed
@@ -103,7 +108,19 @@ class VolumetricDataset(Dataset):
         D = len(frames)
         start, end = 0, D
         
-        if D > self.max_depth:
+        # Random Crop Strategy (Hard Negative Mining)
+        use_random_crop = False
+        if self.split == 'train' and D > self.max_depth:
+            if np.random.rand() > self.positive_ratio:
+                 use_random_crop = True
+        
+        if use_random_crop:
+            # Random crop from anywhere
+            max_start = max(0, D - self.max_depth)
+            start = np.random.randint(0, max_start + 1)
+            end = min(D, start + self.max_depth)
+        elif D > self.max_depth:
+            # Center crop (Positive sample)
             half = self.max_depth // 2
             start = max(0, center_idx - half)
             end = min(D, start + self.max_depth)

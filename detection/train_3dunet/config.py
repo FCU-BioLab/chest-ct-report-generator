@@ -34,6 +34,9 @@ class DataConfig:
     min_nodule_diameter: float = 4.0  # mm
     max_nodule_diameter: float = 100.0  # mm
     
+    # Sampling Strategy
+    positive_ratio: float = 0.7  # Probability of picking centered nodule crop (vs random crop)
+    
     # Cache
     use_cache: bool = True
     cache_dir: str = "../../cache"
