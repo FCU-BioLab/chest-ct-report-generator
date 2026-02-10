@@ -57,6 +57,7 @@ class ModelConfig:
     # Attention options
     use_attention: bool = False  # Enable SE blocks + Attention Gates
     se_reduction: int = 16  # SE block reduction ratio
+    use_checkpointing: bool = False  # Gradient checkpointing to save memory
 
 
 @dataclass

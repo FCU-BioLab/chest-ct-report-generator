@@ -41,7 +41,7 @@ REM 轉換 LNDb 數據集 (使用 Full Volume, 篩選至少 2 位醫師同意)
 python -m detection.train_3dunet.main convert ^
     --dataset lndb ^
     --input_dir E:\lung_ct_lesion_dataset\LNDb ^
-    --output_dir cache/volume_npz ^
+    --output_dir cache/lndb_volume_npz_agr1 ^
     --full_volume ^
     --min_agreement 2 ^
     --image_size 256
@@ -50,7 +50,7 @@ REM 轉換 MSD Lung 數據集 (標準模式)
 python -m detection.train_3dunet.main convert ^
     --dataset msd ^
     --input_dir E:\lung_ct_lesion_dataset\Task06_Lung ^
-    --output_dir cache/volume_npz ^
+    --output_dir cache/lndb_volume_npz_agr1 ^
     --context_slices 32
 ```
 
@@ -69,19 +69,19 @@ python -m detection.train_3dunet.main convert ^
 ```cmd
 REM 1. 檢查數據集統計
 python -m detection.train_3dunet.main check_data ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --split train ^
     --mode stats
 
 REM 2. 交互式瀏覽 (Interactive Browse)
 python -m detection.train_3dunet.main check_data ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --split train ^
     --mode browse
 
 REM 3. 檢查 Dataset Loader 轉換效果 (重要)
 python -m detection.train_3dunet.main check_data ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --split train ^
     --mode dataset_batch ^
     --max_depth 32
@@ -116,13 +116,24 @@ python -m detection.train_3dunet.main check_data ^
 - **Optimizer**: AdamW
 - **Scheduler**: OneCycleLR
 - **監控**: 每個 Epoch 計算 Validation Set 的 Dice Score，保存最佳模型。
+120: 
+121: **關鍵特性 (Key Features)**:
+122: - **Hard Negative Mining (Sampling Strategy)**:
+123:   - 透過設定 `positive_ratio` (e.g., 0.9)，控制訓練時採樣「結節中心」與「隨機背景」的比例。
+124:   - 引入 10% 的隨機背景 Patch，讓模型學習區分正常組織與結節，顯著降低 False Positives。
+125: - **Mixed Precision Training (AMP)**:
+126:   - 使用 `torch.cuda.amp` 進行 FP16 混合精度訓練。
+127:   - 減少顯存佔用 (~50%) 並加速訓練，允許更大的 Batch Size。
+128: - **Gradient Checkpointing**:
+129:   - 可選功能 (`--use_checkpointing`)。
+130:   - 在反向傳播時重新計算中間激活值，犧牲些微計算時間換取大量顯存，支援更深層的網絡或更大的 Input Volume (如 64 slices)。
 
 **執行命令 (CMD)**:
 
 ```cmd
 REM 基礎訓練
 python -m detection.train_3dunet.main train ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --epochs 50 ^
     --batch_size 4 ^
     --max_depth 32 ^
@@ -134,7 +145,7 @@ python -m detection.train_3dunet.main train ^
 
 REM 啟用 Attention 模型 + Combined Loss
 python -m detection.train_3dunet.main train ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --epochs 100 ^
     --attention ^
     --loss_type combined
@@ -150,7 +161,9 @@ python -m detection.train_3dunet.main train ^
 
 **處理流程**:
 
-1. **模型推論**: 3D U-Net 輸出機率熱圖 (Probability Map)。
+1. **模型推論**: 
+154:    - 3D U-Net 輸出機率熱圖 (Probability Map)。
+155:    - **Sliding Window Inference**: 針對大體積輸入 (Depth > 64)，自動採用滑動窗口推論並進行加權拼接，避免 OOM 並消除邊界偽影。
 2. **NoduleDetector 後處理**:
    - **閾值切分**: `prob > det_prob_threshold` (建議 0.9)。
    - **形態學閉運算 (Closing)**: 填補結節內部的孔洞。
@@ -189,7 +202,7 @@ python -m detection.train_3dunet.main train ^
 ```cmd
 python -m detection.train_3dunet.main fulltest ^
     --checkpoint path\to\model.pth ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --det_prob_threshold 0.9 ^
     --det_min_size 5.0
 ```
@@ -202,7 +215,7 @@ python -m detection.train_3dunet.main fulltest ^
 ```cmd
 python -m detection.train_3dunet.main test ^
     --checkpoint path\to\best_model.pth ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --split test ^
     --attention
 ```
@@ -214,7 +227,7 @@ python -m detection.train_3dunet.main test ^
 查看數據集的分佈情況（樣本數、平均深度等）。
 
 ```cmd
-python -m detection.train_3dunet.main stats --npz_dir cache/volume_npz
+python -m detection.train_3dunet.main stats --npz_dir cache/lndb_volume_npz_agr1
 ```
 
 ---
@@ -226,7 +239,7 @@ python -m detection.train_3dunet.main stats --npz_dir cache/volume_npz
 ```cmd
 python -m detection.train_3dunet.main visualize ^
     --checkpoint path\to\model.pth ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --split test ^
     --attention
 ```
