@@ -22,6 +22,7 @@ import numpy as np
 from scipy import ndimage
 from skimage import measure, morphology
 from typing import Dict, Tuple, Optional, List
+from torch.cuda.amp import GradScaler, autocast
 
 from .dataset import VolumetricDataset, collate_video_batch
 from .model import get_model
@@ -559,6 +560,12 @@ class UNet3DTrainer:
         self.train_loader = self._create_loader("train", shuffle=True)
         self.val_loader = self._create_loader("val", shuffle=False)
         
+        # AMP Scaler
+        self.use_amp = getattr(self.config.training, 'use_amp', False)
+        self.scaler = GradScaler(enabled=self.use_amp)
+        if self.use_amp:
+            logger.info(f"⚡ AMP (Mixed Precision) enabled")
+        
         # Scheduler: 進一步降低 max_lr，穩定訓練
         self.scheduler = optim.lr_scheduler.OneCycleLR(
             self.optimizer,
@@ -701,52 +708,66 @@ class UNet3DTrainer:
         total_loss = 0
         pbar = tqdm(self.train_loader, desc=f"Train Ep {epoch}")
         
-        for batch in pbar:
+        acc_steps = getattr(self.config.training, 'accumulation_steps', 1)
+        self.optimizer.zero_grad()
+        
+        for i, batch in enumerate(pbar):
             images = batch['image'].to(self.device).float()
             masks = batch['mask'].to(self.device).float()
             
-            self.optimizer.zero_grad()
+            # self.optimizer.zero_grad() # Moved to step block
             
-            logits = self.model(images)
-            if isinstance(logits, list):
-                # Deep supervision
-                loss = 0
-                weights = [1.0, 0.5, 0.25, 0.125]
-                for i, logit in enumerate(logits[:len(weights)]):
-                    if logit.shape != masks.shape:
-                         target = F.interpolate(masks, size=logit.shape[2:], mode='nearest')
-                    else:
-                        target = masks
-                    
-                    if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
-                        loss += weights[i] * self.combined_loss(logit, target)
-                    elif hasattr(self, 'tversky'):
-                        loss += weights[i] * self.tversky(logit, target)
-                    else:
-                        l_focal = self.focal(logit, target)
-                        l_dice = self.dice(logit, target)
-                        loss += weights[i] * (l_focal + 2.0 * l_dice)
-            else:
-                # Single output
-                if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
-                    # Use Combined Loss (Tversky + Boundary + BCE)
-                    loss = self.combined_loss(logits, masks)
-                elif hasattr(self, 'tversky'):
-                    # Use Tversky Loss only
-                    loss = self.tversky(logits, masks)
+            with autocast(enabled=self.use_amp):
+                logits = self.model(images)
+                if isinstance(logits, list):
+                    # Deep supervision
+                    loss = 0
+                    weights = [1.0, 0.5, 0.25, 0.125]
+                    for i, logit in enumerate(logits[:len(weights)]):
+                        if logit.shape != masks.shape:
+                             target = F.interpolate(masks, size=logit.shape[2:], mode='nearest')
+                        else:
+                            target = masks
+                        
+                        if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
+                            loss += weights[i] * self.combined_loss(logit, target)
+                        elif hasattr(self, 'tversky'):
+                            loss += weights[i] * self.tversky(logit, target)
+                        else:
+                            l_focal = self.focal(logit, target)
+                            l_dice = self.dice(logit, target)
+                            loss += weights[i] * (l_focal + 2.0 * l_dice)
                 else:
-                    # Legacy: BCE + Focal + Dice
-                    loss_bce = self.bce_weighted(logits, masks)
-                    loss_focal = self.focal(logits, masks)
-                    loss_dice = self.dice(logits, masks)
-                    loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
+                    # Single output
+                    if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
+                        # Use Combined Loss (Tversky + Boundary + BCE)
+                        loss = self.combined_loss(logits, masks)
+                    elif hasattr(self, 'tversky'):
+                        # Use Tversky Loss only
+                        loss = self.tversky(logits, masks)
+                    else:
+                        # Legacy: BCE + Focal + Dice
+                        loss_bce = self.bce_weighted(logits, masks)
+                        loss_focal = self.focal(logits, masks)
+                        loss_dice = self.dice(logits, masks)
+                        loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
             
-            loss.backward()
-            self.optimizer.step()
-            self.scheduler.step()
+            loss = loss / acc_steps
+            self.scaler.scale(loss).backward()
             
-            total_loss += loss.item()
-            pbar.set_postfix({'loss': loss.item(), 'lr': self.scheduler.get_last_lr()[0]})
+            if (i + 1) % acc_steps == 0:
+                # Gradient clipping
+                if hasattr(self.config.training, 'grad_clip') and self.config.training.grad_clip > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.grad_clip)
+                    
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
+                self.scheduler.step()
+            
+            total_loss += loss.item() * acc_steps
+            pbar.set_postfix({'loss': loss.item() * acc_steps, 'lr': self.scheduler.get_last_lr()[0]})
             
         return total_loss / len(self.train_loader)
 

@@ -33,8 +33,10 @@ class UNet3D(nn.Module):
         pool_kernel_size=2,
         basic_module=DoubleConv,
         testing=False,
+        use_checkpointing=False,
     ):
         super().__init__()
+        self.use_checkpointing = use_checkpointing
 
         if isinstance(f_maps, int):
             f_maps = [f_maps * 2 ** k for k in range(num_levels)]
@@ -45,13 +47,15 @@ class UNet3D(nn.Module):
         # Create Encoders
         self.encoders = create_encoders(
             in_channels, f_maps, basic_module, conv_kernel_size, conv_padding, conv_upscale, dropout_prob,
-            layer_order, num_groups, pool_kernel_size, is3d=True
+            layer_order, num_groups, pool_kernel_size, is3d=True,
+            use_checkpointing=self.use_checkpointing
         )
 
         # Create Decoders
         self.decoders = create_decoders(
             f_maps, basic_module, conv_kernel_size, conv_padding, layer_order, num_groups, upsample="default",
-            dropout_prob=dropout_prob, is3d=True
+            dropout_prob=dropout_prob, is3d=True,
+            use_checkpointing=self.use_checkpointing
         )
 
         # Final Convolution
@@ -110,8 +114,10 @@ class AttentionUNet3D(nn.Module):
         basic_module=DoubleConv,
         se_reduction=16,
         testing=False,
+        use_checkpointing=False,
     ):
         super().__init__()
+        self.use_checkpointing = use_checkpointing
 
         if isinstance(f_maps, int):
             f_maps = [f_maps * 2 ** k for k in range(num_levels)]
@@ -123,7 +129,8 @@ class AttentionUNet3D(nn.Module):
         # Create Encoders
         self.encoders = create_encoders(
             in_channels, f_maps, basic_module, conv_kernel_size, conv_padding, conv_upscale, dropout_prob,
-            layer_order, num_groups, pool_kernel_size, is3d=True
+            layer_order, num_groups, pool_kernel_size, is3d=True,
+            use_checkpointing=self.use_checkpointing
         )
         
         # SE blocks for encoders
@@ -134,7 +141,8 @@ class AttentionUNet3D(nn.Module):
         # Create Decoders
         self.decoders = create_decoders(
             f_maps, basic_module, conv_kernel_size, conv_padding, layer_order, num_groups, upsample="default",
-            dropout_prob=dropout_prob, is3d=True
+            dropout_prob=dropout_prob, is3d=True,
+            use_checkpointing=self.use_checkpointing
         )
         
         # SE blocks for decoders
@@ -209,7 +217,8 @@ def get_model(config) -> nn.Module:
             f_maps=f_maps,
             layer_order=layer_order,
             basic_module=DoubleConv,
-            se_reduction=16
+            se_reduction=16,
+            use_checkpointing=getattr(config.model, 'use_checkpointing', False)
         )
     else:
         return UNet3D(
@@ -217,7 +226,8 @@ def get_model(config) -> nn.Module:
             out_channels=config.model.out_channels,
             f_maps=f_maps,
             layer_order=layer_order,
-            basic_module=DoubleConv
+            basic_module=DoubleConv,
+            use_checkpointing=getattr(config.model, 'use_checkpointing', False)
         )
 
 if __name__ == "__main__":

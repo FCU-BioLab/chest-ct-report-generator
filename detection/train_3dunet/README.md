@@ -13,7 +13,7 @@ REM 使用 Full Volume 轉換
 python -m detection.train_3dunet.main convert ^
     --dataset lndb ^
     --input_dir E:\lung_ct_lesion_dataset\LNDb ^
-    --output_dir cache/volume_npz ^
+    --output_dir cache/lndb_volume_npz_agr1 ^
     --full_volume ^
     --image_size 256
 ```
@@ -22,15 +22,17 @@ python -m detection.train_3dunet.main convert ^
 
 ```cmd
 python -m detection.train_3dunet.main train ^
-    --npz_dir cache/volume_npz ^
-    --epochs 100 ^
-    --batch_size 4 ^
+    --epochs 200 ^
+    --batch_size 1 ^
+    --accumulation_steps 4 ^
     --attention ^
     --train_ratio 0.8 ^
     --val_ratio 0.1 ^
     --test_ratio 0.1 ^
     --split_seed 42 ^
-    --loss_type combined
+    --loss_type combined ^
+    --positive_ratio 0.9 ^
+    --use_checkpointing
 ```
 
 **參數說明**:
@@ -38,6 +40,9 @@ python -m detection.train_3dunet.main train ^
 - `--loss_type`: `combined`(預設) / `tversky` / `dice`
 - `--split_seed`: 分割數據集的隨機種子
 - `--train_ratio` (等): 訓練/驗證/測試集比例
+- `--positive_ratio`: 正樣本(結節中心)採樣比例 (0.0-1.0)。設為 0.9 表示 10% 時間採樣隨機背景 (Hard Negative Mining)。
+- `--use_checkpointing`: 啟用 Gradient Checkpointing (以時間換空間，節省顯存)。
+- `--use_amp`:啟用混合精度訓練 (預設開啟)。
 
 ### 3. 完整測試 (含偵測報告)
 
@@ -45,12 +50,14 @@ python -m detection.train_3dunet.main train ^
 
 ```cmd
 python -m detection.train_3dunet.main fulltest ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --checkpoint path\to\best_model.pth ^
     --split test ^
     --attention ^
     --det_prob_threshold 0.9 ^
-    --det_min_size 1.0
+    --det_prob_threshold 0.5 ^
+    --det_min_size 5.0 ^
+    --full_volume
 ```
 *註: `det_prob_threshold 0.9` 與 `det_min_size 1.0` 為實驗驗證後的最佳參數，能在保留小結節的同時過濾誤報。*
 
@@ -64,7 +71,9 @@ python -m detection.train_3dunet.main fulltest ^
 
 **選項**:
 - `--no_gif`: 跳過 GIF 輸出
+- `--no_gif`: 跳過 GIF 輸出
 - `--no_viz`: 跳過所有視覺化
+- `--full_volume`: **[NEW]** 使用完整 CT 體積進行測試 (Sliding Window Inference)，解決大體積 OOM 問題。
 
 ### 4. 快速測試
 
@@ -72,7 +81,7 @@ python -m detection.train_3dunet.main fulltest ^
 
 ```cmd
 python -m detection.train_3dunet.main test ^
-    --npz_dir cache/volume_npz ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --checkpoint path\to\model.pth ^
     --attention
 ```
@@ -80,7 +89,7 @@ python -m detection.train_3dunet.main test ^
 ### 5. 統計
 
 ```cmd
-python -m detection.train_3dunet.main stats --npz_dir cache/volume_npz
+python -m detection.train_3dunet.main stats --npz_dir cache/lndb_volume_npz_agr1
 ```
 
 ---

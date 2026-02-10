@@ -3,6 +3,7 @@ from functools import partial
 import torch
 from torch import nn as nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 # ============ Attention Modules ============
@@ -287,8 +288,10 @@ class Encoder(nn.Module):
         upscale=2,
         dropout_prob=0.1,
         is3d=True,
+        use_checkpointing=False,
     ):
         super().__init__()
+        self.use_checkpointing = use_checkpointing
         if apply_pooling:
             if pool_type == "max":
                 if is3d:
@@ -319,7 +322,11 @@ class Encoder(nn.Module):
     def forward(self, x):
         if self.pooling is not None:
             x = self.pooling(x)
-        x = self.basic_module(x)
+            
+        if self.use_checkpointing and x.requires_grad:
+            x = checkpoint(self.basic_module, x, use_reentrant=False)
+        else:
+            x = self.basic_module(x)
         return x
 
 
@@ -337,8 +344,10 @@ class Decoder(nn.Module):
         upsample="default",
         dropout_prob=0.1,
         is3d=True,
+        use_checkpointing=False,
     ):
         super().__init__()
+        self.use_checkpointing = use_checkpointing
 
         concat = True
         adapt_channels = False
@@ -388,7 +397,11 @@ class Decoder(nn.Module):
     def forward(self, encoder_features, x):
         x = self.upsampling(encoder_features=encoder_features, x=x)
         x = self.joining(encoder_features, x)
-        x = self.basic_module(x)
+        
+        if self.use_checkpointing and x.requires_grad:
+            x = checkpoint(self.basic_module, x, use_reentrant=False)
+        else:
+            x = self.basic_module(x)
         return x
 
     @staticmethod
@@ -451,26 +464,30 @@ class NoUpsampling(AbstractUpsampling):
     def _no_upsampling(x, size):
         return x
 
-def create_encoders(in_channels, f_maps, basic_module, conv_kernel_size, conv_padding, conv_upscale, dropout_prob, layer_order, num_groups, pool_kernel_size, is3d):
+def create_encoders(in_channels, f_maps, basic_module, conv_kernel_size, conv_padding, conv_upscale, dropout_prob, layer_order, num_groups, pool_kernel_size, is3d, use_checkpointing=False):
     encoders = []
     for i, out_feature_num in enumerate(f_maps):
         if i == 0:
             encoder = Encoder(
                 in_channels, out_feature_num, apply_pooling=False, basic_module=basic_module,
                 conv_layer_order=layer_order, conv_kernel_size=conv_kernel_size, num_groups=num_groups,
-                padding=conv_padding, upscale=conv_upscale, dropout_prob=dropout_prob, is3d=is3d
+                padding=conv_padding, upscale=conv_upscale, dropout_prob=dropout_prob, is3d=is3d,
+                # First encoder usually gets image which has require_grad=False, so checkpointing might fail/warn if we force it.
+                # However, our logic checks x.requires_grad inside forward.
+                use_checkpointing=use_checkpointing
             )
         else:
             encoder = Encoder(
                 f_maps[i - 1], out_feature_num, basic_module=basic_module,
                 conv_layer_order=layer_order, conv_kernel_size=conv_kernel_size, num_groups=num_groups,
                 pool_kernel_size=pool_kernel_size, padding=conv_padding, upscale=conv_upscale,
-                dropout_prob=dropout_prob, is3d=is3d
+                dropout_prob=dropout_prob, is3d=is3d,
+                use_checkpointing=use_checkpointing
             )
         encoders.append(encoder)
     return nn.ModuleList(encoders)
 
-def create_decoders(f_maps, basic_module, conv_kernel_size, conv_padding, layer_order, num_groups, upsample, dropout_prob, is3d):
+def create_decoders(f_maps, basic_module, conv_kernel_size, conv_padding, layer_order, num_groups, upsample, dropout_prob, is3d, use_checkpointing=False):
     decoders = []
     reversed_f_maps = list(reversed(f_maps))
     for i in range(len(reversed_f_maps) - 1):
@@ -483,7 +500,8 @@ def create_decoders(f_maps, basic_module, conv_kernel_size, conv_padding, layer_
         decoder = Decoder(
             in_feature_num, out_feature_num, basic_module=basic_module,
             conv_layer_order=layer_order, conv_kernel_size=conv_kernel_size, num_groups=num_groups,
-            padding=conv_padding, upsample=upsample, dropout_prob=dropout_prob, is3d=is3d
+            padding=conv_padding, upsample=upsample, dropout_prob=dropout_prob, is3d=is3d,
+            use_checkpointing=use_checkpointing
         )
         decoders.append(decoder)
     return nn.ModuleList(decoders)

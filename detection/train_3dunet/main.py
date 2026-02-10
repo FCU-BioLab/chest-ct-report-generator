@@ -77,6 +77,7 @@ def cmd_train(args):
     config.training.batch_size = args.batch_size
     config.training.learning_rate = args.learning_rate
     config.training.loss_type = getattr(args, 'loss_type', 'combined')
+    config.training.accumulation_steps = getattr(args, 'accumulation_steps', 1)
     
     # Only override output_dir if explicitly provided
     if args.output_dir is not None:
@@ -92,6 +93,12 @@ def cmd_train(args):
     config.data.test_ratio = args.test_ratio
     config.data.test_ratio = args.test_ratio
     config.data.split_seed = args.split_seed
+    
+    # New options
+    if hasattr(args, 'positive_ratio'):
+        config.data.positive_ratio = args.positive_ratio
+    if hasattr(args, 'use_checkpointing'):
+        config.model.use_checkpointing = args.use_checkpointing
     
     set_seed(config.seed)
     
@@ -295,6 +302,12 @@ def main():
     train.add_argument('--loss_type', default='combined', 
                        choices=['dice', 'tversky', 'combined'],
                        help='Loss function type')
+    train.add_argument('--positive_ratio', type=float, default=0.7, 
+                       help='Positive sample ratio (0.0-1.0)')
+    train.add_argument('--use_checkpointing', action='store_true',
+                       help='Enable gradient checkpointing')
+    train.add_argument('--accumulation_steps', type=int, default=1,
+                       help='Gradient accumulation steps')
     
     # STATS
     stats = subparsers.add_parser('stats')
