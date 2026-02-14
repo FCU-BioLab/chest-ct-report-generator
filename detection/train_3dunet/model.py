@@ -61,10 +61,8 @@ class UNet3D(nn.Module):
         # Final Convolution
         self.final_conv = nn.Conv3d(f_maps[0], out_channels, 1)
 
-        if is_segmentation and not testing:
-            self.final_activation = nn.Identity() # Sigmoid/Softmax handled in Loss or Training Loop usually
-        else:
-            self.final_activation = nn.Identity()
+        # Sigmoid/Softmax handled in Loss or Training Loop
+        self.final_activation = nn.Identity()
 
     def forward(self, x):
         # Encoder
@@ -165,10 +163,7 @@ class AttentionUNet3D(nn.Module):
         # Final Convolution
         self.final_conv = nn.Conv3d(f_maps[0], out_channels, 1)
 
-        if is_segmentation and not testing:
-            self.final_activation = nn.Identity()
-        else:
-            self.final_activation = nn.Identity()
+        self.final_activation = nn.Identity()
 
     def forward(self, x):
         # Encoder path

@@ -93,7 +93,6 @@ class TrainingConfig:
     # Hardware
     use_amp: bool = True
     grad_clip: float = 1.0
-    grad_clip: float = 1.0
     accumulation_steps: int = 1
 
 
@@ -133,7 +132,6 @@ class Config:
         config_dict = {
             'data': self.data.__dict__,
             'model': self.model.__dict__,
-            'model': self.model.__dict__,
             'training': self.training.__dict__,
             'postprocessing': self.postprocessing.__dict__,
             'experiment_name': self.experiment_name,
@@ -155,7 +153,6 @@ class Config:
         
         config = cls()
         config.data = DataConfig(**config_dict.get('data', {}))
-        config.model = ModelConfig(**config_dict.get('model', {}))
         config.model = ModelConfig(**config_dict.get('model', {}))
         config.training = TrainingConfig(**config_dict.get('training', {}))
         config.postprocessing = PostProcessingConfig(**config_dict.get('postprocessing', {}))

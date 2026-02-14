@@ -9,9 +9,7 @@ Trainer logic for 3D U-Net.
 import logging
 import os
 import json
-import shutil
 from pathlib import Path
-from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -27,59 +25,13 @@ from torch.cuda.amp import GradScaler, autocast
 from .dataset import VolumetricDataset, collate_video_batch
 from .model import get_model
 from .config import Config
-from .config import Config
 from .detector import NoduleDetector, DetectedNodule, GroundTruthNodule
+from .segmentation import generate_lung_mask
 from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
 
-# ============ Postprocess Functions ============
 
-def generate_lung_mask(volume: np.ndarray, threshold: float = 0.45, dilate_mm: float = 5.0) -> np.ndarray:
-    """
-    從 CT volume 生成肺部遮罩
-    
-    Args:
-        volume: (D, H, W) normalized to [0, 1]
-        threshold: 肺部閾值 (肺部較暗，低於此值視為肺部)
-        dilate_mm: 擴張半徑 (mm)，確保覆蓋邊緣結節
-        
-    Returns:
-        lung_mask: (D, H, W) binary mask
-    """
-    # 肺部通常比較暗（在 CT 中 HU 較低）
-    # 提高閾值避免漏分割
-    binary = (volume < threshold).astype(np.uint8)
-    
-    # 形態學操作：閉運算填補小孔
-    struct = morphology.ball(3) if binary.ndim == 3 else morphology.disk(3)
-    binary = morphology.binary_closing(binary, struct)
-    
-    # 填充 2D 孔洞（逐切片）
-    for z in range(binary.shape[0]):
-        binary[z] = ndimage.binary_fill_holes(binary[z])
-    
-    # 移除小的連通區域，保留最大的兩個（左右肺）
-    labels = measure.label(binary)
-    if labels.max() > 0:
-        regions = measure.regionprops(labels)
-        # 按面積排序，保留最大的兩個
-        regions = sorted(regions, key=lambda x: x.area, reverse=True)
-        lung_mask = np.zeros_like(binary)
-        for region in regions[:2]:  # 最多保留兩個（左右肺）
-            if region.area > 500:  # 降低閾值，避免遺漏
-                lung_mask[labels == region.label] = 1
-    else:
-        lung_mask = binary
-    
-    # 擴張肺遮罩，確保邊緣結節不被過濾
-    if dilate_mm > 0:
-        # 假設 1 voxel ≈ 1mm（可根據實際 spacing 調整）
-        dilate_radius = max(2, int(dilate_mm))
-        struct_dilate = morphology.ball(dilate_radius) if lung_mask.ndim == 3 else morphology.disk(dilate_radius)
-        lung_mask = morphology.binary_dilation(lung_mask, struct_dilate)
-    
-    return lung_mask.astype(np.uint8)
 
 
 def postprocess_prediction(
@@ -469,8 +421,6 @@ def calc_detection_rate(logits_batch, masks_batch, threshold=0.1):
             # GT is empty
             if pred.sum() == 0:
                 hits += 1 # Correctly predicted empty
-        else:
-             pass 
 
     return hits
 
@@ -550,7 +500,6 @@ class UNet3DTrainer:
             self.use_combined_loss = False
         
         # Detector
-        # Detector
         self.detector = NoduleDetector(
             threshold=getattr(config.postprocessing, 'det_threshold', 0.5), 
             min_size_mm3=getattr(config.postprocessing, 'det_min_size', 30.0)
@@ -596,7 +545,8 @@ class UNet3DTrainer:
             image_size=self.config.model.image_size,
             max_depth=self.config.data.max_depth,
             augmentation=(split == 'train'),
-            positive_ratio=getattr(self.config.data, 'positive_ratio', 0.7)
+            positive_ratio=getattr(self.config.data, 'positive_ratio', 0.7),
+            full_volume=(self.config.data.max_depth > 1000) # Enable full volume if max_depth is large
         )
         return DataLoader(
             dataset,
@@ -632,7 +582,8 @@ class UNet3DTrainer:
                 split='test',
                 image_size=self.config.model.image_size,
                 max_depth=self.config.data.max_depth,
-                augmentation=False
+                augmentation=False,
+                full_volume=(self.config.data.max_depth > 1000)
             )
             info = test_dataset.get_dataset_info()
             dataset_info['splits']['test'] = info
@@ -667,7 +618,7 @@ class UNet3DTrainer:
             'val_det_recall': [],
             'val_det_f1': []
         }
-        best_dice = 0.0
+        best_f1 = 0.0
         
         for epoch in range(1, self.config.training.epochs + 1):
             train_loss = self.train_epoch(epoch)
@@ -687,21 +638,21 @@ class UNet3DTrainer:
             history['val_det_f1'].append(val_metrics['det_f1'])
             
             # Log epoch summary
-            logger.info(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_metrics['loss']:.4f}, Val Dice={val_metrics['dice']:.4f}")
+            logger.info(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_metrics['loss']:.4f}, Val Det F1={val_metrics['det_f1']:.4f}")
             
             # Plot all metrics
             self.plot_metrics(history)
             
-            # Save Best
-            val_dice = val_metrics['dice']
-            if val_dice > best_dice:
-                best_dice = val_dice
-                logger.info(f"🆕 New best model saved (Dice={best_dice:.4f})")
+            # Save Best (based on Detection F1)
+            val_f1 = val_metrics['det_f1']
+            if val_f1 > best_f1:
+                best_f1 = val_f1
+                logger.info(f"🆕 New best model saved (Detection F1={best_f1:.4f})")
                 torch.save(self.model.state_dict(), self.output_dir / "best_model.pth")
             
             # Save periodic
             if epoch % 5 == 0:
-                self.save_checkpoint(epoch, val_dice)
+                self.save_checkpoint(epoch, val_f1, is_best=(val_f1 == best_f1))
                 
     def train_epoch(self, epoch: int) -> float:
         self.model.train()
@@ -723,20 +674,20 @@ class UNet3DTrainer:
                     # Deep supervision
                     loss = 0
                     weights = [1.0, 0.5, 0.25, 0.125]
-                    for i, logit in enumerate(logits[:len(weights)]):
+                    for j, logit in enumerate(logits[:len(weights)]):
                         if logit.shape != masks.shape:
                              target = F.interpolate(masks, size=logit.shape[2:], mode='nearest')
                         else:
                             target = masks
                         
                         if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
-                            loss += weights[i] * self.combined_loss(logit, target)
+                            loss += weights[j] * self.combined_loss(logit, target)
                         elif hasattr(self, 'tversky'):
-                            loss += weights[i] * self.tversky(logit, target)
+                            loss += weights[j] * self.tversky(logit, target)
                         else:
                             l_focal = self.focal(logit, target)
                             l_dice = self.dice(logit, target)
-                            loss += weights[i] * (l_focal + 2.0 * l_dice)
+                            loss += weights[j] * (l_focal + 2.0 * l_dice)
                 else:
                     # Single output
                     if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
@@ -867,9 +818,9 @@ class UNet3DTrainer:
         # Log comprehensive metrics
         logger.info(f"📊 Val Metrics [Ep {epoch}]:")
         logger.info(f"  Loss: {avg_loss:.4f}")
-        logger.info(f"  Segmentation: Dice={avg_seg['dice']:.4f}, IoU={avg_seg['iou']:.4f}, Precision={avg_seg['precision']:.4f}, Recall={avg_seg['recall']:.4f}")
-        logger.info(f"  Detection: Rate={det_rate*100:.2f}%, Precision={det_precision:.4f}, Recall={det_recall:.4f}, F1={det_f1:.4f}")
-        logger.info(f"  Detection Counts: TP={total_tp}, FP={total_fp}, FN={total_fn}")
+        logger.info(f"  Detection: F1={det_f1:.4f}, Precision={det_precision:.4f}, Recall={det_recall:.4f}, Rate={det_rate*100:.1f}%")
+        logger.info(f"  Counts: TP={total_tp}, FP={total_fp}, FN={total_fn}")
+        # logger.info(f"  Segmentation (Debug): Dice={avg_seg['dice']:.4f}, IoU={avg_seg['iou']:.4f}")
         
         return {
             'loss': avg_loss,
@@ -886,69 +837,7 @@ class UNet3DTrainer:
             'det_fn': total_fn
         }
 
-    def _match_nodules(self, 
-                      predictions: List[DetectedNodule], 
-                      gt_nodules: List[GroundTruthNodule], 
-                      iou_threshold: float = 0.1) -> Dict:
-        """
-        Match predictions to GT nodules and assign status (TP/FP/FN).
-        Returns counts and updated lists.
-        """
-        # Reset status
-        for p in predictions: p.match_status = "FP" # Default to FP
-        for g in gt_nodules: g.match_status = "Missed" # Default to Missed
-        
-        matches = 0
-        
-        # Greedy matching: Sort predictions by confidence (prob)
-        predictions.sort(key=lambda x: x.probability, reverse=True)
-        
-        for pred in predictions:
-            best_iou = 0
-            best_gt_idx = -1
-            
-            p_bbox = pred.geometry.bbox
-            p_vol = pred.geometry.volume_mm3
-            
-            # Find best overlapping GT that isn't matched yet?
-            # Or allow multiple preds to match same GT? 
-            # Standard: 1-to-1 matching for counting.
-            
-            for i, gt in enumerate(gt_nodules):
-                # Quick bbox check
-                g_bbox = gt.geometry.bbox
-                if (p_bbox[0] > g_bbox[3] or p_bbox[3] < g_bbox[0] or
-                    p_bbox[1] > g_bbox[4] or p_bbox[4] < g_bbox[1] or
-                    p_bbox[2] > g_bbox[5] or p_bbox[5] < g_bbox[2]):
-                    continue
-                    
-                # Calculate IoU
-                # We need masks to calc IoU accurately. 
-                # But here we only have objects.
-                # Approx IoU using bbox? No, inaccurate.
-                # We should have done matching on masks in `calc_detection_metrics`.
-                # But we want to link objects.
-                # Let's use bbox IoU as approximation if masks not available?
-                # OR, since we have slice indices and ranges, we can try to compute intersection if simple shapes.
-                # BUT, `detector.py` doesn't keep the masks of objects.
-                
-                # REVISIT: We should do matching when we have masks available, OR accept BBox IoU.
-                # Given we are in trainer.py loop where we have masks `pred_post` and `mask_np`.
-                # We can match `DetectedNodule` to `GroundTruthNodule` by finding which label they correspond to!
-                
-                # DetectedNodule has `id` which is the label in `pred_post`.
-                # GroundTruthNodule has `id` which is the label in `mask_np`.
-                # We can compute IoU between label `pred.id` and label `gt.id` in the masks!
-                pass
-            pass
-            
-        # WAIT: I can't easily do IoU here without the masks. 
-        # I should put this logic INSIDE the loop in comprehensive_test where I have `pred_post` and `mask_np`.
-        # So I will NOT add a complex `_match_nodules` that re-calculates IoU.
-        # Instead I will do matching in `comprehensive_test` using the masks.
-        
-        return {}
-    
+
     def _save_debug_image(self, images, masks, logits, epoch):
         """Save debug visualization image"""
         try:
@@ -1107,12 +996,14 @@ class UNet3DTrainer:
             logger.warning(f"Failed to plot metrics: {e}")
 
     def save_checkpoint(self, epoch: int, score: float, is_best: bool = False):
+        config_path = str(self.ckpt_dir / "config.json")
+        self.config.save(config_path)
         state = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'score': score,
-            'config': self.config.save(str(self.ckpt_dir / "config.json")) # save config is weird here, returns None
+            'config_path': config_path
         }
         
         filename = f"checkpoint_ep{epoch}.pt"
@@ -1972,7 +1863,6 @@ class UNet3DTrainer:
     def _generate_test_summary_plots(self, summary, output_dir):
         """Generate summary plots for test results"""
         import matplotlib.pyplot as plt
-        import json
         
         sample_results = summary['sample_results']
         

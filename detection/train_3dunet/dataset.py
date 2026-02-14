@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 import torch
-import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import warnings
@@ -34,6 +33,7 @@ class VolumetricDataset(Dataset):
         split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
         split_seed: int = 42,
         positive_ratio: float = 0.7, # 70% chance to pick nodule center, 30% random crop
+        full_volume: bool = False, # If True, return full volume (no cropping)
     ):
         self.npz_dir = Path(npz_dir)
         self.split = split
@@ -43,9 +43,7 @@ class VolumetricDataset(Dataset):
         self.split_ratios = split_ratios
         self.split_seed = split_seed
         self.positive_ratio = positive_ratio
-        self.augmentation = augmentation
-        self.split_ratios = split_ratios
-        self.split_seed = split_seed
+        self.full_volume = full_volume
         
         # Load file list
         self.samples = self._load_file_list()
@@ -114,19 +112,20 @@ class VolumetricDataset(Dataset):
             if np.random.rand() > self.positive_ratio:
                  use_random_crop = True
         
-        if use_random_crop:
-            # Random crop from anywhere
-            max_start = max(0, D - self.max_depth)
-            start = np.random.randint(0, max_start + 1)
-            end = min(D, start + self.max_depth)
-        elif D > self.max_depth:
-            # Center crop (Positive sample)
-            half = self.max_depth // 2
-            start = max(0, center_idx - half)
-            end = min(D, start + self.max_depth)
-            if end - start < self.max_depth:
-                if start == 0: end = min(D, self.max_depth)
-                elif end == D: start = max(0, D - self.max_depth)
+        if not self.full_volume:
+            if use_random_crop:
+                # Random crop from anywhere
+                max_start = max(0, D - self.max_depth)
+                start = np.random.randint(0, max_start + 1)
+                end = min(D, start + self.max_depth)
+            elif D > self.max_depth:
+                # Center crop (Positive sample)
+                half = self.max_depth // 2
+                start = max(0, center_idx - half)
+                end = min(D, start + self.max_depth)
+                if end - start < self.max_depth:
+                    if start == 0: end = min(D, self.max_depth)
+                    elif end == D: start = max(0, D - self.max_depth)
         
         # Crop (numpy)
         frames = frames[start:end]
