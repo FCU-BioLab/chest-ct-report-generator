@@ -91,7 +91,6 @@ def cmd_train(args):
     config.data.train_ratio = args.train_ratio
     config.data.val_ratio = args.val_ratio
     config.data.test_ratio = args.test_ratio
-    config.data.test_ratio = args.test_ratio
     config.data.split_seed = args.split_seed
     
     # New options
@@ -159,7 +158,6 @@ def cmd_test(args):
     
     config = Config()
     config.data.npz_dir = args.npz_dir
-    config.data.npz_dir = args.npz_dir
     if getattr(args, 'full_volume', False):
          config.data.max_depth = 10000 # Large enough for full volume
          config.training.batch_size = 1 # Force batch size 1 to avoid OOM
@@ -168,9 +166,7 @@ def cmd_test(args):
     else:
         config.data.max_depth = args.max_depth
     config.model.base_filters = args.base_filters
-    config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
-    config.model.use_attention = getattr(args, 'attention', False)
     config.model.use_attention = getattr(args, 'attention', False)
     config.device = args.device
     
@@ -221,8 +217,6 @@ def cmd_fulltest(args):
     logging.info("🔬 Starting Comprehensive Test...")
     
     config = Config()
-    config = Config()
-    config.data.npz_dir = args.npz_dir
     config.data.npz_dir = args.npz_dir
     if getattr(args, 'full_volume', False):
          config.data.max_depth = 10000
@@ -232,10 +226,8 @@ def cmd_fulltest(args):
     else:
         config.data.max_depth = args.max_depth
     config.model.base_filters = args.base_filters
-    config.model.base_filters = args.base_filters
     config.model.image_size = args.image_size
     config.model.use_attention = getattr(args, 'attention', False)
-    config.device = args.device
     config.device = args.device
     config.num_workers = 0  # Avoid multiprocessing issues on Windows
     

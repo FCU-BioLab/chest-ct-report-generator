@@ -1,20 +1,18 @@
 # 肺結節偵測模組 (Nodule Detection Module)
 
-本模組實現了基於 3D U-Net 的肺結節偵測與分割系統。除了精確分割病灶體積外，還包含完整的後處理流程，能輸出結構化的病灶報告（包含解剖位置、體積、直徑與信心度）。
+基於 3D U-Net 的肺結節偵測與分割系統。除了精確分割病灶體積外，還包含完整的後處理流程，輸出結構化的病灶報告（含解剖位置、體積、直徑與信心度）。
 
-## 快速開始 (Quick Start)
+## 快速開始
 
 ### 1. 數據預處理
 
-將 LNDb 或 MSD 數據集轉換為 NPZ 體積格式：
-
 ```cmd
-REM 使用 Full Volume 轉換
 python -m detection.train_3dunet.main convert ^
     --dataset lndb ^
     --input_dir E:\lung_ct_lesion_dataset\LNDb ^
     --output_dir cache/lndb_volume_npz_agr1 ^
     --full_volume ^
+    --min_agreement 2 ^
     --image_size 256
 ```
 
@@ -22,75 +20,81 @@ python -m detection.train_3dunet.main convert ^
 
 ```cmd
 python -m detection.train_3dunet.main train ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --epochs 200 ^
     --batch_size 1 ^
     --accumulation_steps 4 ^
     --attention ^
-    --train_ratio 0.8 ^
-    --val_ratio 0.1 ^
-    --test_ratio 0.1 ^
-    --split_seed 42 ^
     --loss_type combined ^
     --positive_ratio 0.9 ^
-    --use_checkpointing
+    --use_checkpointing ^
+    --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1 ^
+    --split_seed 42
 ```
 
-**參數說明**:
-- `--attention`: 啟用 SE Block + Attention Gate
-- `--loss_type`: `combined`(預設) / `tversky` / `dice`
-- `--split_seed`: 分割數據集的隨機種子
-- `--train_ratio` (等): 訓練/驗證/測試集比例
-- `--positive_ratio`: 正樣本(結節中心)採樣比例 (0.0-1.0)。設為 0.9 表示 10% 時間採樣隨機背景 (Hard Negative Mining)。
-- `--use_checkpointing`: 啟用 Gradient Checkpointing (以時間換空間，節省顯存)。
-- `--use_amp`:啟用混合精度訓練 (預設開啟)。
-
-### 3. 完整測試 (含偵測報告)
-
-運行完整測試，生成視覺化報告、GIF 動畫及偵測指標：
+### 3. 完整測試
 
 ```cmd
 python -m detection.train_3dunet.main fulltest ^
-    --npz_dir cache/lndb_volume_npz_agr1 ^
     --checkpoint path\to\best_model.pth ^
+    --npz_dir cache/lndb_volume_npz_agr1 ^
     --split test ^
     --attention ^
-    --det_prob_threshold 0.9 ^
     --det_prob_threshold 0.5 ^
-    --det_min_size 5.0 ^
+    --det_min_size 10.0 ^
     --full_volume
 ```
-*註: `det_prob_threshold 0.9` 與 `det_min_size 1.0` 為實驗驗證後的最佳參數，能在保留小結節的同時過濾誤報。*
 
-**輸出內容**:
-- `test_results.json`: 每個樣本的指標 (Dice, IoU, Precision, Recall)
-- `detections.json`: **所有偵測到的結節總表** (含解剖位置與幾何資訊)
-- `test_summary.png`: 彙總統計圖
-- 每個 Case 資料夾:
-  - `animation.gif`: Overlay GIF 動畫
-  - `stats.json`: 該案例的詳細偵測數據
-
-**選項**:
-- `--no_gif`: 跳過 GIF 輸出
-- `--no_gif`: 跳過 GIF 輸出
-- `--no_viz`: 跳過所有視覺化
-- `--full_volume`: **[NEW]** 使用完整 CT 體積進行測試 (Sliding Window Inference)，解決大體積 OOM 問題。
-
-### 4. 快速測試
-
-只計算 Dice Score：
+### 4. 快速測試 / 統計
 
 ```cmd
+REM Dice Score 測試
 python -m detection.train_3dunet.main test ^
-    --npz_dir cache/lndb_volume_npz_agr1 ^
     --checkpoint path\to\model.pth ^
-    --attention
+    --npz_dir cache/lndb_volume_npz_agr1 --attention
+
+REM 數據集統計
+python -m detection.train_3dunet.main stats ^
+    --npz_dir cache/lndb_volume_npz_agr1
 ```
 
-### 5. 統計
+---
 
-```cmd
-python -m detection.train_3dunet.main stats --npz_dir cache/lndb_volume_npz_agr1
-```
+## 主要參數
+
+### 預處理 (`convert`)
+
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--dataset` | 必填 | `lndb` 或 `msd` |
+| `--full_volume` | off | 保留完整 CT 體積 (不裁切 Z 軸) |
+| `--min_agreement` | 1 | 最低醫師一致性 (1-3) |
+| `--context_slices` | 32 | 結節中心前後各取的切片數 |
+| `--min_diameter` | 3.0 | 最小結節直徑 (mm) |
+| `--image_size` | 256 | 輸出影像尺寸 |
+
+### 訓練 (`train`)
+
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--attention` | off | 啟用 SE Block + Attention Gate |
+| `--loss_type` | `combined` | `combined` / `tversky` / `dice` |
+| `--positive_ratio` | 0.7 | 正樣本比例 (1.0=全正, 0.9=10% Hard Negative) |
+| `--use_checkpointing` | off | Gradient Checkpointing (省顯存) |
+| `--accumulation_steps` | 1 | 梯度累積步數 |
+| `--batch_size` | 2 | Batch Size |
+| `--learning_rate` | 1e-4 | 學習率 |
+
+### 測試 (`fulltest` / `test`)
+
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--det_prob_threshold` | 0.5 | 偵測機率閾值 |
+| `--det_min_size` | 10.0 | 最小偵測體積 (mm³) |
+| `--full_volume` | off | 完整體積推理 (Sliding Window) |
+| `--no_viz` | off | 跳過視覺化 |
+| `--no_gif` | off | 跳過 GIF 動畫 |
+| `--no_postprocess` | off | 跳過後處理 |
 
 ---
 
@@ -99,16 +103,17 @@ python -m detection.train_3dunet.main stats --npz_dir cache/lndb_volume_npz_agr1
 | 文件 | 說明 |
 |------|------|
 | `main.py` | CLI 入口 |
-| `config.py` | 配置管理 |
-| `model.py` | 3D U-Net 模型 |
-| `buildingblocks.py` | 模型組件 (SE, Attention Gate) |
-| `dataset.py` | PyTorch Dataset |
-| `trainer.py` | 訓練/測試邏輯 |
-| `detector.py` | 結節偵測與後處理 (NoduleDetector) |
+| `config.py` | 配置管理 (dataclass) |
+| `preprocess.py` | 數據預處理 (LNDb/MSD → NPZ) |
+| `dataset.py` | PyTorch Dataset + Collate |
+| `model.py` | UNet3D / AttentionUNet3D |
+| `buildingblocks.py` | 模型基礎組件 (Conv, SE, Attention Gate) |
+| `trainer.py` | 訓練 / 驗證 / 測試 / 視覺化 |
+| `detector.py` | NoduleDetector (後處理 + 偵測) |
 | `location_estimator.py` | 肺葉位置估算 |
-| `preprocess.py` | 數據轉換 (LNDb/MSD → NPZ) |
+| `segmentation.py` | 肺部分割 (GPU/CPU 雙路徑) |
 | `visualize.py` | 數據視覺化工具 |
-| `pipeline.md` | 詳細 Pipeline 說明 |
+| `utils.py` | 工具函式 (Split 等) |
 
 ## 詳細說明
 
