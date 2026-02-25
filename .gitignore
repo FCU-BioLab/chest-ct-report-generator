@@ -10,13 +10,15 @@ segmentation/segmentation_result
 segmentation/result
 segmentation/video_result
 volume_output_unet3d
+bundles
 cache
-datasets
+dataset
 detection/__pycache__
 detection/video_result
 models
 *.pt
 *.html
+results*
 temp
 **/*pycache*/
 **/*results/
