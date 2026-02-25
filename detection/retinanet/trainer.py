@@ -1,0 +1,1036 @@
+#!/usr/bin/env python3
+"""
+RetinaNet 偵測訓練器 (Trainer)
+=============================
+
+基於 MONAI 的 3D RetinaNet 肺結節偵測訓練器。
+對齊 bundles/lung_nodule_ct_detection 的配置與資料處理。
+"""
+
+import gc
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from sklearn.metrics import precision_recall_curve, roc_curve, auc, average_precision_score
+
+from .config import RetinaNetConfig
+from .dataset import (
+    prepare_datalist, build_train_transform, build_val_transform,
+    build_det_transform, build_rand_transform,
+    get_full_split_info,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ─── MONAI 延遲載入 (Lazy Imports) ──────────────────────────────────
+def _import_monai():
+    """載入 MONAI 元件。若未安裝則拋出清楚的錯誤訊息。"""
+    try:
+        from monai.apps.detection.metrics.coco import COCOMetric
+        from monai.apps.detection.metrics.matching import matching_batch
+        from monai.apps.detection.networks.retinanet_detector import RetinaNetDetector
+        from monai.apps.detection.networks.retinanet_network import (
+            RetinaNet,
+            resnet_fpn_feature_extractor,
+        )
+        from monai.apps.detection.utils.anchor_utils import AnchorGeneratorWithAnchorShape
+        from monai.data import box_utils, Dataset, PersistentDataset
+        from monai.data.utils import no_collation
+        from monai.networks.nets import resnet
+        from monai.utils import set_determinism
+        return {
+            "COCOMetric": COCOMetric,
+            "matching_batch": matching_batch,
+            "RetinaNetDetector": RetinaNetDetector,
+            "RetinaNet": RetinaNet,
+            "resnet_fpn_feature_extractor": resnet_fpn_feature_extractor,
+            "AnchorGeneratorWithAnchorShape": AnchorGeneratorWithAnchorShape,
+            "box_utils": box_utils,
+            "Dataset": Dataset,
+            "PersistentDataset": PersistentDataset,
+            "no_collation": no_collation,
+            "resnet": resnet,
+            "set_determinism": set_determinism,
+        }
+    except ImportError as e:
+        raise ImportError(
+            "未找到 MONAI detection 模組。請安裝:\n"
+            "  pip install 'monai[all]>=1.3'\n"
+            f"原始錯誤: {e}"
+        ) from e
+
+
+def _import_warmup_scheduler():
+    """載入 GradualWarmupScheduler。"""
+    # 嘗試從 bundle scripts 載入
+    try:
+        # 先加入 bundle 路徑
+        bundle_scripts_dir = str(Path(__file__).resolve().parent.parent.parent / "bundles" / "lung_nodule_ct_detection")
+        if bundle_scripts_dir not in sys.path:
+            sys.path.insert(0, bundle_scripts_dir)
+        from scripts.warmup_scheduler import GradualWarmupScheduler
+        return GradualWarmupScheduler
+    except ImportError:
+        logger.warning("無法載入 GradualWarmupScheduler，使用手動 Warmup 替代。")
+        return None
+
+
+# ─── 訓練器 (Trainer) ────────────────────────────────────────────────
+class RetinaNetTrainer:
+    """
+    遵循 MONAI LUNA16 教學模式的 3D RetinaNet 訓練器。
+    """
+
+    def __init__(self, config: RetinaNetConfig):
+        self.config = config
+        self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+
+        # 輸出目錄（時間戳記）
+        self.output_dir = Path(config.output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 設定 file logging
+        self._setup_file_logging()
+
+        # 匯入 MONAI
+        self.monai = _import_monai()
+        self.monai["set_determinism"](seed=config.seed)
+
+        # 儲存 config.json
+        self._save_config()
+
+        # 建立模型
+        self.detector = self._build_detector()
+        self.detector.to(self.device)
+
+        # 設定資料
+        self.train_loader, self.val_loader = self._setup_data()
+
+        # 儲存 data.json（分割資訊）
+        self._save_data_split_info()
+
+        # 儲存 sample visualization
+        self._save_sample_visualization()
+
+        # 設定優化器與排程器
+        self.optimizer, self.scheduler = self._setup_optimizer()
+
+        # AMP (混合精度)
+        self.scaler = torch.amp.GradScaler("cuda") if config.amp else None
+
+        # COCO 指標
+        self.coco_metric = self.monai["COCOMetric"](
+            classes=["nodule"],
+            iou_list=config.iou_list,
+            max_detection=[100],
+        )
+
+        # 歷史紀錄
+        self.history = {
+            "train_loss": [], "train_cls_loss": [], "train_box_loss": [],
+            "val_mAP": [], "val_mAP_per_iou": {},
+            "roc_fpr": [], "roc_tpr": [], "roc_auc": [],
+            "pr_precision": [], "pr_recall": [], "pr_ap": [],
+        }
+
+        logger.info(f"🔧 RetinaNet Trainer 初始化完成")
+        logger.info(f"  裝置: {self.device}")
+        logger.info(f"  輸出路徑: {self.output_dir}")
+        logger.info(f"  patch_size: {config.patch_size}")
+        logger.info(f"  feature_map_scales: {config.feature_map_scales}")
+        logger.info(f"  iou_list: {config.iou_list}")
+
+    def _setup_file_logging(self):
+        """設定檔案 logging — 同時輸出到 console 和 train.log。"""
+        log_file = self.output_dir / "train.log"
+        file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        # 加到 root logger
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        logger.info(f"📄 Log 檔案: {log_file}")
+
+    def _save_config(self):
+        """儲存完整 config 到 config.json。"""
+        import dataclasses
+        config_dict = dataclasses.asdict(self.config)
+        config_path = self.output_dir / "config.json"
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config_dict, f, indent=2, ensure_ascii=False, default=str)
+        logger.info(f"📋 Config 已儲存至: {config_path}")
+
+    def _save_data_split_info(self):
+        """儲存資料分割資訊到 data.json。"""
+        cfg = self.config
+        try:
+            split_info = get_full_split_info(
+                cfg.data_path, cfg.train_ratio, cfg.val_ratio, cfg.test_ratio, cfg.split_seed,
+            )
+            data_path = self.output_dir / "data.json"
+            with open(data_path, "w", encoding="utf-8") as f:
+                json.dump(split_info, f, indent=2, ensure_ascii=False, default=str)
+            stats = split_info["statistics"]
+            logger.info(f"📊 資料分割已儲存至: {data_path}")
+            logger.info(
+                f"  Train: {stats['train_total']} ({stats['train_with_nodule']} with nodule) | "
+                f"Val: {stats['val_total']} ({stats['val_with_nodule']} with nodule) | "
+                f"Test: {stats['test_total']} ({stats['test_with_nodule']} with nodule)"
+            )
+        except Exception as e:
+            logger.warning(f"無法儲存 data.json: {e}")
+
+    def _save_sample_visualization(self, n_samples: int = 4):
+        """儲存訓練樣本可視化 — 顯示影像切片與 bounding box。"""
+        cfg = self.config
+        try:
+            import matplotlib.patches as mpatches
+            from .dataset import build_val_transform
+            val_transform = build_val_transform(
+                spacing=cfg.spacing, hu_min=cfg.hu_min, hu_max=cfg.hu_max,
+            )
+
+            train_data = prepare_datalist(
+                cfg.data_path, "train",
+                cfg.train_ratio, cfg.val_ratio, cfg.test_ratio, cfg.split_seed,
+            )
+
+            # 選取有 box 的樣本
+            samples_with_box = [it for it in train_data if len(it.get("box", [])) > 0]
+            selected = samples_with_box[:n_samples]
+
+            if len(selected) == 0:
+                logger.info("  ⚠️ 無有效樣本可供可視化")
+                return
+
+            n_cols = min(n_samples, len(selected))
+            fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 10))
+            if n_cols == 1:
+                axes = axes[:, np.newaxis]
+
+            for i, item in enumerate(selected):
+                if i >= n_cols:
+                    break
+
+                processed = val_transform(item)
+                # Orientationd("RAS") 後：
+                #   image shape = (1, dim0, dim1, dim2) = (1, Y, X, Z)
+                #   box = [dim0_min, dim1_min, dim2_min, dim0_max, dim1_max, dim2_max]
+                #       = [Y_min,    X_min,    Z_min,    Y_max,    X_max,    Z_max]
+                image = processed["image"].numpy()
+                boxes = processed["box"].numpy()
+
+                _, nY, nX, nZ = image.shape
+
+                if len(boxes) > 0:
+                    box0 = boxes[0]
+                    center_z = int((box0[2] + box0[5]) / 2)  # Z 軸中心
+                    center_y = int((box0[0] + box0[3]) / 2)  # Y 軸中心
+                else:
+                    center_z = nZ // 2
+                    center_y = nY // 2
+
+                center_z = max(0, min(center_z, nZ - 1))
+                center_y = max(0, min(center_y, nY - 1))
+
+                # ─── Axial (固定 Z，顯示 Y × X) ───
+                # imshow(shape=(Y,X)) → rows=Y, cols=X
+                # Rectangle(x=col, y=row) → (X_min=box[1], Y_min=box[0])
+                ax_ax = axes[0, i]
+                ax_ax.imshow(image[0, :, :, center_z], cmap="gray")
+                for box in boxes:
+                    if box[2] <= center_z <= box[5]:
+                        rect = mpatches.Rectangle(
+                            (box[1], box[0]),          # (col=X_min, row=Y_min)
+                            box[4] - box[1],           # width  = X range
+                            box[3] - box[0],           # height = Y range
+                            linewidth=2, edgecolor='lime', facecolor='none',
+                        )
+                        ax_ax.add_patch(rect)
+                sid = Path(item.get('image', '')).stem[:25]
+                ax_ax.set_title(f"Axial (Z={center_z})\n{sid}…", fontsize=8)
+                ax_ax.axis("off")
+
+                # ─── Coronal (固定 Y，顯示 Z × X) ───
+                # image[0, center_y, :, :] = (X, Z) → 但我們要 (Z rows, X cols)
+                # → 取 image[0, center_y, :, :].T 或直接 slice 成 (Z, X)
+                # image[0, :, :, :] 的 shape 是 (Y, X, Z)
+                # image[0, y_idx, :, :] 的 shape 是 (X, Z) → .T = (Z, X)
+                ax_cor = axes[1, i]
+                coronal_slice = image[0, center_y, :, :].T  # (Z, X)
+                ax_cor.imshow(coronal_slice, cmap="gray", origin="lower")
+                for box in boxes:
+                    if box[0] <= center_y <= box[3]:
+                        rect = mpatches.Rectangle(
+                            (box[1], box[2]),          # (col=X_min, row=Z_min)
+                            box[4] - box[1],           # width  = X range
+                            box[5] - box[2],           # height = Z range
+                            linewidth=2, edgecolor='cyan', facecolor='none',
+                        )
+                        ax_cor.add_patch(rect)
+                ax_cor.set_title(f"Coronal (Y={center_y})", fontsize=8)
+                ax_cor.axis("off")
+
+            plt.suptitle("Sample Visualization (Post-Transform)", fontsize=12)
+            plt.tight_layout()
+            viz_path = self.output_dir / "sample_visualization.png"
+            plt.savefig(viz_path, dpi=150, bbox_inches="tight")
+            plt.close()
+            logger.info(f"🖼️ 樣本可視化已儲存至: {viz_path}")
+
+        except Exception as e:
+            logger.warning(f"樣本可視化失敗: {e}", exc_info=True)
+
+    def _build_detector(self):
+        """建立 MONAI RetinaNetDetector。對齊 Bundle train_luna16.json。"""
+        cfg = self.config
+        M = self.monai
+
+        # 1) 錨點生成器 — 使用 per-axis feature_map_scales
+        anchor_generator = M["AnchorGeneratorWithAnchorShape"](
+            feature_map_scales=cfg.feature_map_scales,
+            base_anchor_shapes=cfg.base_anchor_shapes,
+        )
+
+        # 2) 骨幹網路 (Backbone): ResNet50 + FPN
+        conv1_t_size = [max(7, 2 * s + 1) for s in cfg.conv1_t_stride]
+        backbone = M["resnet"].ResNet(
+            block=M["resnet"].ResNetBottleneck,
+            layers=[3, 4, 6, 3],  # ResNet50
+            block_inplanes=M["resnet"].get_inplanes(),
+            n_input_channels=cfg.n_input_channels,
+            conv1_t_stride=cfg.conv1_t_stride,
+            conv1_t_size=conv1_t_size,
+        )
+        feature_extractor = M["resnet_fpn_feature_extractor"](
+            backbone=backbone,
+            spatial_dims=cfg.spatial_dims,
+            pretrained_backbone=False,
+            trainable_backbone_layers=None,
+            returned_layers=cfg.returned_layers,
+        )
+
+        # 3) RetinaNet — 使用固定 size_divisible
+        num_anchors = anchor_generator.num_anchors_per_location()[0]
+
+        net = M["RetinaNet"](
+            spatial_dims=cfg.spatial_dims,
+            num_classes=cfg.num_classes,
+            num_anchors=num_anchors,
+            feature_extractor=feature_extractor,
+            size_divisible=cfg.size_divisible,
+        )
+
+        # 載入預訓練權重
+        if cfg.pretrained_weights and os.path.exists(cfg.pretrained_weights):
+            pretrained = torch.load(
+                cfg.pretrained_weights, map_location="cpu", weights_only=False
+            )
+            matched = net.load_state_dict(pretrained, strict=False)
+            n_total = len(pretrained)
+            n_loaded = n_total - len(matched.unexpected_keys)
+            logger.info(
+                f"  ✅ 已載入預訓練權重: {cfg.pretrained_weights}"
+                f" ({n_loaded}/{n_total} keys matched)"
+            )
+            if matched.missing_keys:
+                logger.info(f"  ⚠️ Missing keys: {matched.missing_keys}")
+        elif cfg.pretrained_weights:
+            logger.warning(f"  ⚠️ 預訓練權重檔案不存在: {cfg.pretrained_weights}")
+
+        net = torch.jit.script(net)
+
+        # 4) 偵測器包裝
+        detector = M["RetinaNetDetector"](
+            network=net, anchor_generator=anchor_generator, debug=False
+        )
+
+        # 訓練元件設定
+        detector.set_atss_matcher(
+            num_candidates=cfg.atss_num_candidates, center_in_gt=False
+        )
+        detector.set_hard_negative_sampler(
+            batch_size_per_image=cfg.hn_batch_size_per_image,
+            positive_fraction=cfg.hn_positive_fraction,
+            pool_size=cfg.hn_pool_size,
+            min_neg=cfg.hn_min_neg,
+        )
+        detector.set_target_keys(box_key="box", label_key="label")
+
+        # 推論元件設定
+        detector.set_box_selector_parameters(
+            score_thresh=cfg.score_thresh,
+            topk_candidates_per_level=cfg.topk_candidates_per_level,
+            nms_thresh=cfg.nms_thresh,
+            detections_per_img=cfg.detections_per_img,
+        )
+        detector.set_sliding_window_inferer(
+            roi_size=cfg.val_patch_size,
+            overlap=0.25,
+            sw_batch_size=1,
+            mode="constant",
+            device="cpu",
+        )
+
+        logger.info(f"  每位置錨點數: {num_anchors}")
+        logger.info(f"  尺寸整除倍數: {cfg.size_divisible}")
+        return detector
+
+    def _setup_data(self):
+        """準備訓練與驗證 DataLoader。使用 MONAI Transform Pipeline。"""
+        cfg = self.config
+        M = self.monai
+        from monai.transforms import Compose
+
+        train_data = prepare_datalist(
+            cfg.data_path, "train",
+            cfg.train_ratio, cfg.val_ratio, cfg.test_ratio, cfg.split_seed,
+        )
+        val_data = prepare_datalist(
+            cfg.data_path, "val",
+            cfg.train_ratio, cfg.val_ratio, cfg.test_ratio, cfg.split_seed,
+        )
+
+        # 過濾不存在的檔案
+        def _filter_existing(data_list):
+            valid = []
+            missing = 0
+            for item in data_list:
+                img_path = item.get("image", "")
+                if os.path.exists(img_path):
+                    valid.append(item)
+                else:
+                    missing += 1
+            if missing > 0:
+                logger.warning(f"  ⚠️ 跳過 {missing} 筆不存在的檔案")
+            return valid
+
+        train_data = _filter_existing(train_data)
+        val_data = _filter_existing(val_data)
+
+        val_transform = build_val_transform(
+            spacing=cfg.spacing,
+            hu_min=cfg.hu_min,
+            hu_max=cfg.hu_max,
+        )
+
+        if cfg.cache_dataset:
+            # PersistentDataset: 快取到磁碟，避免 RAM 不足
+            det_transform = build_det_transform(
+                spacing=cfg.spacing,
+                hu_min=cfg.hu_min,
+                hu_max=cfg.hu_max,
+            )
+            rand_transform = build_rand_transform(
+                patch_size=cfg.patch_size,
+                batch_size=cfg.batch_size,
+            )
+
+            cache_dir = Path("cache/monai_persistent_cache")
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+            # 組合 deterministic + random transforms
+            # PersistentDataset 自動偵測 Randomizable transforms，
+            # 只快取 deterministic 部分，每次載入後重新套用 random 部分
+            full_train_transform = Compose([det_transform, rand_transform])
+
+            logger.info(f"  📦 使用 PersistentDataset 磁碟快取: {cache_dir}")
+            train_ds = M["PersistentDataset"](
+                train_data,
+                transform=full_train_transform,
+                cache_dir=str(cache_dir / "train"),
+            )
+
+            val_ds = M["PersistentDataset"](
+                val_data,
+                transform=val_transform,
+                cache_dir=str(cache_dir / "val"),
+            )
+        else:
+            # 傳統 Dataset
+            train_transform = build_train_transform(
+                patch_size=cfg.patch_size,
+                batch_size=cfg.batch_size,
+                spacing=cfg.spacing,
+                hu_min=cfg.hu_min,
+                hu_max=cfg.hu_max,
+            )
+            train_ds = M["Dataset"](train_data, transform=train_transform)
+            val_ds = M["Dataset"](val_data, transform=val_transform)
+
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=1,  # MONAI detection 使用 batch_size=1 配合 no_collation
+            shuffle=True,
+            num_workers=cfg.num_workers,
+            pin_memory=torch.cuda.is_available(),
+            collate_fn=M["no_collation"],
+            persistent_workers=cfg.num_workers > 0,
+        )
+        # ⚠️ 驗證用 num_workers=0 (主進程載入)
+        # 全尺寸 CT (512×512×600+) 在 Windows 上會耗盡共享記憶體 (error 1455)
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=1,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+            collate_fn=M["no_collation"],
+        )
+
+        logger.info(f"  訓練集樣本數: {len(train_ds)}")
+        logger.info(f"  驗證集樣本數: {len(val_ds)}")
+        return train_loader, val_loader
+
+    def _setup_optimizer(self):
+        """設定 SGD 優化器 + GradualWarmupScheduler + StepLR。"""
+        cfg = self.config
+
+        optimizer = torch.optim.SGD(
+            self.detector.network.parameters(),
+            lr=cfg.lr,
+            momentum=0.9,
+            weight_decay=cfg.weight_decay,
+            nesterov=True,
+        )
+
+        # 嘗試使用 GradualWarmupScheduler
+        GradualWarmupScheduler = _import_warmup_scheduler()
+
+        after_scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma
+        )
+
+        if GradualWarmupScheduler is not None:
+            scheduler = GradualWarmupScheduler(
+                optimizer,
+                multiplier=1,
+                total_epoch=cfg.warmup_epochs,
+                after_scheduler=after_scheduler,
+            )
+            self._use_manual_warmup = False
+            logger.info(f"  使用 GradualWarmupScheduler (warmup={cfg.warmup_epochs})")
+        else:
+            scheduler = after_scheduler
+            self._use_manual_warmup = True
+            logger.info(f"  使用手動 Warmup (warmup={cfg.warmup_epochs})")
+
+        return optimizer, scheduler
+
+    # ─── 訓練流程 ────────────────────────────────────────────────
+    def train(self):
+        """主訓練迴圈。"""
+        cfg = self.config
+        best_metric = 0.0
+        best_epoch = -1
+
+        logger.info(f"🚀 開始 RetinaNet 訓練，共 {cfg.epochs} Epochs")
+
+        for epoch in range(cfg.epochs):
+            # 訓練一個 Epoch
+            train_metrics = self._train_epoch(epoch)
+
+            self.history["train_loss"].append(train_metrics["loss"])
+            self.history["train_cls_loss"].append(train_metrics["cls_loss"])
+            self.history["train_box_loss"].append(train_metrics["box_loss"])
+
+            self.scheduler.step()
+
+            # 儲存最新模型
+            self._save_model(self.output_dir / "model_last.pt")
+
+            # 驗證
+            if (epoch + 1) % cfg.val_interval == 0:
+                logger.info("  開始驗證...")
+                try:
+                    val_metrics = self._validate(epoch)
+                    self.history["val_mAP"].append(val_metrics.get("mAP", 0))
+                    self.history["val_mAP_per_iou"] = val_metrics.get("coco", {})
+
+                    # ROC / PR curves
+                    curves = val_metrics.get("_curves", {})
+                    self.history["roc_fpr"] = curves.get("roc_fpr", [])
+                    self.history["roc_tpr"] = curves.get("roc_tpr", [])
+                    self.history["roc_auc"] = val_metrics.get("roc_auc", 0)
+                    self.history["pr_precision"] = curves.get("pr_precision", [])
+                    self.history["pr_recall"] = curves.get("pr_recall", [])
+                    self.history["pr_ap"] = val_metrics.get("pr_ap", 0)
+
+                    # FROC & F1
+                    froc = val_metrics.get("froc", {})
+                    self.history["froc_score"] = froc.get("froc_score", 0)
+                    self.history["detection_f1"] = val_metrics.get("detection_f1", 0)
+                    self.history["detection_precision"] = val_metrics.get("detection_precision", 0)
+                    self.history["detection_recall"] = val_metrics.get("detection_recall", 0)
+
+                    current_map = val_metrics.get("mAP", 0)
+
+                    if current_map > best_metric:
+                        best_metric = current_map
+                        best_epoch = epoch + 1
+                        self._save_model(self.output_dir / "model_best.pt")
+                        logger.info(f"  💾 儲存新的最佳模型 (mAP={best_metric:.4f})")
+
+                    logger.info(
+                        f"  Epoch {epoch+1}: mAP={current_map:.4f} | "
+                        f"F1={val_metrics.get('detection_f1', 0):.4f} | "
+                        f"FROC={froc.get('froc_score', 0):.4f} | "
+                        f"歷史最佳: {best_metric:.4f} @ epoch {best_epoch}"
+                    )
+                except Exception as e:
+                    logger.error(f"  ❌ 驗證失敗: {e}", exc_info=True)
+
+            # 儲存歷程
+            self._save_history()
+            self._plot_curves()
+
+        logger.info(
+            f"✅ 訓練完成。最佳 mAP: {best_metric:.4f} (Epoch {best_epoch})"
+        )
+
+        # ─── 訓練結束後自動執行測試集評估 ───
+        self._run_test_evaluation()
+
+    def _train_epoch(self, epoch: int) -> Dict[str, float]:
+        """執行單一訓練 Epoch。"""
+        cfg = self.config
+        self.detector.train()
+
+        epoch_loss = 0.0
+        epoch_cls_loss = 0.0
+        epoch_box_loss = 0.0
+        step = 0
+
+        # 手動 Warmup (僅在無 GradualWarmupScheduler 時使用)
+        if self._use_manual_warmup and epoch < cfg.warmup_epochs:
+            warmup_factor = (epoch + 1) / cfg.warmup_epochs
+            for pg in self.optimizer.param_groups:
+                pg["lr"] = cfg.lr * warmup_factor
+
+        start_time = time.time()
+
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{cfg.epochs}", leave=True, ncols=100)
+
+        for batch_data in pbar:
+            step += 1
+
+            # RandCropBoxByPosNegLabeld (num_samples=batch_size) 會讓 DataLoader
+            # 回傳 list of list。需展平為 list of dict。
+            # 格式: batch_data = [ [sample_0_crop_0, sample_0_crop_1, ...] ]
+            # (因為 DataLoader batch_size=1, collate_fn=no_collation)
+            inputs = [
+                batch_data_ii["image"].to(self.device)
+                for batch_data_i in batch_data
+                for batch_data_ii in batch_data_i
+            ]
+            targets = [
+                {
+                    "label": batch_data_ii["label"].to(self.device),
+                    "box": batch_data_ii["box"].to(self.device),
+                }
+                for batch_data_i in batch_data
+                for batch_data_ii in batch_data_i
+            ]
+
+            # 清除梯度
+            for param in self.detector.network.parameters():
+                param.grad = None
+
+            if cfg.amp and self.scaler is not None:
+                with torch.amp.autocast("cuda"):
+                    outputs = self.detector(inputs, targets)
+                    loss = (
+                        cfg.w_cls * outputs[self.detector.cls_key]
+                        + outputs[self.detector.box_reg_key]
+                    )
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                outputs = self.detector(inputs, targets)
+                loss = (
+                    cfg.w_cls * outputs[self.detector.cls_key]
+                    + outputs[self.detector.box_reg_key]
+                )
+                loss.backward()
+                self.optimizer.step()
+
+            epoch_loss += loss.detach().item()
+            epoch_cls_loss += outputs[self.detector.cls_key].detach().item()
+            epoch_box_loss += outputs[self.detector.box_reg_key].detach().item()
+
+            pbar.set_postfix({
+                "Loss": f"{loss.detach().item():.4f}",
+                "Cls": f"{outputs[self.detector.cls_key].detach().item():.4f}",
+                "Box": f"{outputs[self.detector.box_reg_key].detach().item():.4f}",
+            })
+
+        elapsed = time.time() - start_time
+        avg_loss = epoch_loss / max(step, 1)
+        avg_cls = epoch_cls_loss / max(step, 1)
+        avg_box = epoch_box_loss / max(step, 1)
+
+        logger.info(
+            f"📊 Epoch {epoch+1} summary: AvgLoss={avg_loss:.4f} "
+            f"(Cls={avg_cls:.4f}, Box={avg_box:.4f}) "
+            f"[{elapsed:.1f}s] LR={self.optimizer.param_groups[0]['lr']:.6f}"
+        )
+
+        del inputs, targets
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        return {"loss": avg_loss, "cls_loss": avg_cls, "box_loss": avg_box}
+
+    def _validate(self, epoch: int) -> Dict[str, float]:
+        """執行驗證並計算 COCO mAP 及其他指標。"""
+        cfg = self.config
+        self.detector.eval()
+
+        val_outputs_all = []
+        val_targets_all = []
+
+        start_time = time.time()
+
+        pbar = tqdm(self.val_loader, desc=f"Validation {epoch+1}", leave=False, ncols=100)
+
+        # 釋放訓練階段的 GPU 記憶體
+        torch.cuda.empty_cache()
+
+        with torch.no_grad():
+            for val_data in pbar:
+                # 驗證時無 RandCropBoxByPosNegLabeld，所以 val_data 不是 nested list
+                # val_data = [dict] (因 no_collation + batch_size=1)
+
+                # 檢查是否需要滑動視窗
+                use_inferer = not all(
+                    item["image"][0, ...].numel() < np.prod(cfg.val_patch_size)
+                    for item in val_data
+                )
+
+                val_inputs = [item.pop("image").to(self.device) for item in val_data]
+
+                if cfg.amp:
+                    with torch.amp.autocast("cuda"):
+                        val_outputs = self.detector(val_inputs, use_inferer=use_inferer)
+                else:
+                    val_outputs = self.detector(val_inputs, use_inferer=use_inferer)
+
+                val_outputs_all += val_outputs
+                val_targets_all += val_data
+
+        elapsed = time.time() - start_time
+        logger.info(f"  驗證耗時: {elapsed:.1f}s")
+
+        # 計算所有指標
+        del val_inputs
+        torch.cuda.empty_cache()
+
+        M = self.monai
+
+        pred_boxes_list = [o[self.detector.target_box_key].cpu().numpy() for o in val_outputs_all]
+        pred_scores_list = [o[self.detector.pred_score_key].cpu().numpy() for o in val_outputs_all]
+        pred_labels_list = [o[self.detector.target_label_key].cpu().numpy() for o in val_outputs_all]
+        gt_boxes_list = [t[self.detector.target_box_key].cpu().numpy() for t in val_targets_all]
+        gt_labels_list = [t[self.detector.target_label_key].cpu().numpy() for t in val_targets_all]
+
+        from .metrics import compute_all_metrics
+        all_metrics = compute_all_metrics(
+            pred_boxes_list=pred_boxes_list,
+            pred_scores_list=pred_scores_list,
+            pred_labels_list=pred_labels_list,
+            gt_boxes_list=gt_boxes_list,
+            gt_labels_list=gt_labels_list,
+            iou_thresh_match=cfg.iou_list[0],
+            coco_metric=self.coco_metric,
+            matching_batch_fn=M["matching_batch"],
+            box_iou_fn=M["box_utils"].box_iou,
+        )
+
+        return all_metrics
+
+    def _run_test_evaluation(self):
+        """訓練結束後，自動載入最佳模型並在測試集上評估。"""
+        cfg = self.config
+        M = self.monai
+
+        best_model_path = self.output_dir / "model_best.pt"
+        if not best_model_path.exists():
+            logger.warning("  ⚠️ 找不到 model_best.pt，跳過測試集評估")
+            return
+
+        logger.info("🧪 開始測試集評估...")
+
+        # 載入最佳模型
+        self.detector.network = torch.jit.load(str(best_model_path)).to(self.device)
+        logger.info(f"  📂 已載入最佳模型: {best_model_path}")
+
+        # 準備測試資料
+        test_data = prepare_datalist(
+            cfg.data_path, "test",
+            cfg.train_ratio, cfg.val_ratio, cfg.test_ratio, cfg.split_seed,
+        )
+
+        # 過濾不存在的檔案
+        test_data = [d for d in test_data if os.path.exists(d.get("image", ""))]
+
+        if len(test_data) == 0:
+            logger.warning("  ⚠️ 測試集為空，跳過評估")
+            return
+
+        val_transform = build_val_transform(
+            spacing=cfg.spacing,
+            hu_min=cfg.hu_min,
+            hu_max=cfg.hu_max,
+        )
+
+        if cfg.cache_dataset:
+            cache_dir = Path("cache/monai_persistent_cache/test")
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            test_ds = M["PersistentDataset"](
+                test_data,
+                transform=val_transform,
+                cache_dir=str(cache_dir),
+            )
+        else:
+            test_ds = M["Dataset"](test_data, transform=val_transform)
+
+        # ⚠️ 測試用 num_workers=0，避免 Windows 共享記憶體不足
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=1,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+            collate_fn=M["no_collation"],
+        )
+
+        logger.info(f"  測試集樣本數: {len(test_ds)}")
+
+        # 執行推論
+        self.detector.eval()
+        test_outputs_all = []
+        test_targets_all = []
+
+        start_time = time.time()
+        torch.cuda.empty_cache()
+
+        pbar = tqdm(test_loader, desc="Testing", leave=False, ncols=100)
+
+        with torch.no_grad():
+            for test_data_batch in pbar:
+                use_inferer = not all(
+                    item["image"][0, ...].numel() < np.prod(cfg.val_patch_size)
+                    for item in test_data_batch
+                )
+                test_inputs = [item.pop("image").to(self.device) for item in test_data_batch]
+
+                if cfg.amp:
+                    with torch.amp.autocast("cuda"):
+                        test_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+                else:
+                    test_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+
+                test_outputs_all += test_outputs
+                test_targets_all += test_data_batch
+
+        elapsed = time.time() - start_time
+        logger.info(f"  測試推論耗時: {elapsed:.1f}s")
+
+        # 計算所有指標
+        del test_inputs
+        torch.cuda.empty_cache()
+
+        pred_boxes_list = [o[self.detector.target_box_key].cpu().numpy() for o in test_outputs_all]
+        pred_scores_list = [o[self.detector.pred_score_key].cpu().numpy() for o in test_outputs_all]
+        pred_labels_list = [o[self.detector.target_label_key].cpu().numpy() for o in test_outputs_all]
+        gt_boxes_list = [t[self.detector.target_box_key].cpu().numpy() for t in test_targets_all]
+        gt_labels_list = [t[self.detector.target_label_key].cpu().numpy() for t in test_targets_all]
+
+        from .metrics import compute_all_metrics
+        test_results = compute_all_metrics(
+            pred_boxes_list=pred_boxes_list,
+            pred_scores_list=pred_scores_list,
+            pred_labels_list=pred_labels_list,
+            gt_boxes_list=gt_boxes_list,
+            gt_labels_list=gt_labels_list,
+            iou_thresh_match=cfg.iou_list[0],
+            coco_metric=self.coco_metric,
+            matching_batch_fn=M["matching_batch"],
+            box_iou_fn=M["box_utils"].box_iou,
+        )
+
+        test_results["num_samples"] = len(test_ds)
+        test_results["inference_time_s"] = elapsed
+
+        # 儲存測試結果（排除曲線大型陣列）
+        import json
+        save_results = {k: v for k, v in test_results.items() if k != "_curves"}
+        test_path = self.output_dir / "test_metrics.json"
+        with open(test_path, "w", encoding="utf-8") as f:
+            json.dump(save_results, f, indent=2, ensure_ascii=False)
+
+        logger.info(
+            f"🧪 測試集結果: mAP={test_results.get('mAP', 0):.4f} | "
+            f"F1={test_results.get('detection_f1', 0):.4f} | "
+            f"FROC={test_results.get('froc', {}).get('froc_score', 0):.4f} | "
+            f"ROC-AUC={test_results.get('roc_auc', 0):.4f}"
+        )
+        logger.info(f"  📁 已儲存至: {test_path}")
+
+    # ─── 檢查點 (Checkpoint) ───────────────────────────────────────
+    def _save_model(self, path: Path):
+        """使用 TorchScript 儲存模型。"""
+        torch.jit.save(self.detector.network, str(path))
+
+    def load_checkpoint(self, path: str):
+        """載入 TorchScript 模型檢查點。"""
+        self.detector.network = torch.jit.load(path).to(self.device)
+        logger.info(f"📂 已讀取檢查點: {path}")
+
+    def _save_history(self):
+        """儲存訓練歷程為 JSON。"""
+        with open(self.output_dir / "history.json", "w", encoding='utf-8') as f:
+            json.dump(self.history, f, indent=2)
+
+    def _plot_curves(self):
+        """繪製訓練曲線與驗證 mAP。"""
+        try:
+            # 1. Loss 曲線
+            plt.figure(figsize=(10, 6))
+            epochs = range(1, len(self.history["train_loss"]) + 1)
+            plt.plot(epochs, self.history["train_loss"], label="Total Loss")
+            plt.plot(epochs, self.history["train_cls_loss"], label="Cls Loss")
+            plt.plot(epochs, self.history["train_box_loss"], label="Box Loss")
+            plt.xlabel("Epoch")
+            plt.ylabel("Loss")
+            plt.title("Training Loss")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(self.output_dir / "loss.png")
+            plt.close()
+
+            # 2. mAP 曲線
+            if len(self.history["val_mAP"]) > 0:
+                plt.figure(figsize=(10, 6))
+                val_epochs = [
+                    (i + 1) * self.config.val_interval
+                    for i in range(len(self.history["val_mAP"]))
+                ]
+                plt.plot(val_epochs, self.history["val_mAP"], marker="o", label="mAP")
+                plt.xlabel("Epoch")
+                plt.ylabel("mAP")
+                plt.title("Validation mAP")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(self.output_dir / "val_map.png")
+                plt.close()
+
+            # 3. ROC Curve
+            if len(self.history.get("roc_fpr", [])) > 0:
+                plt.figure(figsize=(8, 8))
+                plt.plot(
+                    self.history["roc_fpr"], self.history["roc_tpr"],
+                    color='darkorange', lw=2,
+                    label=f'ROC (AUC = {self.history["roc_auc"]:.2f})',
+                )
+                plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+                plt.xlim([0.0, 1.0])
+                plt.ylim([0.0, 1.05])
+                plt.xlabel('False Positive Rate')
+                plt.ylabel('True Positive Rate')
+                plt.title('Receiver Operating Characteristic')
+                plt.legend(loc="lower right")
+                plt.grid(True)
+                plt.savefig(self.output_dir / "roc_curve.png")
+                plt.close()
+
+            # 4. PR Curve
+            if len(self.history.get("pr_recall", [])) > 0:
+                plt.figure(figsize=(8, 8))
+                plt.plot(
+                    self.history["pr_recall"], self.history["pr_precision"],
+                    color='blue', lw=2,
+                    label=f'PR (AP = {self.history["pr_ap"]:.2f})',
+                )
+                plt.xlabel('Recall')
+                plt.ylabel('Precision')
+                plt.title('Precision-Recall Curve')
+                plt.legend(loc="lower left")
+                plt.grid(True)
+                plt.savefig(self.output_dir / "pr_curve.png")
+                plt.close()
+
+            # 5. F1 Curve
+            if len(self.history.get("pr_recall", [])) > 0:
+                p = np.array(self.history["pr_precision"])
+                r = np.array(self.history["pr_recall"])
+                f1 = 2 * (p * r) / (p + r + 1e-8)
+
+                plt.figure(figsize=(10, 6))
+                plt.plot(r, f1, color='green', lw=2, label=f'Max F1 = {np.max(f1):.4f}')
+                plt.xlabel('Recall')
+                plt.ylabel('F1 Score')
+                plt.title('F1 Score vs Recall')
+                plt.legend(loc="best")
+                plt.grid(True)
+                plt.savefig(self.output_dir / "f1_curve.png")
+                plt.close()
+
+        except Exception as e:
+            logger.error(f"繪圖失敗: {e}")
+
+    # ─── 推論 (Inference) ──────────────────────────────────────────
+    def predict(self, input_path: str) -> List[Dict]:
+        """
+        對單一檔案執行偵測。
+        使用與驗證相同的 Transform Pipeline 載入影像。
+        """
+        self.detector.eval()
+        cfg = self.config
+
+        # 使用 val_transform 載入影像
+        val_transform = build_val_transform(
+            spacing=cfg.spacing,
+            hu_min=cfg.hu_min,
+            hu_max=cfg.hu_max,
+        )
+
+        # 建立 dummy data dict (只有 image，無 box/label)
+        # 需要提供空 box/label 以通過 transform
+        data = {
+            "image": input_path,
+            "box": np.zeros((0, 6), dtype=np.float32).tolist(),
+            "label": np.zeros((0,), dtype=np.int64).tolist(),
+        }
+        processed = val_transform(data)
+        image_tensor = processed["image"].to(self.device)
+
+        with torch.no_grad():
+            if cfg.amp:
+                with torch.amp.autocast("cuda"):
+                    outputs = self.detector([image_tensor], use_inferer=True)
+            else:
+                outputs = self.detector([image_tensor], use_inferer=True)
+
+        results = []
+        for output in outputs:
+            results.append({
+                "boxes": output[self.detector.target_box_key].cpu().numpy(),
+                "labels": output[self.detector.target_label_key].cpu().numpy(),
+                "scores": output[self.detector.pred_score_key].cpu().numpy(),
+            })
+        return results
