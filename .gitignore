@@ -27,3 +27,4 @@ temp
 **/*results/
 **/checkpoints/
 **/*logs/
+n8n/runtime

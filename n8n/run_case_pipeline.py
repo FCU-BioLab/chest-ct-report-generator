@@ -15,6 +15,7 @@ import json
 import math
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -330,8 +331,44 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
     with open(features_path, "r", encoding="utf-8") as f:
         features = json.load(f)
 
+    out_dir = case_dir / "05_report"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     if not features:
-        raise ValueError("Features list is empty. Cannot generate report.")
+        # Keep pipeline executable even when segmentation produced empty masks.
+        report = {
+            "report_id": f"AUTO_{case_id}",
+            "scan_date": datetime.now().strftime("%Y-%m-%d"),
+            "impression": "No measurable pulmonary nodule features were extracted.",
+            "findings": [],
+            "note": "Feature list is empty; check segmentation masks and thresholds.",
+        }
+
+        txt_path = out_dir / "report.txt"
+        json_path = out_dir / "report.json"
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(report["impression"] + "\n")
+            f.write(report["note"] + "\n")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+
+        report_meta = {
+            "text_path": str(txt_path),
+            "json_path": str(json_path),
+            "report_id": report["report_id"],
+            "scan_date": report["scan_date"],
+            "status": "empty_features",
+        }
+        with open(out_dir / "report_meta.json", "w", encoding="utf-8") as f:
+            json.dump(report_meta, f, ensure_ascii=False, indent=2)
+
+        return {
+            "report_dir": str(out_dir),
+            "report_text_path": report_meta["text_path"],
+            "report_json_path": report_meta["json_path"],
+            "report_meta_path": str(out_dir / "report_meta.json"),
+            "report_status": report_meta["status"],
+        }
 
     generator = get_report_generator(use_llm=use_llm)
     report = generator.generate_report(
@@ -339,8 +376,6 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         report_id=f"AUTO_{case_id}",
     )
 
-    out_dir = case_dir / "05_report"
-    out_dir.mkdir(parents=True, exist_ok=True)
     saved = generator.save_report(report, str(out_dir), formats=["txt", "json"])
 
     report_meta = {

@@ -1,4 +1,4 @@
-﻿# CT Report Pipeline - Configuration
+# CT Report Pipeline - Configuration
 project_root: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline"
 
 datasets:
@@ -24,13 +24,13 @@ datasets:
     candidates_csv: "candidates.csv"
 
 medsam2:
-  root: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/segmentation/MedSAM2"
+  root: "C:/GitHub/chest-ct-report-generator/segmentation/MedSAM2"
   config: "sam2.1_hiera_t512.yaml"
   checkpoints:
-    pretrained: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/segmentation/MedSAM2/checkpoints/MedSAM2_CTLesion.pt"
+    pretrained: "C:/GitHub/chest-ct-report-generator/segmentation/MedSAM2/checkpoints/MedSAM2_CTLesion.pt"
     finetuned: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/segmentation/MedSAM2_best_model.pth"
-    latest: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/segmentation/MedSAM2/checkpoints/MedSAM2_latest.pt"
-  default_checkpoint: "finetuned"
+    latest: "C:/GitHub/chest-ct-report-generator/segmentation/MedSAM2/checkpoints/MedSAM2_latest.pt"
+  default_checkpoint: "pretrained"
 
 llm:
   model_name: "meta-llama/Llama-3.2-1B-Instruct"

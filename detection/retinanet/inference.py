@@ -255,8 +255,8 @@ def main():
     
     # 1. 初始化模型
     logger.info(f"🔧 初始化模型: {args.model_path}...")
-    cfg = RetinaNetConfig() # 使用預設設定
-    trainer = RetinaNetTrainer(cfg)
+    cfg = RetinaNetConfig(output_dir=str(output_dir), cache_dataset=False) # 使用預設設定
+    trainer = RetinaNetTrainer(cfg, inference_only=True)
     
     try:
         # 嘗試載入 TorchScript

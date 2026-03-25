@@ -45,7 +45,7 @@
     },
     {
       "parameters": {
-        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage detect --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\" --model-path \"' + $json.model_path + '\" --threshold ' + $json.threshold + ' --device \"' + $json.device + '\"' }}"
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage detect --case-id \"' + $node[\"Normalize Input\"].json.case_id + '\" --work-dir \"' + $node[\"Normalize Input\"].json.work_dir + '\" --model-path \"' + $node[\"Normalize Input\"].json.model_path + '\" --threshold ' + $node[\"Normalize Input\"].json.threshold + ' --device \"' + $node[\"Normalize Input\"].json.device + '\"' }}"
       },
       "id": "2c4f79b1-20e2-48da-b6be-4b1a0cf853f2",
       "name": "Detect",
@@ -58,7 +58,7 @@
     },
     {
       "parameters": {
-        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage segment --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\"' }}"
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage segment --case-id \"' + $node[\"Normalize Input\"].json.case_id + '\" --work-dir \"' + $node[\"Normalize Input\"].json.work_dir + '\"' }}"
       },
       "id": "4c456dbe-8f66-45ba-8120-17df2f0be3b3",
       "name": "Segment",
@@ -71,7 +71,7 @@
     },
     {
       "parameters": {
-        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage feature --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\"' }}"
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage feature --case-id \"' + $node[\"Normalize Input\"].json.case_id + '\" --work-dir \"' + $node[\"Normalize Input\"].json.work_dir + '\"' }}"
       },
       "id": "6fb05ef6-5470-4bf8-9a76-739eaebda6cb",
       "name": "Feature",
@@ -84,7 +84,7 @@
     },
     {
       "parameters": {
-        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage report --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\"' + ($json.use_llm ? ' --use-llm' : '') }}"
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage report --case-id \"' + $node[\"Normalize Input\"].json.case_id + '\" --work-dir \"' + $node[\"Normalize Input\"].json.work_dir + '\"' + ($node[\"Normalize Input\"].json.use_llm ? ' --use-llm' : '') }}"
       },
       "id": "6f7fe7e8-9d77-4284-8d5e-9e8cab73d888",
       "name": "Report",
