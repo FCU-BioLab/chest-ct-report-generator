@@ -73,7 +73,7 @@ class MedSAM2Segmenter:
         
         # Verify checkpoint exists
         if not self.checkpoint_path.exists():
-            print(f"⚠️ Warning: Checkpoint not found at {checkpoint_path}")
+            print(f"Warning: checkpoint not found at {checkpoint_path}")
     
     def load_model(self):
         """Load MedSAM2 model from checkpoint."""
@@ -110,7 +110,7 @@ class MedSAM2Segmenter:
             import sam2.modeling.memory_encoder
             import sam2.modeling.position_encoding
             import sam2.modeling.sam2_base
-            print("  ✓ Pre-imported sam2 modules")
+            print("  [OK] Pre-imported sam2 modules")
             
             # Clear any existing Hydra configuration
             from hydra.core.global_hydra import GlobalHydra
@@ -156,7 +156,7 @@ class MedSAM2Segmenter:
                 state_dict = sd["model"]
             elif "model_state_dict" in sd:
                 state_dict = sd["model_state_dict"]
-                print(f"  ✓ Using fine-tuned checkpoint format (model_state_dict)")
+                print("  [OK] Using fine-tuned checkpoint format (model_state_dict)")
                 print(f"    Best val dice: {sd.get('best_val_dice', 'N/A')}")
                 print(f"    Epoch: {sd.get('epoch', 'N/A')}")
             else:
@@ -165,20 +165,20 @@ class MedSAM2Segmenter:
             
             missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
             if missing_keys:
-                print(f"  ⚠ Missing keys: {len(missing_keys)}")
+                print(f"  [WARN] Missing keys: {len(missing_keys)}")
             if unexpected_keys:
-                print(f"  ⚠ Unexpected keys: {len(unexpected_keys)}")
+                print(f"  [WARN] Unexpected keys: {len(unexpected_keys)}")
             
             model = model.to(self.device)
             model.eval()
             
             self.predictor = model
             
-            print(f"✓ MedSAM2 model loaded successfully")
+            print("OK: MedSAM2 model loaded successfully")
             print(f"  Device: {self.device}")
             
         except Exception as e:
-            print(f"✗ MedSAM2 loading failed: {e}")
+            print(f"ERROR: MedSAM2 loading failed: {e}")
             raise
         finally:
             # Restore original state

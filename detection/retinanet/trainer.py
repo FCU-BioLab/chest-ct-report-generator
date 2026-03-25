@@ -94,8 +94,9 @@ class RetinaNetTrainer:
     遵循 MONAI LUNA16 教學模式的 3D RetinaNet 訓練器。
     """
 
-    def __init__(self, config: RetinaNetConfig):
+    def __init__(self, config: RetinaNetConfig, inference_only: bool = False):
         self.config = config
+        self.inference_only = inference_only
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
         # 輸出目錄（時間戳記）
@@ -117,26 +118,24 @@ class RetinaNetTrainer:
         self.detector.to(self.device)
 
         # 設定資料
-        self.train_loader, self.val_loader = self._setup_data()
-
-        # 儲存 data.json（分割資訊）
-        self._save_data_split_info()
-
-        # 儲存 sample visualization
-        self._save_sample_visualization()
-
-        # 設定優化器與排程器
-        self.optimizer, self.scheduler = self._setup_optimizer()
-
-        # AMP (混合精度)
-        self.scaler = torch.amp.GradScaler("cuda") if config.amp else None
-
-        # COCO 指標
-        self.coco_metric = self.monai["COCOMetric"](
-            classes=["nodule"],
-            iou_list=config.iou_list,
-            max_detection=[100],
-        )
+        if not self.inference_only:
+            self.train_loader, self.val_loader = self._setup_data()
+            self._save_data_split_info()
+            self._save_sample_visualization()
+            self.optimizer, self.scheduler = self._setup_optimizer()
+            self.scaler = torch.amp.GradScaler("cuda") if config.amp else None
+            self.coco_metric = self.monai["COCOMetric"](
+                classes=["nodule"],
+                iou_list=config.iou_list,
+                max_detection=[100],
+            )
+        else:
+            self.train_loader = None
+            self.val_loader = None
+            self.optimizer = None
+            self.scheduler = None
+            self.scaler = None
+            self.coco_metric = None
 
         # 歷史紀錄
         self.history = {

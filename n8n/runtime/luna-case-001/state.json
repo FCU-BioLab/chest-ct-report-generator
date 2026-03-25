@@ -2,5 +2,23 @@
   "case_id": "luna-case-001",
   "input_path": "C:\\GitHub\\chest-ct-report-generator\\detection\\nndet_data\\Task100_LUNA16Nodule\\imagesTr\\c_1_3_6_1_4_1_14519_5_2_1_6279_6001_100225287222365663678666836860_0000.nii.gz",
   "ct_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\01_preprocess\\ct.nii.gz",
-  "preprocess_summary": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\01_preprocess\\summary.json"
+  "preprocess_summary": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\01_preprocess\\summary.json",
+  "detection_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\02_detect",
+  "detection_report": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\02_detect\\report.json",
+  "detection_model_path": "C:/GitHub/chest-ct-report-generator/detection/results/retinanet_20260222_223955/model_best.pt",
+  "segment_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\03_segment",
+  "mask_paths": [
+    "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\03_segment\\mask_nodule_001.nii.gz",
+    "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\03_segment\\mask_nodule_002.nii.gz"
+  ],
+  "combined_mask_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\03_segment\\mask_combined.nii.gz",
+  "medsam2_checkpoint": "C:\\GitHub\\chest-ct-report-generator\\segmentation\\MedSAM2\\checkpoints\\MedSAM2_CTLesion.pt",
+  "feature_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\04_feature",
+  "features_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\04_feature\\lesion_features.json",
+  "nodule_count": 0,
+  "report_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report",
+  "report_text_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\report.txt",
+  "report_json_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\report.json",
+  "report_meta_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\report_meta.json",
+  "report_status": "empty_features"
 }
