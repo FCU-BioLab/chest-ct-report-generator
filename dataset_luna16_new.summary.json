@@ -1,0 +1,14 @@
+{
+  "series_total": 601,
+  "series_converted": 552,
+  "series_error": 0,
+  "series_no_xml": 49,
+  "boxes_total": 5117,
+  "output_json": "C:\\GitHub\\chest-ct-report-generator\\dataset_luna16_new.json",
+  "output_image_dir": "E:\\lung_ct_lesion_dataset\\LUNA16-New\\retina_mhd",
+  "samples_total": 601,
+  "samples_training": 480,
+  "samples_validation": 60,
+  "samples_testing": 61,
+  "min_diameter_mm": 3.0
+}

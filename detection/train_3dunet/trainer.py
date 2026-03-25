@@ -9,6 +9,9 @@ Trainer logic for 3D U-Net.
 import logging
 import os
 import json
+import math
+import shutil
+from datetime import datetime
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -20,13 +23,14 @@ import numpy as np
 from scipy import ndimage
 from skimage import measure, morphology
 from typing import Dict, Tuple, Optional, List
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 from .dataset import VolumetricDataset, collate_video_batch
 from .model import get_model
 from .config import Config
 from .detector import NoduleDetector, DetectedNodule, GroundTruthNodule
 from .segmentation import generate_lung_mask
+from detection.retinanet.metrics import FROC_FP_RATES, compute_detection_f1, compute_froc
 from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
@@ -196,6 +200,12 @@ def calc_segmentation_metrics(pred: np.ndarray, gt: np.ndarray) -> Dict[str, flo
         'precision': float(precision),
         'recall': float(recall)
     }
+
+
+def _zyx_bbox_to_xyz_bbox(bbox_zyx: Tuple[int, int, int, int, int, int]) -> List[float]:
+    """Convert regionprops bbox from [z1,y1,x1,z2,y2,x2] to [x1,y1,z1,x2,y2,z2]."""
+    z1, y1, x1, z2, y2, x2 = bbox_zyx
+    return [float(x1), float(y1), float(z1), float(x2), float(y2), float(z2)]
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-5):  # 降低 smooth，讓稀少正樣本的梯度更強
@@ -508,10 +518,22 @@ class UNet3DTrainer:
         # Datasets
         self.train_loader = self._create_loader("train", shuffle=True)
         self.val_loader = self._create_loader("val", shuffle=False)
+        if len(self.train_loader) == 0:
+            raise RuntimeError(
+                f"Empty train loader. Check data_dir={self.config.data.data_dir} "
+                f"and split ratios ({self.config.data.train_ratio}, {self.config.data.val_ratio}, {self.config.data.test_ratio})."
+            )
+        if len(self.val_loader) == 0:
+            raise RuntimeError(
+                f"Empty val loader. Check split ratios and dataset size. data_dir={self.config.data.data_dir}"
+            )
+        self.accumulation_steps = max(1, int(getattr(self.config.training, 'accumulation_steps', 1)))
+        self.optim_steps_per_epoch = max(1, math.ceil(len(self.train_loader) / self.accumulation_steps))
         
         # AMP Scaler
-        self.use_amp = getattr(self.config.training, 'use_amp', False)
-        self.scaler = GradScaler(enabled=self.use_amp)
+        self.use_amp = bool(getattr(self.config.training, 'use_amp', False)) and self.device.type == "cuda"
+        scaler_device = "cuda" if self.device.type == "cuda" else "cpu"
+        self.scaler = GradScaler(scaler_device, enabled=self.use_amp)
         if self.use_amp:
             logger.info(f"⚡ AMP (Mixed Precision) enabled")
         
@@ -520,7 +542,7 @@ class UNet3DTrainer:
             self.optimizer,
             max_lr=config.training.learning_rate * 3,  # 從 5x 降到 3x (max_lr = 3e-4)
             epochs=config.training.epochs,
-            steps_per_epoch=len(self.train_loader),
+            steps_per_epoch=self.optim_steps_per_epoch,
             pct_start=0.1,  # 更快達到峰值，更多時間下降
             div_factor=3,   # 初始 lr = max_lr / 3
             final_div_factor=30
@@ -529,10 +551,25 @@ class UNet3DTrainer:
         # Add File Handler to Logger
         file_handler = logging.FileHandler(self.output_dir / "training.log", encoding='utf-8')
         file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
-        logger.addHandler(file_handler)
+        if not any(
+            isinstance(h, logging.FileHandler)
+            and Path(getattr(h, "baseFilename", "")).resolve() == Path(file_handler.baseFilename).resolve()
+            for h in logger.handlers
+        ):
+            logger.addHandler(file_handler)
         logger.info(f"📝 Logging to file: {self.output_dir / 'training.log'}")
         
-        self.best_val_score = 0.0
+        self.best_val_score = float("-inf")
+        self.tb_writer = None
+        if bool(getattr(self.config.training, "enable_tensorboard", True)):
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+
+                tb_dir = self.output_dir / "tensorboard"
+                self.tb_writer = SummaryWriter(log_dir=str(tb_dir))
+                logger.info("TensorBoard logging enabled: %s", tb_dir)
+            except Exception as e:
+                logger.warning("TensorBoard disabled: %s", e)
         
         # Store datasets for info export
         self.train_dataset = self.train_loader.dataset
@@ -540,11 +577,17 @@ class UNet3DTrainer:
         
     def _create_loader(self, split: str, shuffle: bool):
         dataset = VolumetricDataset(
-            npz_dir=self.config.data.npz_dir,
+            data_dir=self.config.data.data_dir,
             split=split,
             image_size=self.config.model.image_size,
             max_depth=self.config.data.max_depth,
             augmentation=(split == 'train'),
+            split_ratios=(
+                self.config.data.train_ratio,
+                self.config.data.val_ratio,
+                self.config.data.test_ratio,
+            ),
+            split_seed=self.config.data.split_seed,
             positive_ratio=getattr(self.config.data, 'positive_ratio', 0.7),
             full_volume=(self.config.data.max_depth > 1000) # Enable full volume if max_depth is large
         )
@@ -565,7 +608,7 @@ class UNet3DTrainer:
         
         dataset_info = {
             'export_time': datetime.now().isoformat(),
-            'npz_dir': str(self.config.data.npz_dir),
+            'data_dir': str(self.config.data.data_dir),
             'splits': {}
         }
         
@@ -578,11 +621,17 @@ class UNet3DTrainer:
         # Try to load test dataset info
         try:
             test_dataset = VolumetricDataset(
-                npz_dir=self.config.data.npz_dir,
+                data_dir=self.config.data.data_dir,
                 split='test',
                 image_size=self.config.model.image_size,
                 max_depth=self.config.data.max_depth,
                 augmentation=False,
+                split_ratios=(
+                    self.config.data.train_ratio,
+                    self.config.data.val_ratio,
+                    self.config.data.test_ratio,
+                ),
+                split_seed=self.config.data.split_seed,
                 full_volume=(self.config.data.max_depth > 1000)
             )
             info = test_dataset.get_dataset_info()
@@ -616,9 +665,17 @@ class UNet3DTrainer:
             'val_det_rate': [],
             'val_det_precision': [],
             'val_det_recall': [],
-            'val_det_f1': []
+            'val_det_f1': [],
+            'val_det_best_threshold': [],
+            'val_luna_cpm': [],
+            'val_luna_sens_0.5': [],
+            'val_luna_sens_1': [],
+            'val_luna_sens_2': [],
         }
-        best_f1 = 0.0
+        best_f1 = float("-inf")
+        best_epoch = 0
+        early_stopping_patience = max(1, int(getattr(self.config.training, 'early_stopping_patience', 150)))
+        epochs_without_improve = 0
         
         for epoch in range(1, self.config.training.epochs + 1):
             train_loss = self.train_epoch(epoch)
@@ -636,31 +693,68 @@ class UNet3DTrainer:
             history['val_det_precision'].append(val_metrics['det_precision'])
             history['val_det_recall'].append(val_metrics['det_recall'])
             history['val_det_f1'].append(val_metrics['det_f1'])
+            history['val_det_best_threshold'].append(val_metrics.get('det_best_threshold', 0.0))
+            history['val_luna_cpm'].append(val_metrics.get('luna_cpm', 0.0))
+            history['val_luna_sens_0.5'].append(val_metrics.get('luna_sens_0.5', 0.0))
+            history['val_luna_sens_1'].append(val_metrics.get('luna_sens_1', 0.0))
+            history['val_luna_sens_2'].append(val_metrics.get('luna_sens_2', 0.0))
             
             # Log epoch summary
-            logger.info(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_metrics['loss']:.4f}, Val Det F1={val_metrics['det_f1']:.4f}")
+            logger.info(
+                "Epoch %d: Train Loss=%.4f, Val Loss=%.4f, Det F1=%.4f, LUNA CPM=%.4f",
+                epoch,
+                train_loss,
+                val_metrics['loss'],
+                val_metrics['det_f1'],
+                val_metrics.get('luna_cpm', 0.0),
+            )
+
+            self._log_tensorboard(epoch, train_loss, val_metrics)
+            self._save_history(history)
             
             # Plot all metrics
             self.plot_metrics(history)
             
             # Save Best (based on Detection F1)
             val_f1 = val_metrics['det_f1']
-            if val_f1 > best_f1:
+            improved = val_f1 > (best_f1 + 1e-8)
+            if improved:
                 best_f1 = val_f1
+                best_epoch = epoch
+                self.best_val_score = val_f1
+                epochs_without_improve = 0
                 logger.info(f"🆕 New best model saved (Detection F1={best_f1:.4f})")
                 torch.save(self.model.state_dict(), self.output_dir / "best_model.pth")
+            else:
+                epochs_without_improve += 1
             
             # Save periodic
             if epoch % 5 == 0:
-                self.save_checkpoint(epoch, val_f1, is_best=(val_f1 == best_f1))
+                self.save_checkpoint(epoch, val_f1, is_best=improved)
+
+            if epochs_without_improve >= early_stopping_patience:
+                logger.info(
+                    "?? Early stopping at epoch %d (no improvement for %d epochs). Best epoch=%d, best Det F1=%.4f",
+                    epoch,
+                    early_stopping_patience,
+                    best_epoch,
+                    best_f1,
+                )
+                break
+
+        if best_epoch > 0:
+            logger.info("?? Training finished. Best epoch=%d, best Det F1=%.4f", best_epoch, best_f1)
+        if self.tb_writer is not None:
+            self.tb_writer.close()
                 
     def train_epoch(self, epoch: int) -> float:
         self.model.train()
         total_loss = 0
         pbar = tqdm(self.train_loader, desc=f"Train Ep {epoch}")
         
-        acc_steps = getattr(self.config.training, 'accumulation_steps', 1)
-        self.optimizer.zero_grad()
+        acc_steps = self.accumulation_steps
+        self.optimizer.zero_grad(set_to_none=True)
+        num_batches = len(self.train_loader)
         
         for i, batch in enumerate(pbar):
             images = batch['image'].to(self.device).float()
@@ -668,7 +762,7 @@ class UNet3DTrainer:
             
             # self.optimizer.zero_grad() # Moved to step block
             
-            with autocast(enabled=self.use_amp):
+            with autocast(device_type=self.device.type, enabled=self.use_amp):
                 logits = self.model(images)
                 if isinstance(logits, list):
                     # Deep supervision
@@ -706,7 +800,7 @@ class UNet3DTrainer:
             loss = loss / acc_steps
             self.scaler.scale(loss).backward()
             
-            if (i + 1) % acc_steps == 0:
+            if ((i + 1) % acc_steps == 0) or (i == num_batches - 1):
                 # Gradient clipping
                 if hasattr(self.config.training, 'grad_clip') and self.config.training.grad_clip > 0:
                     self.scaler.unscale_(self.optimizer)
@@ -714,7 +808,7 @@ class UNet3DTrainer:
                     
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 self.scheduler.step()
             
             total_loss += loss.item() * acc_steps
@@ -724,34 +818,27 @@ class UNet3DTrainer:
 
     def validate(self, epoch: int) -> Dict[str, float]:
         """
-        Validate model and compute comprehensive metrics.
-        
-        Returns:
-            Dict with: loss, dice, iou, precision, recall, det_rate, det_precision, det_recall, det_f1
+        Validate model and compute segmentation + detection + LUNA16 metrics.
         """
         self.model.eval()
-        
-        # Accumulators for segmentation metrics
+
         total_loss = 0.0
         seg_metrics_sum = {'dice': 0.0, 'iou': 0.0, 'precision': 0.0, 'recall': 0.0}
-        
-        # Accumulators for detection metrics
-        total_tp, total_fp, total_fn = 0, 0, 0
-        total_hits = 0
-        total_nodules = 0
-        
-        count = 0
-        
+        pred_boxes_list: List[np.ndarray] = []
+        pred_scores_list: List[np.ndarray] = []
+        gt_boxes_list: List[np.ndarray] = []
+
+        n_samples = 0
+
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc=f"Val Ep {epoch}"):
                 images = batch['image'].to(self.device).float()
                 masks = batch['mask'].to(self.device).float()
-                
+
                 logits = self.model(images)
                 if isinstance(logits, list):
                     logits = logits[0]
-                
-                # Calculate validation loss based on loss type
+
                 if hasattr(self, 'use_combined_loss') and self.use_combined_loss:
                     loss = self.combined_loss(logits, masks)
                 elif hasattr(self, 'tversky'):
@@ -762,66 +849,92 @@ class UNet3DTrainer:
                     loss_dice = self.dice(logits, masks)
                     loss = loss_bce + 0.5 * loss_focal + 2.0 * loss_dice
                 total_loss += loss.item()
-                
-                # Get predictions
+
                 probs = torch.sigmoid(logits)
-                pred = (probs > 0.5).float()
-                
-                # Debug logging for first batch
-                if count == 0:
+                if n_samples == 0:
+                    pred_debug = (probs > self.detector.threshold).float()
                     logger.info(f"🔍 DEBUG [Val Ep {epoch}]")
                     logger.info(f"  Img: min={images.min():.4f}, max={images.max():.4f}, mean={images.mean():.4f}")
                     logger.info(f"  Msk: sum={masks.sum()}, unique={torch.unique(masks)}")
                     logger.info(f"  Logits: min={logits.min():.4f}, max={logits.max():.4f}, mean={logits.mean():.4f}")
-                    logger.info(f"  Pred: sum={pred.sum()}, unique={torch.unique(pred)}")
-                    
-                    # Save debug image
+                    logger.info(f"  Pred: sum={pred_debug.sum()}, unique={torch.unique(pred_debug)}")
                     self._save_debug_image(images, masks, logits, epoch)
-                
-                # Calculate per-sample metrics
+
+                batch_meta = {
+                    'slice_indices': batch.get('slice_indices'),
+                    'spacing': batch.get('spacing'),
+                    'origin': batch.get('origin'),
+                    'original_shape': batch.get('original_shape'),
+                }
+                batch_detections = self.detector.process_batch(logits, batch_meta)
+                batch_gt_nodules = self.detector.analyze_gt(masks, batch_meta)
+
                 batch_size = images.shape[0]
                 for i in range(batch_size):
-                    pred_np = pred[i, 0].cpu().numpy()
+                    pred_np = (probs[i, 0].cpu().numpy() > self.detector.threshold).astype(np.uint8)
                     mask_np = masks[i, 0].cpu().numpy()
-                    
-                    # Segmentation metrics
+
                     seg_m = calc_segmentation_metrics(pred_np, mask_np)
                     for k in seg_metrics_sum:
                         seg_metrics_sum[k] += seg_m[k]
-                    
-                    # Detection metrics (connected component analysis)
-                    det_m = calc_detection_metrics(pred_np, mask_np, iou_threshold=0.1)
-                    total_tp += det_m['TP']
-                    total_fp += det_m['FP']
-                    total_fn += det_m['FN']
-                
-                # Detection rate (simple IoU-based)
-                batch_hits = calc_detection_rate(logits, masks)
-                total_hits += batch_hits
-                total_nodules += (masks.amax(dim=(1,2,3,4)).sum().item())
-                
-                count += batch_size
-        
-        # Compute averages
+
+                    pred_boxes_xyz = np.array(
+                        [_zyx_bbox_to_xyz_bbox(d.geometry.bbox) for d in batch_detections[i]],
+                        dtype=np.float32,
+                    ).reshape(-1, 6) if batch_detections[i] else np.zeros((0, 6), dtype=np.float32)
+                    pred_scores = np.array(
+                        [float(d.probability) for d in batch_detections[i]],
+                        dtype=np.float32,
+                    ) if batch_detections[i] else np.zeros((0,), dtype=np.float32)
+                    gt_boxes_xyz = np.array(
+                        [_zyx_bbox_to_xyz_bbox(g.geometry.bbox) for g in batch_gt_nodules[i]],
+                        dtype=np.float32,
+                    ).reshape(-1, 6) if batch_gt_nodules[i] else np.zeros((0, 6), dtype=np.float32)
+
+                    pred_boxes_list.append(pred_boxes_xyz)
+                    pred_scores_list.append(pred_scores)
+                    gt_boxes_list.append(gt_boxes_xyz)
+                    n_samples += 1
+
         n_batches = len(self.val_loader)
-        n_samples = count
-        
         avg_loss = total_loss / n_batches if n_batches > 0 else 0.0
-        avg_seg = {k: v / n_samples for k, v in seg_metrics_sum.items()} if n_samples > 0 else seg_metrics_sum
-        
-        # Detection aggregates
-        det_precision = total_tp / (total_tp + total_fp + 1e-6)
-        det_recall = total_tp / (total_tp + total_fn + 1e-6)
-        det_f1 = 2 * det_precision * det_recall / (det_precision + det_recall + 1e-6)
-        det_rate = total_hits / (total_nodules + 1e-6) if total_nodules > 0 else 0.0
-        
-        # Log comprehensive metrics
+        avg_seg = {k: (v / n_samples if n_samples > 0 else 0.0) for k, v in seg_metrics_sum.items()}
+
+        f1_metrics = compute_detection_f1(
+            pred_boxes_list=pred_boxes_list,
+            pred_scores_list=pred_scores_list,
+            gt_boxes_list=gt_boxes_list,
+            iou_thresh=0.1,
+        )
+        froc_metrics = compute_froc(
+            pred_boxes_list=pred_boxes_list,
+            pred_scores_list=pred_scores_list,
+            gt_boxes_list=gt_boxes_list,
+            iou_thresh=0.1,
+            fp_rates=FROC_FP_RATES,
+        )
+
+        det_precision = float(f1_metrics.get('best_precision', 0.0))
+        det_recall = float(f1_metrics.get('best_recall', 0.0))
+        det_f1 = float(f1_metrics.get('best_f1', 0.0))
+        det_rate = det_recall
+        det_thresh = float(f1_metrics.get('best_threshold', 0.0))
+        threshold_key = f"thresh_{det_thresh:.2f}"
+        det_counts = f1_metrics.get('per_threshold', {}).get(threshold_key, {})
+        det_tp = int(det_counts.get('tp', 0))
+        det_fp = int(det_counts.get('fp', 0))
+        det_fn = int(det_counts.get('fn', 0))
+        luna_cpm = float(froc_metrics.get('cpm_score', 0.0))
+
         logger.info(f"📊 Val Metrics [Ep {epoch}]:")
         logger.info(f"  Loss: {avg_loss:.4f}")
-        logger.info(f"  Detection: F1={det_f1:.4f}, Precision={det_precision:.4f}, Recall={det_recall:.4f}, Rate={det_rate*100:.1f}%")
-        logger.info(f"  Counts: TP={total_tp}, FP={total_fp}, FN={total_fn}")
-        # logger.info(f"  Segmentation (Debug): Dice={avg_seg['dice']:.4f}, IoU={avg_seg['iou']:.4f}")
-        
+        logger.info(
+            "  Detection: F1=%.4f, Precision=%.4f, Recall=%.4f, best_thresh=%.2f",
+            det_f1, det_precision, det_recall, det_thresh,
+        )
+        logger.info("  Counts@best_thresh: TP=%d, FP=%d, FN=%d", det_tp, det_fp, det_fn)
+        logger.info("  LUNA16: CPM=%.4f, Sens@1FP=%.4f", luna_cpm, float(froc_metrics.get("sensitivity_at_1_fp_per_scan", 0.0)))
+
         return {
             'loss': avg_loss,
             'dice': avg_seg['dice'],
@@ -832,9 +945,19 @@ class UNet3DTrainer:
             'det_precision': det_precision,
             'det_recall': det_recall,
             'det_f1': det_f1,
-            'det_tp': total_tp,
-            'det_fp': total_fp,
-            'det_fn': total_fn
+            'det_tp': det_tp,
+            'det_fp': det_fp,
+            'det_fn': det_fn,
+            'det_best_threshold': det_thresh,
+            'luna_cpm': luna_cpm,
+            'luna_froc_score': float(froc_metrics.get('froc_score', 0.0)),
+            'luna_sens_0.125': float(froc_metrics.get('sensitivity_at_0.125_fp_per_scan', 0.0)),
+            'luna_sens_0.25': float(froc_metrics.get('sensitivity_at_0.25_fp_per_scan', 0.0)),
+            'luna_sens_0.5': float(froc_metrics.get('sensitivity_at_0.5_fp_per_scan', 0.0)),
+            'luna_sens_1': float(froc_metrics.get('sensitivity_at_1_fp_per_scan', 0.0)),
+            'luna_sens_2': float(froc_metrics.get('sensitivity_at_2_fp_per_scan', 0.0)),
+            'luna_sens_4': float(froc_metrics.get('sensitivity_at_4_fp_per_scan', 0.0)),
+            'luna_sens_8': float(froc_metrics.get('sensitivity_at_8_fp_per_scan', 0.0)),
         }
 
 
@@ -869,6 +992,28 @@ class UNet3DTrainer:
         except Exception as e:
             logger.warning(f"  ❌ Failed to save debug image: {e}")
             
+    def _save_history(self, history: Dict[str, List[float]]) -> None:
+        history_path = self.output_dir / "metrics_history.json"
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+
+    def _log_tensorboard(self, epoch: int, train_loss: float, val_metrics: Dict[str, float]) -> None:
+        if self.tb_writer is None:
+            return
+        self.tb_writer.add_scalar("loss/train", float(train_loss), epoch)
+        self.tb_writer.add_scalar("loss/val", float(val_metrics.get("loss", 0.0)), epoch)
+        self.tb_writer.add_scalar("seg/dice", float(val_metrics.get("dice", 0.0)), epoch)
+        self.tb_writer.add_scalar("seg/iou", float(val_metrics.get("iou", 0.0)), epoch)
+        self.tb_writer.add_scalar("det/f1", float(val_metrics.get("det_f1", 0.0)), epoch)
+        self.tb_writer.add_scalar("det/precision", float(val_metrics.get("det_precision", 0.0)), epoch)
+        self.tb_writer.add_scalar("det/recall", float(val_metrics.get("det_recall", 0.0)), epoch)
+        self.tb_writer.add_scalar("det/best_threshold", float(val_metrics.get("det_best_threshold", 0.0)), epoch)
+        self.tb_writer.add_scalar("luna/cpm", float(val_metrics.get("luna_cpm", 0.0)), epoch)
+        self.tb_writer.add_scalar("luna/sens_0.5_fp", float(val_metrics.get("luna_sens_0.5", 0.0)), epoch)
+        self.tb_writer.add_scalar("luna/sens_1_fp", float(val_metrics.get("luna_sens_1", 0.0)), epoch)
+        self.tb_writer.add_scalar("luna/sens_2_fp", float(val_metrics.get("luna_sens_2", 0.0)), epoch)
+        self.tb_writer.flush()
+
     def plot_metrics(self, history: Dict):
         """
         Plot comprehensive training metrics and save multiple visualization PNGs.
@@ -925,17 +1070,17 @@ class UNet3DTrainer:
             axes[1, 1].grid(True, alpha=0.3)
             axes[1, 1].legend()
             
-            # Detection Rate
-            det_rates_pct = [d * 100 for d in history['val_det_rate']]
-            axes[1, 2].plot(epochs, det_rates_pct, 'r-', linewidth=2, label='Detection Rate')
-            axes[1, 2].set_title('Nodule Detection Rate', fontsize=12, fontweight='bold')
-            axes[1, 2].set_xlabel('Epochs'); axes[1, 2].set_ylabel('Rate (%)')
-            axes[1, 2].set_ylim(0, 100)
+            axes[1, 2].plot(epochs, history['val_det_f1'], 'purple', linewidth=2, label='Det F1')
+            axes[1, 2].plot(epochs, history['val_luna_cpm'], 'r-', linewidth=2, label='LUNA CPM')
+            axes[1, 2].set_title('Detection F1 & LUNA CPM', fontsize=12, fontweight='bold')
+            axes[1, 2].set_xlabel('Epochs'); axes[1, 2].set_ylabel('Score')
+            axes[1, 2].set_ylim(0, 1)
             axes[1, 2].grid(True, alpha=0.3)
             axes[1, 2].legend()
             
             plt.tight_layout()
             plt.savefig(self.output_dir / "metrics.png", dpi=150)
+            plt.savefig(self.output_dir / "metrics_live.png", dpi=150)
             plt.close()
             
             # ============ Segmentation Metrics Plot ============
@@ -968,10 +1113,10 @@ class UNet3DTrainer:
             # ============ Detection Metrics Plot ============
             fig, axes = plt.subplots(1, 4, figsize=(20, 5))
             
-            axes[0].plot(epochs, det_rates_pct, 'r-', linewidth=2)
-            axes[0].set_title('Detection Rate', fontsize=12, fontweight='bold')
-            axes[0].set_xlabel('Epochs'); axes[0].set_ylabel('Rate (%)')
-            axes[0].set_ylim(0, 100); axes[0].grid(True, alpha=0.3)
+            axes[0].plot(epochs, history['val_luna_cpm'], 'r-', linewidth=2)
+            axes[0].set_title('LUNA16 CPM', fontsize=12, fontweight='bold')
+            axes[0].set_xlabel('Epochs'); axes[0].set_ylabel('Score')
+            axes[0].set_ylim(0, 1); axes[0].grid(True, alpha=0.3)
             
             axes[1].plot(epochs, history['val_det_precision'], 'b-', linewidth=2)
             axes[1].set_title('Detection Precision', fontsize=12, fontweight='bold')
@@ -1011,7 +1156,7 @@ class UNet3DTrainer:
         
         if is_best:
             torch.save(state, self.ckpt_dir / "best_model.pt")
-            logger.info(f"🆕 New best model saved (Dice={score:.4f})")
+            logger.info(f"🆕 New best checkpoint saved (Det F1={score:.4f})")
 
     def load_checkpoint(self, checkpoint_path: str):
         """Load checkpoint - handles both full checkpoint dict and raw state_dict"""
@@ -1048,6 +1193,9 @@ class UNet3DTrainer:
         all_dice_post = []
         total_tp, total_fp, total_fn = 0, 0, 0
         sample_results = []
+        pred_boxes_list: List[np.ndarray] = []
+        pred_scores_list: List[np.ndarray] = []
+        gt_boxes_list: List[np.ndarray] = []
         
         with torch.no_grad():
             for batch in tqdm(loader, desc=f"Eval {split}"):
@@ -1099,9 +1247,31 @@ class UNet3DTrainer:
                     total_tp += metrics['TP']
                     total_fp += metrics['FP']
                     total_fn += metrics['FN']
+
+                    pred_labels = measure.label(pred_post.astype(np.uint8))
+                    pred_regions = measure.regionprops(pred_labels, intensity_image=prob_np)
+                    gt_labels = measure.label((mask_np > 0).astype(np.uint8))
+                    gt_regions = measure.regionprops(gt_labels)
+
+                    pred_boxes = np.array(
+                        [_zyx_bbox_to_xyz_bbox(r.bbox) for r in pred_regions],
+                        dtype=np.float32,
+                    ).reshape(-1, 6) if pred_regions else np.zeros((0, 6), dtype=np.float32)
+                    pred_scores = np.array(
+                        [float(r.mean_intensity) for r in pred_regions],
+                        dtype=np.float32,
+                    ) if pred_regions else np.zeros((0,), dtype=np.float32)
+                    gt_boxes = np.array(
+                        [_zyx_bbox_to_xyz_bbox(r.bbox) for r in gt_regions],
+                        dtype=np.float32,
+                    ).reshape(-1, 6) if gt_regions else np.zeros((0, 6), dtype=np.float32)
+
+                    pred_boxes_list.append(pred_boxes)
+                    pred_scores_list.append(pred_scores)
+                    gt_boxes_list.append(gt_boxes)
                     
                     sample_results.append({
-                        'npz_path': batch['npz_path'][i] if 'npz_path' in batch else f'sample_{len(sample_results)}',
+                        'source_path': batch['source_path'][i] if 'source_path' in batch else f'sample_{len(sample_results)}',
                         'dice_raw': dice_raw,
                         'dice_post': all_dice_post[-1],
                         'TP': metrics['TP'],
@@ -1116,6 +1286,19 @@ class UNet3DTrainer:
         overall_precision = total_tp / (total_tp + total_fp + 1e-6)
         overall_recall = total_tp / (total_tp + total_fn + 1e-6)
         overall_f1 = 2 * overall_precision * overall_recall / (overall_precision + overall_recall + 1e-6)
+        f1_metrics = compute_detection_f1(
+            pred_boxes_list=pred_boxes_list,
+            pred_scores_list=pred_scores_list,
+            gt_boxes_list=gt_boxes_list,
+            iou_thresh=0.1,
+        )
+        froc_metrics = compute_froc(
+            pred_boxes_list=pred_boxes_list,
+            pred_scores_list=pred_scores_list,
+            gt_boxes_list=gt_boxes_list,
+            iou_thresh=0.1,
+            fp_rates=FROC_FP_RATES,
+        )
         
         # Log results
         logger.info(f"\n{'='*60}")
@@ -1131,6 +1314,8 @@ class UNet3DTrainer:
         logger.info(f"   • Precision:       {overall_precision:.4f}")
         logger.info(f"   • Recall:          {overall_recall:.4f}")
         logger.info(f"   • F1 Score:        {overall_f1:.4f}")
+        logger.info(f"   • Best F1 (sweep): {f1_metrics.get('best_f1', 0.0):.4f} @ {f1_metrics.get('best_threshold', 0.0):.2f}")
+        logger.info(f"   • LUNA16 CPM:      {froc_metrics.get('cpm_score', 0.0):.4f}")
         logger.info(f"{'='*60}\n")
         
         # Return comprehensive results
@@ -1143,6 +1328,19 @@ class UNet3DTrainer:
             'TP': total_tp,
             'FP': total_fp,
             'FN': total_fn,
+            'best_f1': float(f1_metrics.get('best_f1', 0.0)),
+            'best_precision': float(f1_metrics.get('best_precision', 0.0)),
+            'best_recall': float(f1_metrics.get('best_recall', 0.0)),
+            'best_threshold': float(f1_metrics.get('best_threshold', 0.0)),
+            'luna_cpm': float(froc_metrics.get('cpm_score', 0.0)),
+            'luna_froc_score': float(froc_metrics.get('froc_score', 0.0)),
+            'luna_sens_0.125': float(froc_metrics.get('sensitivity_at_0.125_fp_per_scan', 0.0)),
+            'luna_sens_0.25': float(froc_metrics.get('sensitivity_at_0.25_fp_per_scan', 0.0)),
+            'luna_sens_0.5': float(froc_metrics.get('sensitivity_at_0.5_fp_per_scan', 0.0)),
+            'luna_sens_1': float(froc_metrics.get('sensitivity_at_1_fp_per_scan', 0.0)),
+            'luna_sens_2': float(froc_metrics.get('sensitivity_at_2_fp_per_scan', 0.0)),
+            'luna_sens_4': float(froc_metrics.get('sensitivity_at_4_fp_per_scan', 0.0)),
+            'luna_sens_8': float(froc_metrics.get('sensitivity_at_8_fp_per_scan', 0.0)),
             'sample_results': sample_results
         }
 
@@ -1268,10 +1466,10 @@ class UNet3DTrainer:
                     det_totals['FN'] += det_m['FN']
                     
                     # Sample name
-                    npz_name = Path(batch['npz_path'][i]).stem if 'npz_path' in batch else f'sample_{sample_idx}'
+                    sample_name = Path(batch['source_path'][i]).stem if 'source_path' in batch else f'sample_{sample_idx}'
                     
                     # Create per-case folder
-                    case_dir = viz_dir / f'{sample_idx:03d}_{npz_name}'
+                    case_dir = viz_dir / f'{sample_idx:03d}_{sample_name}'
                     case_dir.mkdir(parents=True, exist_ok=True)
                     
                     # Get detections for this sample
@@ -1292,8 +1490,8 @@ class UNet3DTrainer:
                     # Per-case statistics
                     case_stats = {
                         'idx': sample_idx,
-                        'name': npz_name,
-                        'npz_path': batch['npz_path'][i] if 'npz_path' in batch else None,
+                        'name': sample_name,
+                        'source_path': batch['source_path'][i] if 'source_path' in batch else None,
                         'segmentation': {
                             'dice': seg_m['dice'],
                             'iou': seg_m['iou'],
@@ -1410,7 +1608,7 @@ class UNet3DTrainer:
                                 best_gt.match_status = "Matched"
                     
                     # Console Output
-                    logger.info(f"  🔍 Sample {npz_name} Analysis:")
+                    logger.info(f"  🔍 Sample {sample_name} Analysis:")
                     
                     # TPs
                     tps = [p for p in sample_detections if p.match_status == "TP"]
@@ -1439,7 +1637,7 @@ class UNet3DTrainer:
                     if save_visualizations:
                         self._save_case_visualization(
                             img_np, mask_np, prob_np, pred_raw, pred_post,
-                            seg_m, det_m, npz_name, case_dir, export_gif=export_gif
+                            seg_m, det_m, sample_name, case_dir, export_gif=export_gif
                         )
                     
                     sample_idx += 1
@@ -1554,7 +1752,7 @@ class UNet3DTrainer:
         return summary
     
     def _save_sample_visualization(self, img_np, mask_np, prob_np, pred_raw, pred_post,
-                                   seg_m, det_m, npz_name, sample_idx, viz_dir):
+                                   seg_m, det_m, sample_name, sample_idx, viz_dir):
         """Save per-sample visualization with segmentation and detection info"""
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
@@ -1642,15 +1840,15 @@ class UNet3DTrainer:
         
         # Overall title
         status = "[OK]" if seg_m['dice'] > 0.5 else ("[WARN]" if seg_m['dice'] > 0.2 else "[FAIL]")
-        fig.suptitle(f"{status} {npz_name} | Dice={seg_m['dice']:.4f} | Detection: TP={det_m['TP']}, FP={det_m['FP']}, FN={det_m['FN']}",
+        fig.suptitle(f"{status} {sample_name} | Dice={seg_m['dice']:.4f} | Detection: TP={det_m['TP']}, FP={det_m['FP']}, FN={det_m['FN']}",
                     fontsize=14, fontweight='bold')
         
         plt.tight_layout()
-        plt.savefig(viz_dir / f'{sample_idx:03d}_{npz_name}.png', dpi=100)
+        plt.savefig(viz_dir / f'{sample_idx:03d}_{sample_name}.png', dpi=100)
         plt.close()
     
     def _save_case_visualization(self, img_np, mask_np, prob_np, pred_raw, pred_post,
-                                  seg_m, det_m, npz_name, case_dir, export_gif: bool = True):
+                                  seg_m, det_m, sample_name, case_dir, export_gif: bool = True):
         """
         Save per-case visualization files to individual folder
         
@@ -1741,7 +1939,7 @@ class UNet3DTrainer:
         axes[1, 3].legend()
         
         status = "[OK]" if seg_m['dice'] > 0.5 else ("[WARN]" if seg_m['dice'] > 0.2 else "[FAIL]")
-        fig.suptitle(f"{status} {npz_name} | Dice={seg_m['dice']:.4f}", fontsize=14, fontweight='bold')
+        fig.suptitle(f"{status} {sample_name} | Dice={seg_m['dice']:.4f}", fontsize=14, fontweight='bold')
         
         plt.tight_layout()
         plt.savefig(case_dir / 'overview.png', dpi=100)
@@ -1750,7 +1948,7 @@ class UNet3DTrainer:
         # ====== 2. Overlay Image (high-res) ======
         plt.figure(figsize=(10, 10))
         plt.imshow(overlay)
-        plt.title(f'{npz_name} (z={z_idx}) - R=GT, B=Pred, Y=Both')
+        plt.title(f'{sample_name} (z={z_idx}) - R=GT, B=Pred, Y=Both')
         plt.axis('off')
         plt.tight_layout()
         plt.savefig(case_dir / 'overlay.png', dpi=150)
@@ -1801,9 +1999,9 @@ class UNet3DTrainer:
         
         # ====== 4. Animated GIF ======
         if export_gif:
-            self._save_case_gif(img_np, mask_np, pred_post, seg_m, npz_name, case_dir)
+            self._save_case_gif(img_np, mask_np, pred_post, seg_m, sample_name, case_dir)
     
-    def _save_case_gif(self, img_np, mask_np, pred_post, seg_m, npz_name, case_dir, fps: int = 5):
+    def _save_case_gif(self, img_np, mask_np, pred_post, seg_m, sample_name, case_dir, fps: int = 5):
         """
         Save animated GIF showing all slices with Overlay view.
         Colors: Red=GT, Blue=Pred, Yellow=Both
@@ -1813,7 +2011,7 @@ class UNet3DTrainer:
             mask_np: (D, H, W) Ground truth mask
             pred_post: (D, H, W) Postprocessed prediction
             seg_m: Segmentation metrics dict
-            npz_name: Sample name for title
+            sample_name: Sample name for title
             case_dir: Directory to save GIF
             fps: Frames per second
         """
@@ -1847,11 +2045,11 @@ class UNet3DTrainer:
         ax.axis('off')
         
         im = ax.imshow(create_overlay(0))
-        title = ax.set_title(f'{npz_name} | Dice={seg_m["dice"]:.4f}\nSlice 0/{D-1}\nR=GT, B=Pred, Y=Both', fontsize=10)
+        title = ax.set_title(f'{sample_name} | Dice={seg_m["dice"]:.4f}\nSlice 0/{D-1}\nR=GT, B=Pred, Y=Both', fontsize=10)
         
         def update(frame_idx):
             im.set_data(create_overlay(frame_idx))
-            title.set_text(f'{npz_name} | Dice={seg_m["dice"]:.4f}\nSlice {frame_idx}/{D-1}\nR=GT, B=Pred, Y=Both')
+            title.set_text(f'{sample_name} | Dice={seg_m["dice"]:.4f}\nSlice {frame_idx}/{D-1}\nR=GT, B=Pred, Y=Both')
             return [im, title]
         
         anim = FuncAnimation(fig, update, frames=D, interval=1000//fps, blit=True)
@@ -2118,7 +2316,7 @@ class UNet3DTrainer:
                     fig, axes = plt.subplots(2, 4, figsize=(20, 10))
                     
                     # Get sample name
-                    npz_name = Path(batch['npz_path'][i]).stem if 'npz_path' in batch else f'sample_{sample_idx}'
+                    sample_name = Path(batch['source_path'][i]).stem if 'source_path' in batch else f'sample_{sample_idx}'
                     
                     # Row 1: Basic views
                     # Image
@@ -2206,11 +2404,11 @@ class UNet3DTrainer:
                     # Add overall title
                     diff = dice_raw - dice_post
                     status = "⚠️ POST WORSE" if diff > 0.1 else ("✅ OK" if diff < 0.1 else "")
-                    fig.suptitle(f'{npz_name}\nDice: Raw={dice_raw:.4f}, Post={dice_post:.4f} (diff={diff:+.4f}) {status}', 
+                    fig.suptitle(f'{sample_name}\nDice: Raw={dice_raw:.4f}, Post={dice_post:.4f} (diff={diff:+.4f}) {status}', 
                                 fontsize=14, fontweight='bold')
                     
                     plt.tight_layout()
-                    plt.savefig(save_dir / f'{sample_idx:03d}_{npz_name}.png', dpi=100)
+                    plt.savefig(save_dir / f'{sample_idx:03d}_{sample_name}.png', dpi=100)
                     plt.close()
                     
                     sample_idx += 1

@@ -59,6 +59,37 @@ def _remap_labels_to_zero_index(x):
     return x
 
 
+class LimitBoxesForCropd:
+    """Limit number of boxes before RandCropBoxByPosNegLabeld to avoid RAM spikes."""
+
+    def __init__(self, box_key: str = "box", label_key: str = "label", max_boxes: int = 8):
+        self.box_key = box_key
+        self.label_key = label_key
+        self.max_boxes = int(max_boxes)
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        d = dict(data)
+        boxes = d.get(self.box_key)
+        labels = d.get(self.label_key)
+        if boxes is None or labels is None or self.max_boxes <= 0:
+            return d
+
+        n = int(len(boxes))
+        if n <= self.max_boxes:
+            return d
+
+        if torch.is_tensor(boxes):
+            idx = torch.randperm(n, device=boxes.device)[: self.max_boxes]
+            idx, _ = torch.sort(idx)
+            d[self.box_key] = boxes[idx]
+            d[self.label_key] = labels[idx]
+        else:
+            idx = np.sort(np.random.permutation(n)[: self.max_boxes])
+            d[self.box_key] = boxes[idx]
+            d[self.label_key] = labels[idx]
+        return d
+
+
 # ─── Transform Builders ─────────────────────────────────────────────
 
 def build_det_transform(
@@ -100,6 +131,7 @@ def build_det_transform(
 def build_rand_transform(
     patch_size: List[int],
     batch_size: int = 2,
+    max_boxes_for_crop: int = 8,
 ) -> Compose:
     """
     Random augmentation transforms（每次重新執行，不快取）。
@@ -107,6 +139,7 @@ def build_rand_transform(
     """
     return Compose([
         # 隨機裁切（正負樣本比例 1:1）
+        LimitBoxesForCropd(box_key="box", label_key="label", max_boxes=max_boxes_for_crop),
         RandCropBoxByPosNegLabeld(
             image_keys="image",
             box_keys="box",
@@ -170,13 +203,18 @@ def build_rand_transform(
 def build_train_transform(
     patch_size: List[int],
     batch_size: int = 2,
+    max_boxes_for_crop: int = 8,
     spacing: List[float] = None,
     hu_min: float = -1024.0,
     hu_max: float = 300.0,
 ) -> Compose:
     """建立訓練用完整 Transform Pipeline（向後相容）。"""
     det = build_det_transform(spacing, hu_min, hu_max)
-    rand = build_rand_transform(patch_size, batch_size)
+    rand = build_rand_transform(
+        patch_size=patch_size,
+        batch_size=batch_size,
+        max_boxes_for_crop=max_boxes_for_crop,
+    )
     return Compose([det, rand])
 
 

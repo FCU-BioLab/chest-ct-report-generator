@@ -7,7 +7,6 @@ Configuration for 3D U-Net based volumetric segmentation on video (sequence) dat
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
 import json
 import os
 
@@ -17,7 +16,7 @@ class DataConfig:
     # Data sources
     lndb_dir: str = ""  # LNDb dataset directory
     msd_dir: str = ""   # MSD Lung dataset directory
-    npz_dir: str = "../../cache/video_npz"  # NPZ output directory
+    data_dir: str = "detection/nndet_data/Task100_LUNA16Nodule"  # NIfTI task folder (imagesTr/labelsTr)
     
     # Split
     train_ratio: float = 0.7
@@ -40,7 +39,6 @@ class DataConfig:
     # Cache
     use_cache: bool = True
     cache_dir: str = "../../cache"
-
 
 @dataclass
 class ModelConfig:
@@ -94,6 +92,7 @@ class TrainingConfig:
     use_amp: bool = True
     grad_clip: float = 1.0
     accumulation_steps: int = 1
+    enable_tensorboard: bool = True
 
 
 @dataclass
@@ -152,7 +151,12 @@ class Config:
             config_dict = json.load(f)
         
         config = cls()
-        config.data = DataConfig(**config_dict.get('data', {}))
+        data_dict = dict(config_dict.get('data', {}))
+        # Backward compatibility: old configs may store `npz_dir` instead of `data_dir`.
+        if not data_dict.get('data_dir') and data_dict.get('npz_dir'):
+            data_dict['data_dir'] = data_dict['npz_dir']
+        data_dict.pop('npz_dir', None)
+        config.data = DataConfig(**data_dict)
         config.model = ModelConfig(**config_dict.get('model', {}))
         config.training = TrainingConfig(**config_dict.get('training', {}))
         config.postprocessing = PostProcessingConfig(**config_dict.get('postprocessing', {}))
@@ -161,7 +165,7 @@ class Config:
         config.output_dir = config_dict.get('output_dir', 'video_output_unet3d')
         config.seed = config_dict.get('seed', 42)
         config.device = config_dict.get('device', 'cuda')
-        config.num_workers = config_dict.get('num_workers', 4)
+        config.num_workers = config_dict.get('num_workers', 0)
         
         return config
 

@@ -1,0 +1,54 @@
+{
+  "input_json": "C:\\GitHub\\chest-ct-report-generator\\dataset_luna16_new.json",
+  "output_dir": "C:\\GitHub\\chest-ct-report-generator",
+  "num_folds": 5,
+  "seed": 42,
+  "group_keys": [
+    "seriesuid"
+  ],
+  "num_groups": 540,
+  "num_pool_samples": 540,
+  "num_test_samples": 61,
+  "folds": [
+    {
+      "fold": 0,
+      "path": "C:\\GitHub\\chest-ct-report-generator\\dataset_luna16_new_fold0.json",
+      "train_samples": 432,
+      "val_samples": 108,
+      "test_samples": 61,
+      "val_groups": 108
+    },
+    {
+      "fold": 1,
+      "path": "C:\\GitHub\\chest-ct-report-generator\\dataset_luna16_new_fold1.json",
+      "train_samples": 432,
+      "val_samples": 108,
+      "test_samples": 61,
+      "val_groups": 108
+    },
+    {
+      "fold": 2,
+      "path": "C:\\GitHub\\chest-ct-report-generator\\dataset_luna16_new_fold2.json",
+      "train_samples": 432,
+      "val_samples": 108,
+      "test_samples": 61,
+      "val_groups": 108
+    },
+    {
+      "fold": 3,
+      "path": "C:\\GitHub\\chest-ct-report-generator\\dataset_luna16_new_fold3.json",
+      "train_samples": 432,
+      "val_samples": 108,
+      "test_samples": 61,
+      "val_groups": 108
+    },
+    {
+      "fold": 4,
+      "path": "C:\\GitHub\\chest-ct-report-generator\\dataset_luna16_new_fold4.json",
+      "train_samples": 432,
+      "val_samples": 108,
+      "test_samples": 61,
+      "val_groups": 108
+    }
+  ]
+}

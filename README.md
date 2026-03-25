@@ -88,13 +88,13 @@ python train_unetpp\main.py --dataset msd --epochs 100
 
 ```bash
 # 1. 數據轉換 (DICOM -> NPZ Volume)
-python -m detection.train_3dunet.main convert --dataset lndb --input_dir <path> --output_dir cache/volume_npz --full_volume
+python -m detection.retinanet.prepare_data --dataset lndb --base_dir "cache/LNDb" --output "dataset_lndb.json"
 
 # 2. 訓練偵測模型
-python -m detection.train_3dunet.main train --npz_dir cache/volume_npz --epochs 100 --attention
+python -m detection.retinanet.main train --data_path "dataset_lndb.json" --epochs 300 --output_dir "results/experiment_1"
 
 # 3. 推論與生成報告
-python -m detection.train_3dunet.main fulltest --npz_dir cache/volume_npz --checkpoint best_model.pth --split test
+python -m detection.retinanet.inference --input_path "data/patient_01" --model_path "results/experiment_1/model_best.pt" --output_dir "results/patient_01"
 ```
 
 ### 4. RAG 報告生成 (LLM)

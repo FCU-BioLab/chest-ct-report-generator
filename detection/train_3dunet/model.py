@@ -196,9 +196,13 @@ def get_model(config) -> nn.Module:
     """Get model from config"""
     # Defaults or Config
     f_maps = [32, 64, 128, 256]  # Standard base 32, 4 levels
-    
-    if hasattr(config.model, 'f_maps'):
-        f_maps = config.model.f_maps
+    cfg_f_maps = getattr(config.model, 'f_maps', None)
+    if cfg_f_maps:
+        f_maps = list(cfg_f_maps)
+    else:
+        base_filters = int(getattr(config.model, 'base_filters', 32))
+        num_levels = int(getattr(config.model, 'num_levels', 4))
+        f_maps = [base_filters * (2 ** k) for k in range(num_levels)]
     
     layer_order = 'gcr'  # GroupNorm -> Conv -> ReLU
     

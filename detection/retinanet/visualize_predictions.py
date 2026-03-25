@@ -37,9 +37,14 @@ def draw_boxes_on_slice(
     boxes: np.ndarray,
     scores: np.ndarray,
     z_idx: int,
-    color_pred=(1.0, 0.3, 0.3),  # 紅色 - 預測
-    color_gt=(0.3, 1.0, 0.3),    # 綠色 - GT
+    is_tp: np.ndarray = None,
+    nodule_metrics: dict = None,
+    color_tp=(1.0, 1.0, 0.2),    # 黃色 - TP
+    color_fp=(1.0, 0.3, 0.3),    # 紅色 - FP
+    color_gt_hit=(0.3, 1.0, 0.3),    # 綠色 - GT (被命中)
+    color_gt_fn=(1.0, 0.5, 0.0),     # 橘色 - GT (未命中 = FN)
     gt_boxes: np.ndarray = None,
+    gt_is_matched: np.ndarray = None,
 ):
     """
     在 2D slice 上繪製 bounding box。
@@ -53,27 +58,34 @@ def draw_boxes_on_slice(
     ax.imshow(slice_2d.T, cmap="gray", origin="lower", vmin=0, vmax=1)
     ax.set_axis_off()
 
-    # 繪製 GT boxes
+    # 繪製 GT boxes（區分命中與未命中）
     if gt_boxes is not None and len(gt_boxes) > 0:
-        for box in gt_boxes:
+        for gi, box in enumerate(gt_boxes):
             x1, y1, z1, x2, y2, z2 = box
             if z1 <= z_idx <= z2:
+                matched = gt_is_matched[gi] if gt_is_matched is not None else False
+                gt_color = color_gt_hit if matched else color_gt_fn
+                gt_label = "GT(Hit)" if matched else "FN"
                 rect = patches.Rectangle(
                     (x1, y1), x2 - x1, y2 - y1,
-                    linewidth=2, edgecolor=color_gt, facecolor="none",
+                    linewidth=2, edgecolor=gt_color, facecolor="none",
                     linestyle="--",
                 )
                 ax.add_patch(rect)
                 ax.text(
-                    x1, y1 - 3, "GT",
-                    color=color_gt, fontsize=8, fontweight="bold",
+                    x1, y1 - 3, gt_label,
+                    color=gt_color, fontsize=8, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.5),
                 )
 
     # 繪製預測 boxes
     if len(boxes) > 0:
-        for box, score in zip(boxes, scores):
+        for i, (box, score) in enumerate(zip(boxes, scores)):
             x1, y1, z1, x2, y2, z2 = box
+            
+            color_pred = color_tp if (is_tp is not None and is_tp[i]) else color_fp
+            label_text = f"TP {score:.2f}" if (is_tp is not None and is_tp[i]) else f"FP {score:.2f}"
+            
             if z1 <= z_idx <= z2:
                 rect = patches.Rectangle(
                     (x1, y1), x2 - x1, y2 - y1,
@@ -81,12 +93,16 @@ def draw_boxes_on_slice(
                 )
                 ax.add_patch(rect)
                 ax.text(
-                    x1, y1 - 3, f"{score:.2f}",
+                    x1, y1 - 3, label_text,
                     color=color_pred, fontsize=8, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.5),
                 )
 
-    ax.set_title(f"Slice {z_idx}", fontsize=10, color="white",
+    title_text = f"Slice {z_idx}"
+    if nodule_metrics is not None:
+        title_text += f" | Nodule: TP={nodule_metrics['TP']} FP={nodule_metrics['FP']} FN={nodule_metrics['FN']}"
+        
+    ax.set_title(title_text, fontsize=10, color="white",
                  bbox=dict(facecolor="black", alpha=0.7))
 
     fig.tight_layout(pad=0.3)
@@ -125,36 +141,58 @@ def create_prediction_gif(
         mask = pred_scores >= score_thresh
         pred_boxes = pred_boxes[mask]
         pred_scores = pred_scores[mask]
+        
+    # 計算 IoU 與 TP/FP（同時追蹤每個 GT 是否被命中）
+    is_tp = np.zeros(len(pred_boxes), dtype=bool)
+    gt_is_matched = np.zeros(len(gt_boxes), dtype=bool)
+    
+    if len(gt_boxes) > 0 and len(pred_boxes) > 0:
+        for i, pb in enumerate(pred_boxes):
+            best_iou = 0.0
+            best_gt_idx = -1
+            for gi, gb in enumerate(gt_boxes):
+                # 3D intersection
+                ix1 = max(pb[0], gb[0])
+                iy1 = max(pb[1], gb[1])
+                iz1 = max(pb[2], gb[2])
+                ix2 = min(pb[3], gb[3])
+                iy2 = min(pb[4], gb[4])
+                iz2 = min(pb[5], gb[5])
+                
+                inter_vol = max(0, ix2 - ix1) * max(0, iy2 - iy1) * max(0, iz2 - iz1)
+                if inter_vol > 0:
+                    pb_vol = max(0, pb[3]-pb[0]) * max(0, pb[4]-pb[1]) * max(0, pb[5]-pb[2])
+                    gb_vol = max(0, gb[3]-gb[0]) * max(0, gb[4]-gb[1]) * max(0, gb[5]-gb[2])
+                    iou = inter_vol / (pb_vol + gb_vol - inter_vol + 1e-6)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_gt_idx = gi
+            if best_iou >= 0.10 and best_gt_idx >= 0 and not gt_is_matched[best_gt_idx]:
+                is_tp[i] = True
+                gt_is_matched[best_gt_idx] = True
+
+    # 計算 Nodule-Level Metrics
+    n_tp = int(np.sum(is_tp))
+    n_fp = int(np.sum(~is_tp)) if len(pred_boxes) > 0 else 0
+    n_fn = int(np.sum(~gt_is_matched)) if len(gt_boxes) > 0 else 0
+    nodule_metrics = {"TP": n_tp, "FP": n_fp, "FN": n_fn}
 
     H, W, D = image.shape
     frames = []
 
-    # 找出有框的 slice 範圍（擴展前後各 5 slices）
-    z_with_content = set()
-    for box in pred_boxes:
-        z1, z2 = int(box[2]), int(box[5])
-        for z in range(max(0, z1 - 5), min(D, z2 + 6)):
-            z_with_content.add(z)
-    if gt_boxes is not None:
-        for box in gt_boxes:
-            z1, z2 = int(box[2]), int(box[5])
-            for z in range(max(0, z1 - 5), min(D, z2 + 6)):
-                z_with_content.add(z)
+    # 使用完整的 Z 軸切片，不再只取包含框的片段
+    z_slices = list(range(D))
 
-    # 如果沒有任何框，顯示中間 30 slices
-    if not z_with_content:
-        mid = D // 2
-        z_with_content = set(range(max(0, mid - 15), min(D, mid + 15)))
-
-    z_slices = sorted(z_with_content)
-
-    logger.info(f"    生成 {len(z_slices)} 個 frames (D={D})...")
+    logger.info(f"    生成 {len(z_slices)} 個 frames (完整的原始影像 D={D})...")
 
     for z in z_slices:
         frame = draw_boxes_on_slice(
             image[:, :, z],
             pred_boxes, pred_scores, z,
+            is_tp=is_tp,
+            nodule_metrics=nodule_metrics,
             gt_boxes=gt_boxes,
+            gt_is_matched=gt_is_matched,
         )
         frames.append(PILImage.fromarray(frame))
 
