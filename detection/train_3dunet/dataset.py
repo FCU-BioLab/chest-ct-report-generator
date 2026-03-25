@@ -1,41 +1,54 @@
 #!/usr/bin/env python3
 """
-3D Video Dataset
-================
+3D Volumetric Dataset
+=====================
 
-Dataset for loading 3D video/volume samples for 3D U-Net training.
+ NIfTI-only dataset loader for task folders:
+- imagesTr/*_0000.nii.gz
+- labelsTr/*.nii.gz
 """
+
+from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-import warnings
+
+try:
+    import SimpleITK as sitk
+except ModuleNotFoundError:  # pragma: no cover - runtime guard
+    sitk = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
+
 class VolumetricDataset(Dataset):
     """
-    Volumetric Lesion Dataset for 3D U-Net.
-    Loads NPZ files containing (D, H, W) volume and masks.
+    Volumetric lesion dataset for 3D U-Net.
+    Reads imagesTr/*_0000.nii.gz + labelsTr/*.nii.gz from NIfTI task folders.
     """
-    
+
     def __init__(
         self,
-        npz_dir: str,
+        data_dir: Optional[str] = None,
         split: str = "train",
-        image_size: int = 256, # 3D U-Net usually works on smaller patches to fit in memory
+        image_size: int = 256,
         max_depth: int = 32,
         augmentation: bool = False,
         split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
         split_seed: int = 42,
-        positive_ratio: float = 0.7, # 70% chance to pick nodule center, 30% random crop
-        full_volume: bool = False, # If True, return full volume (no cropping)
+        positive_ratio: float = 0.7,
+        full_volume: bool = False,
     ):
-        self.npz_dir = Path(npz_dir)
+        if data_dir is None:
+            raise ValueError("`data_dir` is required (NIfTI task folder).")
+
+        self.root_dir = Path(data_dir)
         self.split = split
         self.image_size = image_size
         self.max_depth = max_depth
@@ -44,248 +57,276 @@ class VolumetricDataset(Dataset):
         self.split_seed = split_seed
         self.positive_ratio = positive_ratio
         self.full_volume = full_volume
-        
-        # Load file list
+
+        if self.split in {"val", "test"} and (not self.full_volume):
+            logger.warning(
+                "Split=%s is using depth cropping (max_depth=%d). "
+                "For final evaluation, prefer full-volume inference.",
+                self.split,
+                self.max_depth,
+            )
+
+        if not (self.root_dir / "imagesTr").exists():
+            raise ValueError(
+                f"NIfTI task folder not found: {self.root_dir}. "
+                "Expected imagesTr/labelsTr layout."
+            )
         self.samples = self._load_file_list()
-        logger.info(f"📹 Loading {len(self.samples)} samples (split={split})")
-    
-    def _load_file_list(self) -> List[Path]:
-        from .utils import get_split_files
-        return get_split_files(
-            npz_dir=self.npz_dir,
-            split=self.split,
-            ratios=self.split_ratios,
-            seed=self.split_seed
+        logger.info(
+            "Loading %d samples (split=%s, mode=nifti_task, root=%s)",
+            len(self.samples),
+            split,
+            self.root_dir,
         )
-    
+
+    def _load_file_list(self) -> List[Dict[str, Any]]:
+        return self._load_nifti_task_samples()
+
+    def _load_nifti_task_samples(self) -> List[Dict[str, Any]]:
+        images_tr = self.root_dir / "imagesTr"
+        labels_tr = self.root_dir / "labelsTr"
+        if not images_tr.exists():
+            logger.warning("imagesTr not found in %s", self.root_dir)
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        for img_path in sorted(images_tr.glob("*_0000.nii.gz")):
+            case_id = img_path.name.replace("_0000.nii.gz", "")
+            label_path = labels_tr / f"{case_id}.nii.gz"
+            entries.append(
+                {
+                    "type": "nifti",
+                    "image_path": img_path,
+                    "label_path": label_path if label_path.exists() else None,
+                    "patient_id": case_id,
+                    "lesion_id": 0,
+                }
+            )
+
+        if not entries:
+            logger.warning("No *_0000.nii.gz files found under %s", images_tr)
+            return []
+
+        # Patient-level split to avoid leakage
+        patient_ids = sorted({e["patient_id"] for e in entries})
+        rng = np.random.RandomState(self.split_seed)
+        rng.shuffle(patient_ids)
+
+        n = len(patient_ids)
+        train_end = int(n * self.split_ratios[0])
+        val_end = train_end + int(n * self.split_ratios[1])
+        if self.split == "train":
+            selected = set(patient_ids[:train_end])
+        elif self.split == "val":
+            selected = set(patient_ids[train_end:val_end])
+        elif self.split == "test":
+            selected = set(patient_ids[val_end:])
+        else:
+            selected = set(patient_ids)
+
+        filtered = [e for e in entries if e["patient_id"] in selected]
+        logger.info(
+            "NIfTI split (%s): %d patients, %d samples",
+            self.split,
+            len(selected),
+            len(filtered),
+        )
+        return filtered
+
     def __len__(self) -> int:
         return len(self.samples)
-    
+
     def get_patient_ids(self) -> List[str]:
-        """Extract unique patient IDs from loaded samples"""
-        patient_ids = []
-        for npz_path in self.samples:
-            try:
-                data = np.load(npz_path, allow_pickle=True)
-                pid = str(data.get('patient_id', npz_path.stem))
-                patient_ids.append(pid)
-            except Exception as e:
-                logger.warning(f"Failed to load patient ID from {npz_path}: {e}")
-                patient_ids.append(npz_path.stem)
-        return patient_ids
-    
-    def get_dataset_info(self) -> Dict:
-        """Get dataset statistics including patient IDs"""
+        return [str(s["patient_id"]) for s in self.samples]
+
+    def get_dataset_info(self) -> Dict[str, Any]:
         patient_ids = self.get_patient_ids()
-        unique_patients = list(set(patient_ids))
+        unique_patients = sorted(set(patient_ids))
+        sample_paths = [str(Path(s["image_path"]).name) for s in self.samples]
         return {
-            'split': self.split,
-            'total_samples': len(self.samples),
-            'unique_patients': len(unique_patients),
-            'patient_ids': unique_patients,
-            'sample_paths': [str(p.name) for p in self.samples]
+            "split": self.split,
+            "mode": "nifti_task",
+            "total_samples": len(self.samples),
+            "unique_patients": len(unique_patients),
+            "patient_ids": unique_patients,
+            "sample_paths": sample_paths,
         }
-    
-    def __getitem__(self, idx: int) -> Dict:
-        npz_path = self.samples[idx]
-        data = np.load(npz_path, allow_pickle=True)
-        
-        # Load data
-        frames = data['frames']  # (D, H, W)
-        masks = data['masks']    # (D, H, W)
-        center_idx = int(data['center_idx'])
-        
-        # Load metadata
-        slice_indices = data.get('slice_indices')
-        spacing = data.get('spacing')
-        origin = data.get('origin')
-        original_shape = data.get('original_shape')
-        
-        
-        # Determine crop range
-        D = len(frames)
-        start, end = 0, D
-        
-        # Random Crop Strategy (Hard Negative Mining)
+
+    def _prepare_crop_range(self, depth: int, center_idx: int) -> Tuple[int, int]:
+        start, end = 0, depth
         use_random_crop = False
-        if self.split == 'train' and D > self.max_depth:
+        if self.split == "train" and depth > self.max_depth:
             if np.random.rand() > self.positive_ratio:
-                 use_random_crop = True
-        
+                use_random_crop = True
+
         if not self.full_volume:
             if use_random_crop:
-                # Random crop from anywhere
-                max_start = max(0, D - self.max_depth)
+                max_start = max(0, depth - self.max_depth)
                 start = np.random.randint(0, max_start + 1)
-                end = min(D, start + self.max_depth)
-            elif D > self.max_depth:
-                # Center crop (Positive sample)
+                end = min(depth, start + self.max_depth)
+            elif depth > self.max_depth:
                 half = self.max_depth // 2
                 start = max(0, center_idx - half)
-                end = min(D, start + self.max_depth)
+                end = min(depth, start + self.max_depth)
                 if end - start < self.max_depth:
-                    if start == 0: end = min(D, self.max_depth)
-                    elif end == D: start = max(0, D - self.max_depth)
-        
-        # Crop (numpy)
+                    if start == 0:
+                        end = min(depth, self.max_depth)
+                    elif end == depth:
+                        start = max(0, depth - self.max_depth)
+        return start, end
+
+    @staticmethod
+    def _normalize_ct_to_u8(image_zyx: np.ndarray) -> np.ndarray:
+        # HU window [-1000, 400] -> [0, 255]
+        clipped = np.clip(image_zyx.astype(np.float32), -1000.0, 400.0)
+        norm = (clipped + 1000.0) / 1400.0
+        return (norm * 255.0).astype(np.uint8)
+
+    def _load_nifti_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        if sitk is None:
+            raise RuntimeError("SimpleITK is required for NIfTI loading.")
+
+        img_path: Path = sample["image_path"]
+        label_path: Optional[Path] = sample["label_path"]
+
+        image = sitk.ReadImage(str(img_path))
+        frames = sitk.GetArrayFromImage(image)  # zyx
+        frames = self._normalize_ct_to_u8(frames)
+
+        if label_path is not None and label_path.exists():
+            label_img = sitk.ReadImage(str(label_path))
+            masks = (sitk.GetArrayFromImage(label_img) > 0).astype(np.uint8)
+        else:
+            masks = np.zeros_like(frames, dtype=np.uint8)
+
+        has_lesion = masks.sum() > 0
+        lesion_center_idx = int(np.argmax(masks.sum(axis=(1, 2)))) if has_lesion else int(frames.shape[0] // 2)
+        lesion_id = 1 if has_lesion else 0
+
+        # Avoid label leakage:
+        # - train: allow lesion-centered sampling for positive mining
+        # - val/test: never use GT center for crop selection
+        crop_center_idx = lesion_center_idx if self.split == "train" else int(frames.shape[0] // 2)
+
+        slice_indices = np.arange(frames.shape[0], dtype=np.int64)
+        spacing = np.array(image.GetSpacing(), dtype=np.float32)
+        origin = np.array(image.GetOrigin(), dtype=np.float32)
+        original_shape = np.array(frames.shape, dtype=np.int64)
+
+        start, end = self._prepare_crop_range(frames.shape[0], crop_center_idx)
         frames = frames[start:end]
         masks = masks[start:end]
-        if slice_indices is not None:
-             slice_indices = slice_indices[start:end]
+        slice_indices = slice_indices[start:end]
+        lesion_center_idx = int(np.clip(lesion_center_idx - start, 0, max(0, frames.shape[0] - 1)))
 
-        # Convert to Tensor (Float) immediately
-        # (D, H, W) -> (1, D, H, W) normalized [0,1]
         frames_t = torch.from_numpy(frames).float().unsqueeze(0) / 255.0
         masks_t = torch.from_numpy(masks).float().unsqueeze(0)
-        
-        # Resize using torch (much faster than PIL loop)
         frames_t, masks_t = self._resize_video_torch(frames_t, masks_t)
-        
-        # Augmentation (Torch)
+
         if self.augmentation and self.split == "train":
             frames_t, masks_t = self._augment_torch(frames_t, masks_t)
-        
-        result = {
-            'image': frames_t,         # (1, D, H, W)
-            'mask': masks_t.long(),    # (1, D, H, W)
-            'patient_id': str(data.get('patient_id', '')),
-            'lesion_id': int(data.get('lesion_id', 0)),
-            'npz_path': str(npz_path)
+
+        return {
+            "image": frames_t,
+            "mask": masks_t.long(),
+            "patient_id": str(sample["patient_id"]),
+            "lesion_id": lesion_id,
+            "source_path": str(img_path),
+            "slice_indices": torch.tensor(slice_indices, dtype=torch.long),
+            "spacing": torch.tensor(spacing, dtype=torch.float32),
+            "origin": torch.tensor(origin, dtype=torch.float32),
+            "original_shape": torch.tensor(original_shape, dtype=torch.long),
+            "lesion_center_idx": lesion_center_idx,
         }
-        
-        # Add metadata if available
-        if slice_indices is not None:
-            result['slice_indices'] = torch.tensor(slice_indices, dtype=torch.long)
-        if spacing is not None:
-            result['spacing'] = torch.tensor(spacing, dtype=torch.float32)
-        if origin is not None:
-            result['origin'] = torch.tensor(origin, dtype=torch.float32)
-        if original_shape is not None:
-            result['original_shape'] = torch.tensor(original_shape, dtype=torch.long)
-            
-        return result
-    
-    def _resize_video_torch(self, frames, masks):
-        """
-        Resize using torch interpolation.
-        Input: (C, D, H, W)
-        """
-        D, H, W = frames.shape[1], frames.shape[2], frames.shape[3]
-        if H == self.image_size and W == self.image_size:
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self._load_nifti_sample(self.samples[idx])
+
+    def _resize_video_torch(self, frames: torch.Tensor, masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        d, h, w = frames.shape[1], frames.shape[2], frames.shape[3]
+        if h == self.image_size and w == self.image_size:
             return frames, masks
-            
-        # F.interpolate takes (N, C, D, H, W) or (N, C, H, W)
-        # Here we have (1, D, H, W) -> Treat as (1, D, H, W) or usually (N, C, D, H, W)
-        # For simple 2D resizing on D slices, we can merge N and D or use 3D interpolate
-        
-        # 3D Interpolation causes depth mixing? No, if we use trilinear it mixes.
-        # We want to resize H, W only, keeping D intact.
-        # Reshape to (D, C, H, W) -> (D, 1, H, W)
-        
-        f_in = frames.permute(1, 0, 2, 3) # (D, 1, H, W)
-        m_in = masks.permute(1, 0, 2, 3)  # (D, 1, H, W)
-        
-        # Bilinear for image
-        f_out = F.interpolate(f_in, size=(self.image_size, self.image_size), mode='bilinear', align_corners=False)
-        # Nearest for mask
-        m_out = F.interpolate(m_in, size=(self.image_size, self.image_size), mode='nearest')
-        
-        # Permute back to (1, D, H, W)
+
+        f_in = frames.permute(1, 0, 2, 3)  # (D,1,H,W)
+        m_in = masks.permute(1, 0, 2, 3)  # (D,1,H,W)
+        f_out = F.interpolate(f_in, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
+        m_out = F.interpolate(m_in, size=(self.image_size, self.image_size), mode="nearest")
         return f_out.permute(1, 0, 2, 3), m_out.permute(1, 0, 2, 3)
 
-    def _augment_torch(self, frames, masks):
-        """
-        Fast GPU-ready augmentation using Torch tensors
-        """
-        # 1. Flip
+    def _augment_torch(self, frames: torch.Tensor, masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if np.random.rand() > 0.5:
-            frames = torch.flip(frames, dims=[3]) # Horizontal (W)
+            frames = torch.flip(frames, dims=[3])
             masks = torch.flip(masks, dims=[3])
         if np.random.rand() > 0.5:
-            frames = torch.flip(frames, dims=[2]) # Vertical (H)
+            frames = torch.flip(frames, dims=[2])
             masks = torch.flip(masks, dims=[2])
-            
-        # 2. Intensity Shift (offset)
         if np.random.rand() > 0.5:
-            shift = (np.random.rand() * 0.2 - 0.1) # -0.1 to 0.1
+            shift = (np.random.rand() * 0.2 - 0.1)
             frames = torch.clamp(frames + shift, 0.0, 1.0)
-            
-        # 3. Simple 90 degree rotations (fast, no artifacts)
-        # Replacing slow scipy rotation with simple 90deg steps
         if np.random.rand() > 0.5:
-            k = np.random.randint(1, 4) # 1, 2, or 3
+            k = int(np.random.randint(1, 4))
             frames = torch.rot90(frames, k, dims=[2, 3])
             masks = torch.rot90(masks, k, dims=[2, 3])
-            
-        # Note: Removing Affine (Rotate/Scale) for now as it's complex to implement purely in Torch 
-        # without introducing interpolation artifacts or needing GridSample logic, 
-        # which is overkill if speed is the priority. 
-        # Rot90 + Flips covers 8 symmetries which is good for medical data.
-        
         return frames, masks
 
 
-def collate_video_batch(batch: List[Dict]) -> Dict:
+def collate_video_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Collate batch with variable Depth D.
-    Pads to max D in batch.
+    Collate batch with variable depth D by end-padding to max depth.
     """
     if not batch:
         return {}
-        
-    max_d = max(s['image'].shape[1] for s in batch)
-    
-    images = []
-    masks = []
-    slice_indices_list = []
-    has_slice_indices = 'slice_indices' in batch[0]
-    
-    # Metadata lists
-    spacings = []
-    origins = []
-    original_shapes = []
-    
+
+    max_d = max(s["image"].shape[1] for s in batch)
+    images: List[torch.Tensor] = []
+    masks: List[torch.Tensor] = []
+    slice_indices_list: List[torch.Tensor] = []
+    has_slice_indices = "slice_indices" in batch[0]
+
+    spacings: List[torch.Tensor] = []
+    origins: List[torch.Tensor] = []
+    original_shapes: List[torch.Tensor] = []
+
     for s in batch:
-        img = s['image'] # (1, D, H, W)
-        msk = s['mask']  # (1, D, H, W)
+        img = s["image"]  # (1,D,H,W)
+        msk = s["mask"]  # (1,D,H,W)
         d = img.shape[1]
-        
+
         if d < max_d:
             pad_d = max_d - d
-            # Pad at end
-            img = torch.nn.functional.pad(img, (0,0, 0,0, 0,pad_d))
-            msk = torch.nn.functional.pad(msk, (0,0, 0,0, 0,pad_d))
-            
-            if has_slice_indices and 'slice_indices' in s:
-                # Pad with -1
-                si = s['slice_indices']
+            img = torch.nn.functional.pad(img, (0, 0, 0, 0, 0, pad_d))
+            msk = torch.nn.functional.pad(msk, (0, 0, 0, 0, 0, pad_d))
+
+            if has_slice_indices and "slice_indices" in s:
+                si = s["slice_indices"]
                 si = torch.cat([si, torch.full((pad_d,), -1, dtype=si.dtype)])
                 slice_indices_list.append(si)
         else:
-            if has_slice_indices and 'slice_indices' in s:
-                slice_indices_list.append(s['slice_indices'])
-            
+            if has_slice_indices and "slice_indices" in s:
+                slice_indices_list.append(s["slice_indices"])
+
         images.append(img)
         masks.append(msk)
-        
-        if 'spacing' in s: spacings.append(s['spacing'])
-        if 'origin' in s: origins.append(s['origin'])
-        if 'original_shape' in s: original_shapes.append(s['original_shape'])
-    
-    result = {
-        'image': torch.stack(images), # (B, 1, D, H, W)
-        'mask': torch.stack(masks),   # (B, 1, D, H, W)
-        'patient_id': [s['patient_id'] for s in batch],
-        'npz_path': [s['npz_path'] for s in batch]
+
+        if "spacing" in s:
+            spacings.append(s["spacing"])
+        if "origin" in s:
+            origins.append(s["origin"])
+        if "original_shape" in s:
+            original_shapes.append(s["original_shape"])
+
+    result: Dict[str, Any] = {
+        "image": torch.stack(images),  # (B,1,D,H,W)
+        "mask": torch.stack(masks),  # (B,1,D,H,W)
+        "patient_id": [s["patient_id"] for s in batch],
+        "source_path": [s["source_path"] for s in batch],
     }
-    
     if slice_indices_list:
-        result['slice_indices'] = torch.stack(slice_indices_list) # (B, D)
+        result["slice_indices"] = torch.stack(slice_indices_list)
     if spacings:
-        result['spacing'] = torch.stack(spacings)
+        result["spacing"] = torch.stack(spacings)
     if origins:
-        result['origin'] = torch.stack(origins)
+        result["origin"] = torch.stack(origins)
     if original_shapes:
-        result['original_shape'] = torch.stack(original_shapes)
-        
+        result["original_shape"] = torch.stack(original_shapes)
     return result

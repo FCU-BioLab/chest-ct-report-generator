@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from detection.retinanet.config import RetinaNetConfig
 from detection.retinanet.trainer import RetinaNetTrainer
+from detection.common.location_estimator import LungLocationEstimator
 
 # 設定日誌
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -339,6 +340,7 @@ def main():
         "spacing": list(spacing),
         "nodules": []
     }
+    location_estimator = LungLocationEstimator(total_slices=max(int(array.shape[0]), 1))
     
     for i in range(len(orig_boxes)):
         box = orig_boxes[i].tolist() # [x1, y1, z1, x2, y2, z2]
@@ -347,6 +349,10 @@ def main():
         cx = (box[0] + box[3]) / 2
         cy = (box[1] + box[4]) / 2
         cz = (box[2] + box[5]) / 2
+        relative_x = cx / max(array.shape[2], 1)
+        relative_y = cy / max(array.shape[1], 1)
+        slice_ratio = cz / max(array.shape[0], 1)
+        location = location_estimator.estimate_location(relative_x, relative_y, slice_ratio)
         
         # 簡易轉換: origin + index * spacing (ITK 慣例)
         pt_world = origin + np.array([cx, cy, cz]) * spacing
@@ -359,7 +365,13 @@ def main():
             "score": float(pred_scores[i]),
             "box_voxel": [round(x, 1) for x in box],
             "center_world_mm": [round(x, 2) for x in pt_world],
-            "approx_diameter_mm": round(diameter, 1)
+            "approx_diameter_mm": round(diameter, 1),
+            "anatomical_location": {
+                "lobe": location["lobe"],
+                "lobe_full": location["lobe_full"],
+                "side": location["side"],
+                "confidence": round(float(location["confidence"]), 3),
+            }
         })
         
     # 儲存 JSON

@@ -43,9 +43,8 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent  # chest-ct-report-generator
 FEATURES_DIR = PROJECT_ROOT / "medsam2_segmentation" / "result" / "segmentation_20251204_152809" / "features" / "llm_data"
 
 # 添加 medsam2_segmentation 到 path 以導入 location_estimator
-sys.path.insert(0, str(PROJECT_ROOT / "medsam2_segmentation"))
 try:
-    from location_estimator import LungLocationEstimator, get_location_for_report
+    from detection.common.location_estimator import LungLocationEstimator
     LOCATION_ESTIMATOR_AVAILABLE = True
 except ImportError:
     LOCATION_ESTIMATOR_AVAILABLE = False

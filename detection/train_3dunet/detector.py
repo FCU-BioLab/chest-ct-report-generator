@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 import torch
 from skimage import measure, morphology
-from .location_estimator import LungLocationEstimator
+from detection.common.location_estimator import LungLocationEstimator
 
 @dataclass
 class NoduleLocation:

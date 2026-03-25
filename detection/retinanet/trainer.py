@@ -14,7 +14,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -150,6 +150,7 @@ class RetinaNetTrainer:
         logger.info(f"  裝置: {self.device}")
         logger.info(f"  輸出路徑: {self.output_dir}")
         logger.info(f"  patch_size: {config.patch_size}")
+        logger.info(f"  max_boxes_for_crop: {config.max_boxes_for_crop}")
         logger.info(f"  feature_map_scales: {config.feature_map_scales}")
         logger.info(f"  iou_list: {config.iou_list}")
 
@@ -302,8 +303,12 @@ class RetinaNetTrainer:
         M = self.monai
 
         # 1) 錨點生成器 — 使用 per-axis feature_map_scales
+        feature_map_scales = [
+            torch.as_tensor(scale, dtype=torch.float32)
+            for scale in cfg.feature_map_scales
+        ]
         anchor_generator = M["AnchorGeneratorWithAnchorShape"](
-            feature_map_scales=cfg.feature_map_scales,
+            feature_map_scales=feature_map_scales,
             base_anchor_shapes=cfg.base_anchor_shapes,
         )
 
@@ -338,18 +343,43 @@ class RetinaNetTrainer:
 
         # 載入預訓練權重
         if cfg.pretrained_weights and os.path.exists(cfg.pretrained_weights):
-            pretrained = torch.load(
-                cfg.pretrained_weights, map_location="cpu", weights_only=False
-            )
-            matched = net.load_state_dict(pretrained, strict=False)
-            n_total = len(pretrained)
-            n_loaded = n_total - len(matched.unexpected_keys)
-            logger.info(
-                f"  ✅ 已載入預訓練權重: {cfg.pretrained_weights}"
-                f" ({n_loaded}/{n_total} keys matched)"
-            )
-            if matched.missing_keys:
-                logger.info(f"  ⚠️ Missing keys: {matched.missing_keys}")
+            pretrained_state = None
+            load_error = None
+
+            try:
+                loaded_obj = torch.load(
+                    cfg.pretrained_weights, map_location="cpu", weights_only=False
+                )
+                if isinstance(loaded_obj, dict) and "model_state_dict" in loaded_obj:
+                    loaded_obj = loaded_obj["model_state_dict"]
+                if isinstance(loaded_obj, dict):
+                    pretrained_state = loaded_obj
+                else:
+                    load_error = f"Unsupported checkpoint object: {type(loaded_obj)}"
+            except Exception as exc:
+                load_error = str(exc)
+
+            if pretrained_state is None:
+                try:
+                    scripted = torch.jit.load(cfg.pretrained_weights, map_location="cpu")
+                    pretrained_state = scripted.state_dict()
+                except Exception as exc:
+                    load_error = f"{load_error}; torch.jit.load failed: {exc}" if load_error else str(exc)
+
+            if pretrained_state is None:
+                logger.warning(
+                    f"  ⚠️ 無法載入預訓練權重，將改用隨機初始化: {cfg.pretrained_weights} ({load_error})"
+                )
+            else:
+                matched = net.load_state_dict(pretrained_state, strict=False)
+                n_total = len(pretrained_state)
+                n_loaded = n_total - len(matched.unexpected_keys)
+                logger.info(
+                    f"  ✅ 已載入預訓練權重: {cfg.pretrained_weights}"
+                    f" ({n_loaded}/{n_total} keys matched)"
+                )
+                if matched.missing_keys:
+                    logger.info(f"  ⚠️ Missing keys: {matched.missing_keys}")
         elif cfg.pretrained_weights:
             logger.warning(f"  ⚠️ 預訓練權重檔案不存在: {cfg.pretrained_weights}")
 
@@ -374,7 +404,7 @@ class RetinaNetTrainer:
 
         # 推論元件設定
         detector.set_box_selector_parameters(
-            score_thresh=cfg.score_thresh,
+            score_thresh=cfg.proposal_score_thresh,
             topk_candidates_per_level=cfg.topk_candidates_per_level,
             nms_thresh=cfg.nms_thresh,
             detections_per_img=cfg.detections_per_img,
@@ -439,6 +469,7 @@ class RetinaNetTrainer:
             rand_transform = build_rand_transform(
                 patch_size=cfg.patch_size,
                 batch_size=cfg.batch_size,
+                max_boxes_for_crop=cfg.max_boxes_for_crop,
             )
 
             cache_dir = Path("cache/monai_persistent_cache")
@@ -466,6 +497,7 @@ class RetinaNetTrainer:
             train_transform = build_train_transform(
                 patch_size=cfg.patch_size,
                 batch_size=cfg.batch_size,
+                max_boxes_for_crop=cfg.max_boxes_for_crop,
                 spacing=cfg.spacing,
                 hu_min=cfg.hu_min,
                 hu_max=cfg.hu_max,
@@ -532,15 +564,42 @@ class RetinaNetTrainer:
         return optimizer, scheduler
 
     # ─── 訓練流程 ────────────────────────────────────────────────
-    def train(self):
+    def train(self, resume_checkpoint: Optional[str] = None):
         """主訓練迴圈。"""
         cfg = self.config
-        best_metric = 0.0
+        best_metric = -1.0
         best_epoch = -1
+        start_epoch = 0
+        last_epoch = -1
+        early_stop_patience = int(getattr(cfg, "early_stop_patience", 0) or 0)
+        early_stop_min_delta = float(getattr(cfg, "early_stop_min_delta", 0.0) or 0.0)
+        early_stop_enabled = early_stop_patience > 0
+
+        if resume_checkpoint:
+            resume_path = Path(resume_checkpoint)
+            if resume_path.exists():
+                start_epoch, best_metric, best_epoch = self._load_training_state(resume_path)
+                logger.info(
+                    "⏯️ Resume enabled: %s (start_epoch=%d, best_mAP=%.4f @ epoch %d)",
+                    resume_path,
+                    start_epoch + 1,
+                    best_metric,
+                    best_epoch,
+                )
+            else:
+                logger.warning("⚠️ Resume checkpoint not found: %s. Training from scratch.", resume_path)
 
         logger.info(f"🚀 開始 RetinaNet 訓練，共 {cfg.epochs} Epochs")
 
-        for epoch in range(cfg.epochs):
+        if early_stop_enabled:
+            logger.info(
+                "EarlyStopping enabled: patience=%d epochs, min_delta=%.6f (monitor=mAP)",
+                early_stop_patience,
+                early_stop_min_delta,
+            )
+
+        for epoch in range(start_epoch, cfg.epochs):
+            last_epoch = epoch
             # 訓練一個 Epoch
             train_metrics = self._train_epoch(epoch)
 
@@ -552,8 +611,15 @@ class RetinaNetTrainer:
 
             # 儲存最新模型
             self._save_model(self.output_dir / "model_last.pt")
+            self._save_training_state(
+                self.output_dir / "train_state_last.pt",
+                epoch=epoch,
+                best_metric=best_metric,
+                best_epoch=best_epoch,
+            )
 
             # 驗證
+            stop_training = False
             if (epoch + 1) % cfg.val_interval == 0:
                 logger.info("  開始驗證...")
                 try:
@@ -578,12 +644,35 @@ class RetinaNetTrainer:
                     self.history["detection_recall"] = val_metrics.get("detection_recall", 0)
 
                     current_map = val_metrics.get("mAP", 0)
+                    improved = current_map > (best_metric + early_stop_min_delta)
 
-                    if current_map > best_metric:
+                    if improved:
                         best_metric = current_map
                         best_epoch = epoch + 1
                         self._save_model(self.output_dir / "model_best.pt")
+                        self._save_training_state(
+                            self.output_dir / "train_state_best.pt",
+                            epoch=epoch,
+                            best_metric=best_metric,
+                            best_epoch=best_epoch,
+                        )
                         logger.info(f"  💾 儲存新的最佳模型 (mAP={best_metric:.4f})")
+
+                    elif early_stop_enabled and best_epoch > 0:
+                        epochs_since_best = (epoch + 1) - best_epoch
+                        logger.info(
+                            "  EarlyStopping: no improvement for %d/%d epochs",
+                            epochs_since_best,
+                            early_stop_patience,
+                        )
+                        if epochs_since_best >= early_stop_patience:
+                            logger.info(
+                                "Early stopping triggered at epoch %d (best mAP=%.4f @ epoch %d)",
+                                epoch + 1,
+                                best_metric,
+                                best_epoch,
+                            )
+                            stop_training = True
 
                     logger.info(
                         f"  Epoch {epoch+1}: mAP={current_map:.4f} | "
@@ -597,12 +686,21 @@ class RetinaNetTrainer:
             # 儲存歷程
             self._save_history()
             self._plot_curves()
+            if stop_training:
+                break
 
         logger.info(
             f"✅ 訓練完成。最佳 mAP: {best_metric:.4f} (Epoch {best_epoch})"
         )
 
         # ─── 訓練結束後自動執行測試集評估 ───
+        final_epoch = last_epoch if last_epoch >= 0 else cfg.epochs - 1
+        self._save_training_state(
+            self.output_dir / "train_state_final.pt",
+            epoch=final_epoch,
+            best_metric=best_metric,
+            best_epoch=best_epoch,
+        )
         self._run_test_evaluation()
 
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
@@ -763,27 +861,396 @@ class RetinaNetTrainer:
 
         return all_metrics
 
-    def _run_test_evaluation(self):
+    def _apply_prediction_mask(self, output: Dict, keep_mask) -> int:
+        pb = output[self.detector.target_box_key]
+        ps = output[self.detector.pred_score_key]
+        pl = output[self.detector.target_label_key]
+        original_count = len(pb)
+        if original_count == 0:
+            return 0
+        if not isinstance(keep_mask, torch.Tensor):
+            keep_mask = torch.tensor(keep_mask, device=pb.device, dtype=torch.bool)
+        output[self.detector.target_box_key] = pb[keep_mask]
+        output[self.detector.pred_score_key] = ps[keep_mask]
+        output[self.detector.target_label_key] = pl[keep_mask]
+        return int(original_count - int(keep_mask.sum().item()))
+
+    def _filter_predictions_by_lung_mask(self, output: Dict, image_tensor: torch.Tensor) -> int:
+        from .postprocess import generate_lung_mask
+
+        pb = output[self.detector.target_box_key]
+        if len(pb) == 0:
+            return 0
+
+        img_np = image_tensor[0].cpu().numpy()
+        lung_mask = generate_lung_mask(img_np, thresh_val=0.3)
+        keep_mask = []
+        for box in pb.cpu().numpy():
+            cx = min(max(int((box[0] + box[3]) / 2), 0), img_np.shape[0] - 1)
+            cy = min(max(int((box[1] + box[4]) / 2), 0), img_np.shape[1] - 1)
+            cz = min(max(int((box[2] + box[5]) / 2), 0), img_np.shape[2] - 1)
+            keep_mask.append(bool(lung_mask[cx, cy, cz]))
+        return self._apply_prediction_mask(output, keep_mask)
+
+    def _filter_predictions_by_morphology(
+        self,
+        output: Dict,
+        image_tensor: torch.Tensor,
+        spacing: np.ndarray,
+        max_elongation: float,
+        min_solidity: float,
+        min_vol_mm3: float,
+        max_vol_mm3: float,
+    ) -> int:
+        from skimage import measure, morphology
+
+        pb = output[self.detector.target_box_key]
+        if len(pb) == 0:
+            return 0
+
+        img_np = image_tensor[0].cpu().numpy()
+        keep_mask = np.ones(len(pb), dtype=bool)
+        for b_idx, box in enumerate(pb.cpu().numpy()):
+            dx = (box[3] - box[0]) * spacing[0]
+            dy = (box[4] - box[1]) * spacing[1]
+            dz = (box[5] - box[2]) * spacing[2]
+            vol_mm3 = dx * dy * dz
+            if vol_mm3 < min_vol_mm3 or vol_mm3 > max_vol_mm3:
+                keep_mask[b_idx] = False
+                continue
+
+            pad = 2
+            x0 = max(int(box[0]) - pad, 0)
+            y0 = max(int(box[1]) - pad, 0)
+            z0 = max(int(box[2]) - pad, 0)
+            x1 = min(int(box[3]) + pad + 1, img_np.shape[0])
+            y1 = min(int(box[4]) + pad + 1, img_np.shape[1])
+            z1 = min(int(box[5]) + pad + 1, img_np.shape[2])
+            patch = img_np[x0:x1, y0:y1, z0:z1]
+            patch_bin = morphology.binary_closing(patch > 0.333, morphology.ball(1))
+            if not np.any(patch_bin):
+                continue
+
+            label_img = measure.label(patch_bin)
+            props = measure.regionprops(label_img)
+            if not props:
+                continue
+
+            largest_prop = max(props, key=lambda p: p.area)
+            try:
+                major_axis = largest_prop.major_axis_length
+                minor_axis = largest_prop.minor_axis_length
+            except ValueError:
+                continue
+            elongation = 0.0 if minor_axis == 0 else major_axis / minor_axis
+            solidity = largest_prop.solidity
+            if elongation > max_elongation or solidity < min_solidity:
+                keep_mask[b_idx] = False
+
+        return self._apply_prediction_mask(output, keep_mask)
+
+    def _fuse_fpr_scores(
+        self,
+        output: Dict,
+        image_tensor: torch.Tensor,
+        fpr_model,
+        fpr_fuser,
+        fpr_patch_size: int,
+        fpr_weight: float,
+        fpr_thresh: float,
+        fpr_mode: str,
+        fpr_score_aware: bool = False,
+        fpr_det_high_thresh: float = 0.9,
+        fpr_det_mid_thresh: float = 0.6,
+        fpr_high_thresh: float = 0.15,
+        fpr_mid_thresh: float = 0.25,
+    ) -> Dict[str, int]:
+        from .collect_fpr_data import crop_patch
+        from .fpr_fuser import predict_fused_prob
+        from .fpr_model import batch_patches_to_model_input, get_model_type_from_model
+
+        pb = output[self.detector.target_box_key]
+        ps = output[self.detector.pred_score_key]
+        if len(pb) == 0:
+            return {"rescored": 0, "filtered": 0}
+
+        img_np = image_tensor[0].cpu().numpy()
+        patches = []
+        boxes_np = pb.cpu().numpy()
+        for box in boxes_np:
+            center = ((box[0] + box[3]) / 2, (box[1] + box[4]) / 2, (box[2] + box[5]) / 2)
+            patches.append(crop_patch(img_np, center, fpr_patch_size))
+
+        fpr_model_type = get_model_type_from_model(fpr_model)
+        patch_arr = np.stack(patches).astype(np.float32, copy=False)
+        patch_batch = batch_patches_to_model_input(patch_arr, fpr_model_type)
+        patches_tensor = torch.from_numpy(patch_batch).to(self.device)
+        with torch.no_grad():
+            logits = fpr_model(patches_tensor)
+            probs = torch.softmax(logits, dim=1)
+            nodule_prob = probs[:, 1].to(ps.device)
+
+        dx = np.clip(boxes_np[:, 3] - boxes_np[:, 0], a_min=0.0, a_max=None)
+        dy = np.clip(boxes_np[:, 4] - boxes_np[:, 1], a_min=0.0, a_max=None)
+        dz = np.clip(boxes_np[:, 5] - boxes_np[:, 2], a_min=0.0, a_max=None)
+        vol = dx * dy * dz
+        min_axis = np.maximum(np.minimum(np.minimum(dx, dy), dz), 1e-3)
+        max_axis = np.maximum(np.maximum(dx, dy), dz)
+        patch_mean = patch_arr.mean(axis=(1, 2, 3))
+        patch_std = patch_arr.std(axis=(1, 2, 3))
+        patch_p90 = np.percentile(patch_arr, 90, axis=(1, 2, 3))
+        fuser_extra = {
+            "log_volume": torch.from_numpy(np.log1p(vol).astype(np.float32, copy=False)).to(ps.device),
+            "elongation": torch.from_numpy((max_axis / min_axis).astype(np.float32, copy=False)).to(ps.device),
+            "patch_mean": torch.from_numpy(patch_mean.astype(np.float32, copy=False)).to(ps.device),
+            "patch_std": torch.from_numpy(patch_std.astype(np.float32, copy=False)).to(ps.device),
+            "patch_p90": torch.from_numpy(patch_p90.astype(np.float32, copy=False)).to(ps.device),
+        }
+
+        if fpr_mode == "learned":
+            if fpr_fuser is None:
+                raise ValueError("fpr_mode='learned' requires fpr_fuser_model_path.")
+            fused_prob = predict_fused_prob(
+                fpr_fuser,
+                ps,
+                nodule_prob,
+                self.device,
+                extra_features=fuser_extra,
+            ).to(ps.device)
+            filtered = 0
+            if fpr_thresh is not None and fpr_thresh > 0:
+                keep_mask = fused_prob >= fpr_thresh
+                filtered = self._apply_prediction_mask(output, keep_mask)
+                if len(output[self.detector.target_box_key]) == 0:
+                    return {"rescored": int(len(pb)), "filtered": int(filtered)}
+                fused_prob = fused_prob[keep_mask]
+            output[self.detector.pred_score_key] = fused_prob
+            return {"rescored": int(len(pb)), "filtered": int(filtered)}
+
+        filtered = 0
+        if fpr_mode in {"gate", "hybrid"}:
+            if fpr_score_aware:
+                det_scores = ps
+                keep_high_band = det_scores >= fpr_det_high_thresh
+                keep_mid_band = (det_scores >= fpr_det_mid_thresh) & (det_scores < fpr_det_high_thresh)
+                keep_low_band = det_scores < fpr_det_mid_thresh
+                keep_high = nodule_prob >= fpr_high_thresh
+                keep_mid = nodule_prob >= fpr_mid_thresh
+                keep_low = nodule_prob >= fpr_thresh
+                keep_mask = (keep_high_band & keep_high) | (keep_mid_band & keep_mid) | (keep_low_band & keep_low)
+            else:
+                keep_mask = nodule_prob >= fpr_thresh
+            filtered = self._apply_prediction_mask(output, keep_mask)
+            if len(output[self.detector.target_box_key]) == 0:
+                return {"rescored": int(len(pb)), "filtered": int(filtered)}
+            ps = output[self.detector.pred_score_key]
+            nodule_prob = nodule_prob[keep_mask]
+
+        if fpr_mode in {"fuse", "hybrid"}:
+            output[self.detector.pred_score_key] = ps * (1.0 - fpr_weight) + nodule_prob * fpr_weight
+
+        return {"rescored": int(len(pb)), "filtered": int(filtered)}
+
+    def _apply_score_threshold_to_arrays(self, pred_boxes_list, pred_scores_list, pred_labels_list, score_thresh: float) -> int:
+        n_filtered = 0
+        for i in range(len(pred_scores_list)):
+            scores = pred_scores_list[i]
+            keep_mask = scores >= score_thresh
+            n_filtered += int(np.sum(~keep_mask))
+            pred_boxes_list[i] = pred_boxes_list[i][keep_mask]
+            pred_scores_list[i] = scores[keep_mask]
+            pred_labels_list[i] = pred_labels_list[i][keep_mask]
+        return n_filtered
+
+    @staticmethod
+    def _box_iou_3d_single_to_many(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+        if boxes.size == 0:
+            return np.zeros((0,), dtype=np.float32)
+        ixmin = np.maximum(box[0], boxes[:, 0])
+        iymin = np.maximum(box[1], boxes[:, 1])
+        izmin = np.maximum(box[2], boxes[:, 2])
+        ixmax = np.minimum(box[3], boxes[:, 3])
+        iymax = np.minimum(box[4], boxes[:, 4])
+        izmax = np.minimum(box[5], boxes[:, 5])
+
+        inter = np.clip(ixmax - ixmin, 0, None) * np.clip(iymax - iymin, 0, None) * np.clip(izmax - izmin, 0, None)
+        vol_box = np.clip(box[3] - box[0], 0, None) * np.clip(box[4] - box[1], 0, None) * np.clip(box[5] - box[2], 0, None)
+        vol_boxes = np.clip(boxes[:, 3] - boxes[:, 0], 0, None) * np.clip(boxes[:, 4] - boxes[:, 1], 0, None) * np.clip(boxes[:, 5] - boxes[:, 2], 0, None)
+        union = vol_box + vol_boxes - inter
+        return np.where(union > 0, inter / np.maximum(union, 1e-12), 0.0).astype(np.float32, copy=False)
+
+    def _ensemble_merge_single_sample(
+        self,
+        sample_outputs: List[Dict[str, torch.Tensor]],
+        num_models: int,
+        iou_thresh: float,
+        vote_power: float,
+    ) -> Dict[str, torch.Tensor]:
+        box_key = self.detector.target_box_key
+        score_key = self.detector.pred_score_key
+        label_key = self.detector.target_label_key
+
+        base_device = sample_outputs[0][box_key].device
+        base_box_dtype = sample_outputs[0][box_key].dtype
+        base_score_dtype = sample_outputs[0][score_key].dtype
+        base_label_dtype = sample_outputs[0][label_key].dtype
+
+        boxes_chunks = []
+        scores_chunks = []
+        labels_chunks = []
+        for output in sample_outputs:
+            boxes = output[box_key].detach().cpu().numpy()
+            scores = output[score_key].detach().cpu().numpy()
+            labels = output[label_key].detach().cpu().numpy()
+            if len(boxes) == 0:
+                continue
+            boxes_chunks.append(boxes.astype(np.float32, copy=False))
+            scores_chunks.append(scores.astype(np.float32, copy=False))
+            labels_chunks.append(labels.astype(np.int64, copy=False))
+
+        if not boxes_chunks:
+            return {
+                box_key: torch.empty((0, 6), device=base_device, dtype=base_box_dtype),
+                score_key: torch.empty((0,), device=base_device, dtype=base_score_dtype),
+                label_key: torch.empty((0,), device=base_device, dtype=base_label_dtype),
+            }
+
+        all_boxes = np.concatenate(boxes_chunks, axis=0)
+        all_scores = np.concatenate(scores_chunks, axis=0)
+        all_labels = np.concatenate(labels_chunks, axis=0)
+
+        fused_boxes = []
+        fused_scores = []
+        fused_labels = []
+
+        for cls_id in np.unique(all_labels):
+            cls_mask = all_labels == cls_id
+            cls_boxes = all_boxes[cls_mask]
+            cls_scores = all_scores[cls_mask]
+            if len(cls_boxes) == 0:
+                continue
+
+            order = np.argsort(-cls_scores)
+            while order.size > 0:
+                ref_idx = int(order[0])
+                ious = self._box_iou_3d_single_to_many(cls_boxes[ref_idx], cls_boxes[order])
+                cluster_mask = ious >= float(iou_thresh)
+                cluster_order = order[cluster_mask]
+
+                cluster_boxes = cls_boxes[cluster_order]
+                cluster_scores = cls_scores[cluster_order]
+                weights = np.maximum(cluster_scores, 1e-6)
+
+                fused_box = (cluster_boxes * weights[:, None]).sum(axis=0) / weights.sum()
+                vote_factor = (len(cluster_order) / max(int(num_models), 1)) ** max(float(vote_power), 0.0)
+                fused_score = float(cluster_scores.mean() * vote_factor)
+
+                fused_boxes.append(fused_box.astype(np.float32, copy=False))
+                fused_scores.append(fused_score)
+                fused_labels.append(int(cls_id))
+                order = order[~cluster_mask]
+
+        if not fused_boxes:
+            return {
+                box_key: torch.empty((0, 6), device=base_device, dtype=base_box_dtype),
+                score_key: torch.empty((0,), device=base_device, dtype=base_score_dtype),
+                label_key: torch.empty((0,), device=base_device, dtype=base_label_dtype),
+            }
+
+        fused_boxes_np = np.stack(fused_boxes, axis=0).astype(np.float32, copy=False)
+        fused_scores_np = np.asarray(fused_scores, dtype=np.float32)
+        fused_labels_np = np.asarray(fused_labels, dtype=np.int64)
+        keep_order = np.argsort(-fused_scores_np)
+
+        return {
+            box_key: torch.as_tensor(fused_boxes_np[keep_order], device=base_device, dtype=base_box_dtype),
+            score_key: torch.as_tensor(fused_scores_np[keep_order], device=base_device, dtype=base_score_dtype),
+            label_key: torch.as_tensor(fused_labels_np[keep_order], device=base_device, dtype=base_label_dtype),
+        }
+
+    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_fuser_model_path: str = None):
         """訓練結束後，自動載入最佳模型並在測試集上評估。"""
         cfg = self.config
         M = self.monai
+        if fpr_mode not in {"fuse", "gate", "hybrid", "learned"}:
+            raise ValueError(f"Unsupported fpr_mode: {fpr_mode}")
+        if fpr_mode == "learned" and not fpr_fuser_model_path:
+            raise ValueError("fpr_mode='learned' requires --fpr_fuser_model.")
+        if fpr_mode == "learned" and not fpr_model_path:
+            raise ValueError("fpr_mode='learned' requires --fpr_model.")
+        if fpr_score_aware:
+            if fpr_det_mid_thresh > fpr_det_high_thresh:
+                raise ValueError(
+                    f"Invalid score-aware thresholds: det_mid({fpr_det_mid_thresh}) > det_high({fpr_det_high_thresh})"
+                )
+            if not (fpr_high_thresh <= fpr_mid_thresh <= fpr_thresh):
+                logger.warning(
+                    "  Score-aware FPR thresholds are non-monotonic (high=%.2f, mid=%.2f, low=%.2f).",
+                    float(fpr_high_thresh),
+                    float(fpr_mid_thresh),
+                    float(fpr_thresh),
+                )
+            logger.info(
+                "  Score-aware gate enabled: det>=%.2f use fpr>=%.2f | %.2f<=det<%.2f use fpr>=%.2f | det<%.2f use fpr>=%.2f",
+                float(fpr_det_high_thresh),
+                float(fpr_high_thresh),
+                float(fpr_det_mid_thresh),
+                float(fpr_det_high_thresh),
+                float(fpr_mid_thresh),
+                float(fpr_det_mid_thresh),
+                float(fpr_thresh),
+            )
+        final_score_thresh = cfg.test_score_thresh if score_thresh is None else score_thresh
+        logger.info(
+            "  Two-stage thresholds: candidate=%.4f, final=%.4f",
+            float(cfg.proposal_score_thresh),
+            float(final_score_thresh),
+        )
 
-        best_model_path = self.output_dir / "model_best.pt"
-        if not best_model_path.exists():
-            logger.warning("  ⚠️ 找不到 model_best.pt，跳過測試集評估")
-            return
+        ensemble_paths = [str(Path(p)) for p in (ensemble_model_paths or []) if p]
+        if not ensemble_paths:
+            best_model_path = Path(override_model_path) if override_model_path else self.output_dir / "model_best.pt"
+            ensemble_paths = [str(best_model_path)]
+        for model_path in ensemble_paths:
+            if not Path(model_path).exists():
+                logger.warning(f"  ⚠️ 找不到模型: {model_path}，跳過測試集評估")
+                return
+
+        ensemble_enabled = len(ensemble_paths) > 1
+        ensemble_iou = float(ensemble_iou_thresh if ensemble_iou_thresh is not None else cfg.nms_thresh)
+        if ensemble_iou <= 0:
+            ensemble_iou = float(cfg.nms_thresh)
 
         logger.info("🧪 開始測試集評估...")
 
-        # 載入最佳模型
-        self.detector.network = torch.jit.load(str(best_model_path)).to(self.device)
-        logger.info(f"  📂 已載入最佳模型: {best_model_path}")
+        ensemble_networks = []
+        for model_path in ensemble_paths:
+            try:
+                net = torch.jit.load(str(model_path)).to(self.device)
+                net.eval()
+                ensemble_networks.append(net)
+                logger.info("  📂 已載入模型: %s", model_path)
+            except RuntimeError:
+                if len(ensemble_paths) == 1:
+                    ensemble_networks.append(self.detector.network)
+                else:
+                    raise
+        self.detector.network = ensemble_networks[0]
+        if ensemble_enabled:
+            logger.info(
+                "  🧠 Ensemble enabled: %d models | iou=%.3f | vote_power=%.2f",
+                len(ensemble_networks),
+                ensemble_iou,
+                float(ensemble_vote_power),
+            )
 
         # 準備測試資料
         test_data = prepare_datalist(
-            cfg.data_path, "test",
+            cfg.data_path, eval_split,
             cfg.train_ratio, cfg.val_ratio, cfg.test_ratio, cfg.split_seed,
         )
+        if max_samples and max_samples > 0:
+            test_data = test_data[:max_samples]
 
         # 過濾不存在的檔案
         test_data = [d for d in test_data if os.path.exists(d.get("image", ""))]
@@ -818,34 +1285,253 @@ class RetinaNetTrainer:
             collate_fn=M["no_collation"],
         )
 
-        logger.info(f"  測試集樣本數: {len(test_ds)}")
+        logger.info(f"  評估分割: {eval_split}")
+        logger.info(f"  評估樣本數: {len(test_ds)}")
 
         # 執行推論
         self.detector.eval()
         test_outputs_all = []
         test_targets_all = []
+        fpr_stats = {"rescored": 0, "filtered": 0}
 
         start_time = time.time()
         torch.cuda.empty_cache()
 
         pbar = tqdm(test_loader, desc="Testing", leave=False, ncols=100)
 
+        # 載入 FPR 分類器 (如果有提供)
+        _fpr_model = None
+        if fpr_model_path is not None:
+            from .fpr_model import load_fpr_model
+            _fpr_model = load_fpr_model(fpr_model_path, device=str(self.device))
+            logger.info(f"  🧠 已載入 FPR 分類器 (ResNet-18): {fpr_model_path}")
+        
+        _fpr_fuser = None
+        if fpr_fuser_model_path is not None:
+            from .fpr_fuser import load_fpr_fuser
+            _fpr_fuser = load_fpr_fuser(fpr_fuser_model_path, device=str(self.device))
+            logger.info(f"  🧮 已載入 learned fuser: {fpr_fuser_model_path}")
+            logger.info(
+                "  🧮 learned fuser suggested threshold: %.2f",
+                float(_fpr_fuser.get("meta", {}).get("best_threshold", 0.5)),
+            )
+
+        if save_gifs:
+            if gif_dir:
+                gif_out_dir = Path(gif_dir)
+            else:
+                gif_out_dir = self.output_dir / "test_gifs"
+            gif_out_dir.mkdir(exist_ok=True, parents=True)
+            from .visualize_predictions import create_prediction_gif
+            logger.info(f"  🎞️ 測試集動態預測圖將儲存至: {gif_out_dir}")
+
         with torch.no_grad():
             for test_data_batch in pbar:
+                import numpy as np
                 use_inferer = not all(
                     item["image"][0, ...].numel() < np.prod(cfg.val_patch_size)
                     for item in test_data_batch
                 )
+                # 因為 image pop 出來會跑到 GPU 但原始檔案路徑通常還在 original_image 等 metadata
                 test_inputs = [item.pop("image").to(self.device) for item in test_data_batch]
 
-                if cfg.amp:
-                    with torch.amp.autocast("cuda"):
-                        test_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+                if ensemble_enabled:
+                    outputs_per_model = []
+                    for net in ensemble_networks:
+                        self.detector.network = net
+                        if cfg.amp:
+                            with torch.amp.autocast("cuda"):
+                                model_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+                        else:
+                            model_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+                        outputs_per_model.append(model_outputs)
+
+                    test_outputs = []
+                    for sample_idx in range(len(test_inputs)):
+                        merged_output = self._ensemble_merge_single_sample(
+                            sample_outputs=[model_outputs[sample_idx] for model_outputs in outputs_per_model],
+                            num_models=len(ensemble_networks),
+                            iou_thresh=ensemble_iou,
+                            vote_power=ensemble_vote_power,
+                        )
+                        test_outputs.append(merged_output)
+                    self.detector.network = ensemble_networks[0]
                 else:
-                    test_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+                    if cfg.amp:
+                        with torch.amp.autocast("cuda"):
+                            test_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+                    else:
+                        test_outputs = self.detector(test_inputs, use_inferer=use_inferer)
+
+                # 3. 肺部遮罩過濾 (Lung Masking)
+                if filter_lung_mask:
+                    from .postprocess import generate_lung_mask
+                    import numpy as np
+                    
+                    for i in range(len(test_inputs)):
+                        # 生成遮罩 (需要原始的 CPU影像陣列)
+                        img_np = test_inputs[i][0].cpu().numpy()
+                        lung_mask = generate_lung_mask(img_np, thresh_val=0.3)
+                        
+                        # 取得當前掃描預測框
+                        pb = test_outputs[i][self.detector.target_box_key]
+                        ps = test_outputs[i][self.detector.pred_score_key]
+                        pl = test_outputs[i][self.detector.target_label_key]
+                        
+                        if len(pb) > 0:
+                            pb_np = pb.cpu().numpy()
+                            keep_mask = []
+                            for box in pb_np:
+                                # 取預測框中心點，判斷中心點是否落在肺部遮罩內
+                                cx = min(max(int((box[0] + box[3]) / 2), 0), img_np.shape[0] - 1)
+                                cy = min(max(int((box[1] + box[4]) / 2), 0), img_np.shape[1] - 1)
+                                cz = min(max(int((box[2] + box[5]) / 2), 0), img_np.shape[2] - 1)
+                                keep_mask.append(bool(lung_mask[cx, cy, cz]))
+                                
+                            keep_mask_tensor = torch.tensor(keep_mask, device=pb.device, dtype=torch.bool)
+                            
+                            # 過濾掉肺部以外的框
+                            test_outputs[i][self.detector.target_box_key] = pb[keep_mask_tensor]
+                            test_outputs[i][self.detector.pred_score_key] = ps[keep_mask_tensor]
+                            test_outputs[i][self.detector.target_label_key] = pl[keep_mask_tensor]
+                # 4. 形態學過濾 (Morphological Voxel-level FP Reduction)
+                if filter_fp:
+                    from skimage import measure, morphology
+                    import numpy as np
+                    
+                    min_vol_mm3 = fp_min_vol      # 預設 ~直徑 2mm 球體
+                    max_vol_mm3 = fp_max_vol     # 預設 ~直徑 50mm 球體
+                    max_elongation = fp_max_elongation  # 管狀物(血管)過濾
+                    min_solidity = fp_min_solidity      # 實心度過濾
+
+                    spacing_np = np.array(cfg.spacing) # [1.0, 1.0, 1.0]
+
+                    for i in range(len(test_inputs)):
+                        img_np = test_inputs[i][0].cpu().numpy()
+                        pb = test_outputs[i][self.detector.target_box_key]
+                        ps = test_outputs[i][self.detector.pred_score_key]
+                        pl = test_outputs[i][self.detector.target_label_key]
+
+                        if len(pb) == 0:
+                            continue
+
+                        pb_np = pb.cpu().numpy()
+                        keep_mask = np.ones(len(pb_np), dtype=bool)
+
+                        for b_idx, box in enumerate(pb_np):
+                            # 1. 物理尺寸過濾
+                            dx = (box[3] - box[0]) * spacing_np[0]
+                            dy = (box[4] - box[1]) * spacing_np[1]
+                            dz = (box[5] - box[2]) * spacing_np[2]
+                            vols = dx * dy * dz
+                            
+                            if vols < min_vol_mm3 or vols > max_vol_mm3:
+                                keep_mask[b_idx] = False
+                                continue
+                            
+                            # 2. 擷取 BBox 內的 3D Voxel 進行分析
+                            # 擴大一點邊界 (padding 2 pixels) 來捕捉完整形狀
+                            pad = 2
+                            x0 = max(int(box[0]) - pad, 0)
+                            y0 = max(int(box[1]) - pad, 0)
+                            z0 = max(int(box[2]) - pad, 0)
+                            x1 = min(int(box[3]) + pad + 1, img_np.shape[0])
+                            y1 = min(int(box[4]) + pad + 1, img_np.shape[1])
+                            z1 = min(int(box[5]) + pad + 1, img_np.shape[2])
+
+                            patch = img_np[x0:x1, y0:y1, z0:z1]
+                            # 簡單閾值分割: -600 HU 以上視為實體組織/血管/結節
+                            # 因為前處理已經把 HU 轉成了 [0, 1] 之間 (基於 -1000 ~ 200)
+                            # 換算: threshold_hu = -600 -> norm_val = (-600 - (-1000)) / 1200 = 400/1200 = 0.333
+                            patch_bin = patch > 0.333
+                            
+                            # 填補小洞，讓結節/血管更完整
+                            patch_bin = morphology.binary_closing(patch_bin, morphology.ball(1))
+                            
+                            # 若全空，則無法判斷，保守保留
+                            if not np.any(patch_bin):
+                                continue
+                                
+                            label_img = measure.label(patch_bin)
+                            props = measure.regionprops(label_img)
+                            
+                            if not props:
+                                continue
+                                
+                            # 取最大的連通區域 (假設中心點就是目標物)
+                            largest_prop = max(props, key=lambda p: p.area)
+                            
+                            # 提取高階形狀特徵
+                            # 極扁平區域 (如 z 軸僅 1 slice) 會導致 skimage
+                            # minor_axis_length 內部 sqrt 負值，保守保留
+                            try:
+                                ma_len = largest_prop.major_axis_length
+                                mi_len = largest_prop.minor_axis_length
+                            except ValueError:
+                                continue
+                            solidity = largest_prop.solidity
+                            
+                            # 避免除以零
+                            if mi_len == 0:
+                                elongation = 0
+                            else:
+                                elongation = ma_len / mi_len
+                                
+                            # 判斷是否為血管 (長條狀) 或形狀極度不規則
+                            if elongation > max_elongation or solidity < min_solidity:
+                                keep_mask[b_idx] = False
+
+                        # 更新過濾後的框
+                        keep_mask_tensor = torch.tensor(keep_mask, device=pb.device, dtype=torch.bool)
+                        test_outputs[i][self.detector.target_box_key] = pb[keep_mask_tensor]
+                        test_outputs[i][self.detector.pred_score_key] = ps[keep_mask_tensor]
+                        test_outputs[i][self.detector.target_label_key] = pl[keep_mask_tensor]
+
+                # 5. FPR 3D CNN 分類器過濾
+                if (fpr_model_path is not None and _fpr_model is not None) or fpr_mode == "learned":
+                    for i in range(len(test_inputs)):
+                        stats = self._fuse_fpr_scores(
+                            output=test_outputs[i],
+                            image_tensor=test_inputs[i],
+                            fpr_model=_fpr_model,
+                            fpr_fuser=_fpr_fuser,
+                            fpr_patch_size=fpr_patch_size,
+                            fpr_weight=fpr_weight,
+                            fpr_thresh=fpr_thresh,
+                            fpr_mode=fpr_mode,
+                            fpr_score_aware=fpr_score_aware,
+                            fpr_det_high_thresh=fpr_det_high_thresh,
+                            fpr_det_mid_thresh=fpr_det_mid_thresh,
+                            fpr_high_thresh=fpr_high_thresh,
+                            fpr_mid_thresh=fpr_mid_thresh,
+                        )
+                        fpr_stats["rescored"] += stats["rescored"]
+                        fpr_stats["filtered"] += stats["filtered"]
 
                 test_outputs_all += test_outputs
                 test_targets_all += test_data_batch
+                
+                if save_gifs:
+                    # 逐一為該 batch (通常 batch=1) 的推論結果生成 GIF
+                    for i in range(len(test_inputs)):
+                        idx = len(test_outputs_all) - len(test_inputs) + i
+                        img_np = test_inputs[i][0].cpu().numpy()  # 取第一 channel
+                        pb = test_outputs[i][self.detector.target_box_key].cpu().numpy()
+                        ps = test_outputs[i][self.detector.pred_score_key].cpu().numpy()
+                        gt = test_data_batch[i][self.detector.target_box_key].cpu().numpy()
+                        
+                        # 盡量從源檔案取得名稱
+                        src_path = test_data_batch[i].get("image_meta_dict", {}).get("filename_or_obj", f"test_scan_{idx}")
+                        name = Path(src_path).stem[:35] if isinstance(src_path, str) else f"test_scan_{idx}"
+                        gif_path = str(gif_out_dir / f"{name}.gif")
+                        # 決定動畫中要畫出來的最低閾值，若使用者有設定 score_thresh 則以此為準，否則畫出 >= 0.1 的所有框
+                        disp_thresh = final_score_thresh if final_score_thresh is not None else 0.1
+                        create_prediction_gif(
+                            img_np, pb, ps, gt,
+                            output_path=gif_path,
+                            score_thresh=disp_thresh,
+                            fps=8
+                        )
 
         elapsed = time.time() - start_time
         logger.info(f"  測試推論耗時: {elapsed:.1f}s")
@@ -859,6 +1545,24 @@ class RetinaNetTrainer:
         pred_labels_list = [o[self.detector.target_label_key].cpu().numpy() for o in test_outputs_all]
         gt_boxes_list = [t[self.detector.target_box_key].cpu().numpy() for t in test_targets_all]
         gt_labels_list = [t[self.detector.target_label_key].cpu().numpy() for t in test_targets_all]
+
+        import numpy as np
+        
+        # 1. 信心分數過濾 (Score Thresholding)
+        if final_score_thresh is not None and final_score_thresh > 0.0:
+            logger.info(f"  🔪 啟用信心分數過濾 (Score Thresh = {final_score_thresh})...")
+            n_filtered_score = 0
+            for i in range(len(pred_scores_list)):
+                scores = pred_scores_list[i]
+                keep_mask = scores >= final_score_thresh
+                n_filtered_score += np.sum(~keep_mask)
+                
+                pred_boxes_list[i] = pred_boxes_list[i][keep_mask]
+                pred_scores_list[i] = scores[keep_mask]
+                pred_labels_list[i] = pred_labels_list[i][keep_mask]
+            logger.info(f"    過濾了 {n_filtered_score} 個低於 {final_score_thresh} 的低分預測框。")
+
+        # (形態學過濾移至上方迴圈內，以取得原圖影像矩陣)
 
         from .metrics import compute_all_metrics
         test_results = compute_all_metrics(
@@ -875,13 +1579,53 @@ class RetinaNetTrainer:
 
         test_results["num_samples"] = len(test_ds)
         test_results["inference_time_s"] = elapsed
+        test_results["postprocess"] = {
+            "candidate_score_thresh": float(cfg.proposal_score_thresh),
+            "score_thresh": final_score_thresh,
+            "filter_lung_mask": bool(filter_lung_mask),
+            "filter_fp": bool(filter_fp),
+            "ensemble": {
+                "enabled": bool(ensemble_enabled),
+                "num_models": int(len(ensemble_paths)),
+                "model_paths": [str(p) for p in ensemble_paths],
+                "iou_thresh": float(ensemble_iou),
+                "vote_power": float(ensemble_vote_power),
+            },
+            "fpr": {
+                "enabled": bool(fpr_model_path),
+                "model_path": fpr_model_path,
+                "mode": fpr_mode,
+                "threshold": fpr_thresh,
+                "fuser_model_path": fpr_fuser_model_path,
+                "score_aware": bool(fpr_score_aware),
+                "det_high_thresh": float(fpr_det_high_thresh),
+                "det_mid_thresh": float(fpr_det_mid_thresh),
+                "high_thresh": float(fpr_high_thresh),
+                "mid_thresh": float(fpr_mid_thresh),
+                "patch_size": fpr_patch_size,
+                "weight": fpr_weight,
+                "rescored_boxes": fpr_stats["rescored"],
+                "filtered_boxes": fpr_stats["filtered"],
+            },
+        }
 
         # 儲存測試結果（排除曲線大型陣列）
         import json
+        import numpy as np
+        
+        def default_serializer(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
         save_results = {k: v for k, v in test_results.items() if k != "_curves"}
         test_path = self.output_dir / "test_metrics.json"
         with open(test_path, "w", encoding="utf-8") as f:
-            json.dump(save_results, f, indent=2, ensure_ascii=False)
+            json.dump(save_results, f, indent=2, ensure_ascii=False, default=default_serializer)
 
         logger.info(
             f"🧪 測試集結果: mAP={test_results.get('mAP', 0):.4f} | "
@@ -895,6 +1639,92 @@ class RetinaNetTrainer:
     def _save_model(self, path: Path):
         """使用 TorchScript 儲存模型。"""
         torch.jit.save(self.detector.network, str(path))
+
+    def _save_training_state(self, path: Path, epoch: int, best_metric: float, best_epoch: int) -> None:
+        """Save a resumable training-state checkpoint."""
+        state: Dict[str, Any] = {
+            "epoch": int(epoch),
+            "best_metric": float(best_metric),
+            "best_epoch": int(best_epoch),
+            "model_state_dict": self.detector.network.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer is not None else None,
+            "scheduler_state_dict": (
+                self.scheduler.state_dict()
+                if self.scheduler is not None and hasattr(self.scheduler, "state_dict")
+                else None
+            ),
+            "scaler_state_dict": self.scaler.state_dict() if self.scaler is not None else None,
+            "history": self.history,
+        }
+        torch.save(state, str(path))
+
+    def _load_training_state(self, path: Path) -> Tuple[int, float, int]:
+        """Load a resumable training-state checkpoint."""
+        # PyTorch >=2.6 defaults to weights_only=True, which cannot restore
+        # optimizer/scheduler/scaler objects in a full training-state checkpoint.
+        try:
+            checkpoint = torch.load(str(path), map_location=self.device, weights_only=False)
+        except TypeError:
+            # Backward compatibility for older torch versions without weights_only arg.
+            checkpoint = torch.load(str(path), map_location=self.device)
+
+        model_state = checkpoint.get("model_state_dict") if isinstance(checkpoint, dict) else None
+        if model_state is None and isinstance(checkpoint, dict):
+            is_plain_state_dict = (
+                len(checkpoint) > 0
+                and all(isinstance(k, str) and "." in k for k in checkpoint.keys())
+                and any(torch.is_tensor(v) for v in checkpoint.values())
+            )
+            if is_plain_state_dict:
+                model_state = checkpoint
+
+        if model_state is None:
+            raise RuntimeError(f"Invalid training-state checkpoint: {path}")
+
+        load_result = self.detector.network.load_state_dict(model_state, strict=False)
+        missing_keys = list(getattr(load_result, "missing_keys", []))
+        unexpected_keys = list(getattr(load_result, "unexpected_keys", []))
+        if missing_keys:
+            logger.warning("Resume checkpoint missing %d model keys.", len(missing_keys))
+        if unexpected_keys:
+            logger.warning("Resume checkpoint has %d unexpected model keys.", len(unexpected_keys))
+
+        if isinstance(checkpoint, dict):
+            opt_state = checkpoint.get("optimizer_state_dict")
+            if opt_state is not None:
+                try:
+                    self.optimizer.load_state_dict(opt_state)
+                except Exception as exc:
+                    logger.warning("Failed to load optimizer state. Using fresh optimizer. (%s)", exc)
+
+            sch_state = checkpoint.get("scheduler_state_dict")
+            if sch_state is not None and self.scheduler is not None and hasattr(self.scheduler, "load_state_dict"):
+                try:
+                    self.scheduler.load_state_dict(sch_state)
+                except Exception as exc:
+                    logger.warning("Failed to load scheduler state. Using fresh scheduler. (%s)", exc)
+
+            scaler_state = checkpoint.get("scaler_state_dict")
+            if scaler_state is not None and self.scaler is not None:
+                try:
+                    self.scaler.load_state_dict(scaler_state)
+                except Exception as exc:
+                    logger.warning("Failed to load AMP scaler state. (%s)", exc)
+
+            history = checkpoint.get("history")
+            if isinstance(history, dict):
+                self.history = history
+
+            last_epoch = int(checkpoint.get("epoch", -1))
+            best_metric = float(checkpoint.get("best_metric", 0.0))
+            best_epoch = int(checkpoint.get("best_epoch", -1))
+        else:
+            last_epoch = -1
+            best_metric = 0.0
+            best_epoch = -1
+
+        start_epoch = max(last_epoch + 1, 0)
+        return start_epoch, best_metric, best_epoch
 
     def load_checkpoint(self, path: str):
         """載入 TorchScript 模型檢查點。"""

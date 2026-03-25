@@ -119,6 +119,7 @@ def compute_froc(
         sensitivities.append(sens)
 
     results["froc_score"] = float(np.mean(sensitivities))
+    results["cpm_score"] = float(np.mean(sensitivities))  # LUNA16 CPM is exactly the average of these 7 sensitivities
     results["n_gt"] = n_gt_total
     results["n_scans"] = n_scans
 
@@ -260,14 +261,14 @@ def compute_all_metrics(
             logger.info(f"    {k}: {v:.4f}")
 
     # ─── 2. FROC (LUNA16 標準) ───
-    logger.info("  📐 計算 FROC 指標...")
+    logger.info("  📐 計算 FROC / CPM (LUNA16) 指標...")
     froc = compute_froc(
         pred_boxes_list, pred_scores_list, gt_boxes_list,
         iou_thresh=iou_thresh_match,
         box_iou_fn=box_iou_fn,
     )
     results["froc"] = froc
-    logger.info(f"    FROC score: {froc['froc_score']:.4f}")
+    logger.info(f"    FROC score / CPM: {froc['cpm_score']:.4f}")
     for fp_rate in FROC_FP_RATES:
         key = f"sensitivity_at_{fp_rate}_fp_per_scan"
         if key in froc:
@@ -291,7 +292,38 @@ def compute_all_metrics(
                 f"R={f1_metrics['best_recall']:.4f}, "
                 f"thresh={f1_metrics['best_threshold']:.2f})")
 
-    # ─── 4. ROC / PR curves ───
+    # ─── 4. Scan-level Classification Accuracy ───
+    logger.info("  📐 計算 Scan-level 分類準確率...")
+    tp_scan, fp_scan, tn_scan, fn_scan = 0, 0, 0, 0
+    thresh = f1_metrics["best_threshold"]
+    
+    for i in range(len(pred_boxes_list)):
+        has_gt = len(gt_boxes_list[i]) > 0
+        has_pred = len(pred_scores_list[i][pred_scores_list[i] >= thresh]) > 0
+        
+        if has_gt and has_pred:
+            tp_scan += 1
+        elif has_gt and not has_pred:
+            fn_scan += 1
+        elif not has_gt and not has_pred:
+            tn_scan += 1
+        elif not has_gt and has_pred:
+            fp_scan += 1
+            
+    total_scans = tp_scan + tn_scan + fp_scan + fn_scan
+    scan_accuracy = (tp_scan + tn_scan) / total_scans if total_scans > 0 else 0.0
+    scan_specificity = tn_scan / (tn_scan + fp_scan) if (tn_scan + fp_scan) > 0 else 0.0
+    
+    results["scan_accuracy"] = float(scan_accuracy)
+    results["scan_specificity"] = float(scan_specificity)
+    results["scan_tp"] = int(tp_scan)
+    results["scan_tn"] = int(tn_scan)
+    results["scan_fp"] = int(fp_scan)
+    results["scan_fn"] = int(fn_scan)
+
+    logger.info(f"    Scan Accuracy: {scan_accuracy:.4f} (TP={tp_scan}, TN={tn_scan}, FP={fp_scan}, FN={fn_scan})")
+
+    # ─── 5. ROC / PR curves ───
     logger.info("  📐 計算 ROC / PR 曲線...")
     y_true_all = []
     y_score_all = []
