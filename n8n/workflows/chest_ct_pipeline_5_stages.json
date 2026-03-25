@@ -1,0 +1,220 @@
+{
+  "name": "Chest CT Pipeline (5 Stages)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chest-ct-pipeline",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1f8f9c3-7a2f-4f12-a57f-1f4c07a3f5c9",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\n\nif (!body.case_id) throw new Error('Missing case_id');\nif (!body.input_path) throw new Error('Missing input_path');\nif (!body.model_path) throw new Error('Missing model_path');\n\nreturn [{\n  json: {\n    case_id: String(body.case_id),\n    input_path: String(body.input_path),\n    model_path: String(body.model_path),\n    work_dir: body.work_dir ? String(body.work_dir) : 'C:/GitHub/chest-ct-report-generator/n8n/runtime',\n    threshold: body.threshold !== undefined ? Number(body.threshold) : 0.5,\n    device: body.device ? String(body.device) : 'cuda',\n    use_llm: body.use_llm === true || String(body.use_llm).toLowerCase() === 'true'\n  }\n}];"
+      },
+      "id": "5d2d7c2f-a14d-4ae1-9b6d-fba6c4f9b7cd",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage preprocess --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\" --input-path \"' + $json.input_path + '\"' }}"
+      },
+      "id": "f6bb45fc-8b41-43f5-8db4-17a91dd7f3b8",
+      "name": "Preprocess",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        740,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage detect --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\" --model-path \"' + $json.model_path + '\" --threshold ' + $json.threshold + ' --device \"' + $json.device + '\"' }}"
+      },
+      "id": "2c4f79b1-20e2-48da-b6be-4b1a0cf853f2",
+      "name": "Detect",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        980,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage segment --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\"' }}"
+      },
+      "id": "4c456dbe-8f66-45ba-8120-17df2f0be3b3",
+      "name": "Segment",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage feature --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\"' }}"
+      },
+      "id": "6fb05ef6-5470-4bf8-9a76-739eaebda6cb",
+      "name": "Feature",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{ '\"C:\\\\GitHub\\\\chest-ct-report-generator\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\GitHub\\\\chest-ct-report-generator\\\\n8n\\\\run_case_pipeline.py\" --stage report --case-id \"' + $json.case_id + '\" --work-dir \"' + $json.work_dir + '\"' + ($json.use_llm ? ' --use-llm' : '') }}"
+      },
+      "id": "6f7fe7e8-9d77-4284-8d5e-9e8cab73d888",
+      "name": "Report",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const n = $node['Normalize Input'].json;\n\nreturn [{\n  json: {\n    status: 'ok',\n    case_id: n.case_id,\n    work_dir: n.work_dir,\n    state_json_path: `${n.work_dir}/${n.case_id}/state.json`,\n    stages: ['preprocess','detect','segment','feature','report'],\n    report_stage_stdout: $json.stdout ?? ''\n  }\n}];"
+      },
+      "id": "0f2786c8-1c1e-4efe-9d61-0a53f2125c5b",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "deea8c2b-d0a7-4f3e-bf8c-c4f4fda9657f",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2180,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Preprocess",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preprocess": {
+      "main": [
+        [
+          {
+            "node": "Detect",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect": {
+      "main": [
+        [
+          {
+            "node": "Segment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Segment": {
+      "main": [
+        [
+          {
+            "node": "Feature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feature": {
+      "main": [
+        [
+          {
+            "node": "Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "pinData": {}
+}
