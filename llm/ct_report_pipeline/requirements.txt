@@ -1,0 +1,42 @@
+# CT Report Generation Pipeline
+# ==============================
+
+# NOTE: PyTorch (torch, torchvision) should be installed manually
+# to match your CUDA version. See installation instructions in README.md
+# Example: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Core ML Libraries
+# torch and torchvision need to be installed manually due to CUDA version
+transformers>=4.40.0
+peft>=0.10.0
+accelerate>=0.27.0
+datasets>=2.14.0
+
+# Medical Image Processing
+nibabel>=5.0.0
+SimpleITK>=2.2.0
+opencv-python>=4.8.0
+
+# Numerical Computing
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+
+# NLP & Evaluation Metrics
+nltk>=3.8.0
+
+# Visualization
+matplotlib>=3.7.0
+pillow>=10.0.0
+
+# Configuration & Utilities
+pyyaml>=6.0
+tqdm>=4.65.0
+hydra-core>=1.2.0
+python-dotenv>=1.0.0
+
+# Optional: Quantization (for large models)
+# bitsandbytes>=0.41.0  # Uncomment for 8-bit training
+
+# Optional: DICOM support
+# pydicom>=2.4.0
