@@ -66,6 +66,28 @@ def _require(state: Dict, key: str) -> str:
     return str(value)
 
 
+def _infer_gt_label_path_from_input(input_path: str) -> str:
+    """
+    Try to infer labelsTr path from nnDetection imagesTr input.
+    Example:
+      .../imagesTr/<case>_0000.nii.gz -> .../labelsTr/<case>.nii.gz
+    """
+    p = Path(input_path)
+    if not p.exists() or not p.is_file():
+        return ""
+    if "imagesTr" not in str(p):
+        return ""
+    name = p.name
+    if name.endswith(".nii.gz"):
+        stem = name[:-7]
+    else:
+        stem = p.stem
+    if stem.endswith("_0000"):
+        stem = stem[:-5]
+    cand = p.parent.parent / "labelsTr" / f"{stem}.nii.gz"
+    return str(cand) if cand.exists() else ""
+
+
 def stage_preprocess(case_dir: Path, input_path: str) -> Dict:
     p = Path(input_path)
     if not p.exists():
@@ -118,6 +140,7 @@ def stage_detect(
 ) -> Dict:
     state = _load_state(case_dir)
     ct_path = _require(state, "ct_path")
+    source_input_path = str(state.get("input_path", ""))
 
     out_dir = case_dir / "02_detect"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -138,6 +161,10 @@ def stage_detect(
         str(device),
     ]
 
+    gt_label_path = _infer_gt_label_path_from_input(source_input_path)
+    if gt_label_path:
+        cmd.extend(["--gt_label_path", gt_label_path])
+
     subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
 
     detect_report = out_dir / "report.json"
@@ -148,6 +175,7 @@ def stage_detect(
         "detection_dir": str(out_dir),
         "detection_report": str(detect_report),
         "detection_model_path": str(model_path),
+        "detection_gt_label_path": gt_label_path,
     }
 
 
@@ -191,7 +219,14 @@ def stage_segment(
 
     boxes = _load_detection_boxes(detection_report)
     if not boxes:
-        raise ValueError("No detection boxes found. Detection report has zero valid nodules.")
+        out_dir = case_dir / "03_segment"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "segment_dir": str(out_dir),
+            "mask_paths": [],
+            "combined_mask_path": "",
+            "segment_status": "no_detections",
+        }
 
     cfg = load_config()
     ckpt = medsam2_checkpoint or str(get_medsam2_checkpoint(cfg))
@@ -285,8 +320,20 @@ def stage_feature(case_dir: Path) -> Dict:
     state = _load_state(case_dir)
     ct_path = _require(state, "ct_path")
     mask_paths = state.get("mask_paths", [])
+    out_dir = case_dir / "04_feature"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    features_path = out_dir / "lesion_features.json"
+
     if not mask_paths:
-        raise ValueError("No mask_paths found in state. Run segment stage first.")
+        features: List[Dict] = []
+        with open(features_path, "w", encoding="utf-8") as f:
+            json.dump(features, f, ensure_ascii=False, indent=2)
+        return {
+            "feature_dir": str(out_dir),
+            "features_path": str(features_path),
+            "nodule_count": 0,
+            "feature_status": "no_masks",
+        }
 
     ct_volume, affine = MedSAM2Segmenter.load_ct_volume(ct_path)
 
@@ -308,10 +355,6 @@ def stage_feature(case_dir: Path) -> Dict:
         )
         if feat:
             features.append(feat)
-
-    out_dir = case_dir / "04_feature"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    features_path = out_dir / "lesion_features.json"
 
     with open(features_path, "w", encoding="utf-8") as f:
         json.dump(features, f, ensure_ascii=False, indent=2)
