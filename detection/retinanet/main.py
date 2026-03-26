@@ -207,7 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", help="subcommands")
 
     train_p = subparsers.add_parser("train", help="train RetinaNet")
-    train_p.add_argument("--data_path", default="dataset_lndb.json", help="dataset JSON path")
+    train_p.add_argument("--data_path", default="detection/manifests/dataset_lndb.json", help="dataset JSON path")
     train_p.add_argument("--output_dir", default=None, help="output directory")
     train_p.add_argument("--epochs", type=int, default=300)
     train_p.add_argument("--batch_size", type=int, default=1)
@@ -242,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--resume_checkpoint", default=None, help="explicit training-state checkpoint path (.pt)")
 
     eval_p = subparsers.add_parser("eval", help="run validation once")
-    eval_p.add_argument("--data_path", default="dataset_lndb.json")
+    eval_p.add_argument("--data_path", default="detection/manifests/dataset_lndb.json")
     eval_p.add_argument("--output_dir", default=None)
     eval_p.add_argument("--pretrained_weights", default=None)
     eval_p.add_argument("--train_ratio", type=float, default=0.8)
@@ -259,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("--ensemble_checkpoints", nargs="+", default=None, help="optional multi-checkpoint ensemble list")
     test_p.add_argument("--ensemble_iou_thresh", type=float, default=None, help="IoU threshold for ensemble box fusion")
     test_p.add_argument("--ensemble_vote_power", type=float, default=1.0, help="score vote factor exponent for ensemble (>=0)")
-    test_p.add_argument("--data_path", default="dataset_lndb.json")
+    test_p.add_argument("--data_path", default="detection/manifests/dataset_lndb.json")
     test_p.add_argument("--output_dir", default=None)
     test_p.add_argument("--val_patch_size", type=int, nargs=3, default=None, metavar=("H", "W", "D"))
     test_p.add_argument("--train_ratio", type=float, default=0.8)

@@ -30,6 +30,11 @@ TEST_KEYS = ("testing", "test")
 DEFAULT_GROUP_KEYS = ("seriesuid", "lndb_id", "patient_id")
 
 
+def _default_output_dir() -> Path:
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "detection" / "manifests"
+
+
 def _load_json(path: Path) -> Dict:
     with path.open("r", encoding="utf-8") as f:
         obj = json.load(f)
@@ -81,7 +86,11 @@ def _write_json(path: Path, payload: Dict) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create strict group-aware K-fold JSON files")
     parser.add_argument("--input_json", required=True, help="source dataset json path")
-    parser.add_argument("--output_dir", default=None, help="where to write fold json files")
+    parser.add_argument(
+        "--output_dir",
+        default=None,
+        help="where to write fold json files (default: detection/manifests)",
+    )
     parser.add_argument("--num_folds", type=int, default=5, help="number of folds")
     parser.add_argument("--seed", type=int, default=42, help="split seed")
     parser.add_argument(
@@ -116,7 +125,7 @@ def main() -> None:
     if not pool_samples:
         raise ValueError("No training/validation samples found in input JSON")
 
-    output_dir = Path(args.output_dir).resolve() if args.output_dir else input_json.parent
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else _default_output_dir().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.output_prefix if args.output_prefix else input_json.stem
 
@@ -176,4 +185,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
