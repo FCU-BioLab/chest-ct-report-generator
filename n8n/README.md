@@ -1,62 +1,37 @@
-﻿# n8n Flow Runner
+﻿# n8n 流程執行器
 
-This folder keeps orchestration scripts for n8n.
-LLM core modules remain in `llm/ct_report_pipeline`.
+此資料夾提供 n8n 與本專案 Python pipeline 的串接方式。
 
-## Files
+## 主要檔案
+
 - `run_case_pipeline.py`
 - `docker-compose.yml`
 - `.env`
 - `.env.example`
 
-## Start n8n service (Windows CMD, recommended)
+## 方式一：Windows CMD 直接啟動（建議）
 
-If your pipeline dependencies are installed in:
+若你的 Python 相依都在：`C:\GitHub\chest-ct-report-generator\venv`
 
-`C:\GitHub\chest-ct-report-generator\venv`
+建議直接在 Windows CMD 啟動 n8n，不用 Docker（Docker 容器無法直接使用 Windows venv）。
 
-run n8n directly on Windows CMD, not Docker.  
-Docker n8n runs in Linux container and cannot use your Windows venv Python.
-
-1. Install n8n globally (once):
 ```bash
 npm install -g n8n
-```
-
-2. Start n8n from CMD:
-```bash
 n8n
 ```
 
-3. Open UI:
-- `http://localhost:5678`
+開啟 UI：`http://localhost:5678`
 
-## Docker mode (optional)
+## 方式二：Docker（選用）
 
-Use this only if you also prepare a Linux Python runtime/dependencies inside container.
-
-1. Go to n8n folder:
 ```bash
 cd C:\GitHub\chest-ct-report-generator\n8n
-```
-
-2. (Optional) adjust credentials in `.env`.
-
-3. Start service:
-```bash
 docker-compose up -d
-```
-
-4. Check status/logs:
-```bash
 docker-compose ps
 docker-compose logs -f n8n
 ```
 
-4. Open UI:
-- `http://localhost:5678`
-
-## Stop/Restart n8n
+停止/重啟：
 
 ```bash
 docker-compose stop
@@ -64,42 +39,39 @@ docker-compose start
 docker-compose down
 ```
 
-## Script stages
-- `preprocess`
-- `detect`
-- `segment`
-- `feature`
-- `report`
-- `run` (all stages)
+## 呼叫案例流程（CLI 範例）
 
-## Required runtime (pipeline script)
-Use project venv:
-
-```bash
-C:\GitHub\chest-ct-report-generator\venv\Scripts\python.exe
-```
-
-## Example (5-stage flow)
+### preprocess
 
 ```bash
 C:\GitHub\chest-ct-report-generator\venv\Scripts\python.exe C:\GitHub\chest-ct-report-generator\n8n\run_case_pipeline.py --stage preprocess --case-id case-001 --input-path <CT_OR_DICOM_PATH>
 ```
 
+### detect
+
 ```bash
 C:\GitHub\chest-ct-report-generator\venv\Scripts\python.exe C:\GitHub\chest-ct-report-generator\n8n\run_case_pipeline.py --stage detect --case-id case-001 --model-path <DETECTION_MODEL_PATH> --threshold 0.5 --device cuda
 ```
+
+### segment
 
 ```bash
 C:\GitHub\chest-ct-report-generator\venv\Scripts\python.exe C:\GitHub\chest-ct-report-generator\n8n\run_case_pipeline.py --stage segment --case-id case-001
 ```
 
+### feature
+
 ```bash
 C:\GitHub\chest-ct-report-generator\venv\Scripts\python.exe C:\GitHub\chest-ct-report-generator\n8n\run_case_pipeline.py --stage feature --case-id case-001
 ```
+
+### report
 
 ```bash
 C:\GitHub\chest-ct-report-generator\venv\Scripts\python.exe C:\GitHub\chest-ct-report-generator\n8n\run_case_pipeline.py --stage report --case-id case-001 --use-llm
 ```
 
-Each run updates:
-- `n8n/runtime/<case-id>/state.json`
+## 備註
+
+- 建議先確保 `run_case_pipeline.py --help` 可正常執行。
+- 若要一鍵串全流程，請在 n8n 工作流中按順序串接各 stage。
