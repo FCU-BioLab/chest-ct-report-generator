@@ -17,7 +17,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import nibabel as nib
 import numpy as np
@@ -272,6 +272,7 @@ def _compute_features_for_mask(
     spacing_x: float,
     spacing_y: float,
     spacing_z: float,
+    hu_warning: Optional[str] = None,
 ) -> Dict:
     vox = np.argwhere(mask > 0)
     if vox.size == 0:
@@ -290,8 +291,9 @@ def _compute_features_for_mask(
     bbox_z_mm = (z_max - z_min + 1) * spacing_z
 
     values = ct_volume[mask > 0]
+    p10_hu, p25_hu, p50_hu, p75_hu, p90_hu = np.percentile(values, [10, 25, 50, 75, 90])
 
-    return {
+    feature = {
         "nodule_id": int(nodule_id),
         "voxel_count": voxel_count,
         "volume_mm3": float(volume_mm3),
@@ -313,8 +315,35 @@ def _compute_features_for_mask(
         "std_hu": float(np.std(values)),
         "min_hu": float(np.min(values)),
         "max_hu": float(np.max(values)),
+        "p10_hu": float(p10_hu),
+        "p25_hu": float(p25_hu),
+        "median_hu": float(p50_hu),
+        "p75_hu": float(p75_hu),
+        "p90_hu": float(p90_hu),
         "spacing_mm": [float(spacing_x), float(spacing_y), float(spacing_z)],
     }
+    if hu_warning:
+        feature["hu_warning"] = hu_warning
+    return feature
+
+
+def _detect_hu_scale_issue(ct_volume: np.ndarray) -> str:
+    finite = ct_volume[np.isfinite(ct_volume)]
+    if finite.size == 0:
+        return "CT volume has no finite voxel intensity values."
+
+    vmin = float(np.min(finite))
+    vmax = float(np.max(finite))
+    p1_hu, p99_hu = np.percentile(finite, [1, 99]).astype(float).tolist()
+
+    # If data range is near [0,1], the volume is likely normalized rather than true HU.
+    if -0.2 <= p1_hu <= 1.2 and -0.2 <= p99_hu <= 1.2:
+        return (
+            "CT intensity range looks normalized (about 0-1) instead of HU. "
+            f"Observed percentiles: p1={p1_hu:.3f}, p99={p99_hu:.3f}, min={vmin:.3f}, max={vmax:.3f}. "
+            "HU-based nodule typing may be unreliable."
+        )
+    return ""
 
 
 def stage_feature(case_dir: Path) -> Dict:
@@ -337,6 +366,7 @@ def stage_feature(case_dir: Path) -> Dict:
         }
 
     ct_volume, affine = MedSAM2Segmenter.load_ct_volume(ct_path)
+    hu_warning = _detect_hu_scale_issue(ct_volume)
 
     spacing_x = float(abs(affine[0, 0])) if affine.shape[0] > 0 else 1.0
     spacing_y = float(abs(affine[1, 1])) if affine.shape[0] > 1 else 1.0
@@ -353,6 +383,7 @@ def stage_feature(case_dir: Path) -> Dict:
             spacing_x=spacing_x,
             spacing_y=spacing_y,
             spacing_z=spacing_z,
+            hu_warning=hu_warning or None,
         )
         if feat:
             features.append(feat)
@@ -360,11 +391,15 @@ def stage_feature(case_dir: Path) -> Dict:
     with open(features_path, "w", encoding="utf-8") as f:
         json.dump(features, f, ensure_ascii=False, indent=2)
 
-    return {
+    result = {
         "feature_dir": str(out_dir),
         "features_path": str(features_path),
         "nodule_count": len(features),
     }
+    if hu_warning:
+        result["feature_warning"] = hu_warning
+        result["feature_status"] = "hu_scale_suspect"
+    return result
 
 
 def stage_report(case_dir: Path, use_llm: bool) -> Dict:

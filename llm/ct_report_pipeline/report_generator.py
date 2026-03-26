@@ -1,4 +1,4 @@
-﻿"""
+"""
 Report Generator Module
 
 Generates structured CT radiology reports using Llama LLM.
@@ -34,6 +34,7 @@ from prompt_templates import (
     SYSTEM_PROMPT_BILINGUAL,
     build_report_prompt,
     format_nodule_descriptions,
+    classify_nodule_type_from_features,
 )
 
 
@@ -278,16 +279,11 @@ class SimpleReportGenerator:
     """
     
     @staticmethod
-    def get_nodule_type(mean_hu: float) -> str:
-        """Determine nodule type from HU value."""
-        if mean_hu < -600:
-            return "ground-glass"
-        elif mean_hu < -300:
-            return "part-solid"
-        elif mean_hu > 200:
-            return "calcified"
-        else:
-            return "solid"
+    def get_nodule_type(features_or_mean_hu: Union[Dict, float]) -> str:
+        """Determine nodule type from HU statistics."""
+        if isinstance(features_or_mean_hu, dict):
+            return classify_nodule_type_from_features(features_or_mean_hu)
+        return classify_nodule_type_from_features({"mean_hu": float(features_or_mean_hu)})
     
     @staticmethod
     def get_lung_rads_category(size_mm: float, nodule_type: str) -> Dict:
@@ -398,9 +394,7 @@ class SimpleReportGenerator:
         for i, features in enumerate(lesion_features, 1):
             size_mm = features.get("equivalent_diameter_mm", 0)
             volume_mm3 = features.get("volume_mm3", 0)
-            mean_hu = features.get("mean_hu", 0)
-            
-            nodule_type = self.get_nodule_type(mean_hu)
+            nodule_type = self.get_nodule_type(features)
             lung_rads = self.get_lung_rads_category(size_mm, nodule_type)
             
             # Track highest category
@@ -409,12 +403,12 @@ class SimpleReportGenerator:
                 max_lung_rads = lung_rads
             
             lines.append(f"{i}. A {nodule_type} pulmonary nodule measuring {size_mm:.1f} mm (ESD) "
-                        f"with volume of {volume_mm3:.1f} mm糧 is identified.")
+                        f"with volume of {volume_mm3:.1f} mm3 is identified.")
         
         if max_lung_rads is None:
             max_lung_rads = self.get_lung_rads_category(
                 lesion_features[0].get("equivalent_diameter_mm", 0),
-                self.get_nodule_type(lesion_features[0].get("mean_hu", 0))
+                self.get_nodule_type(lesion_features[0])
             )
         
         lines.extend([
@@ -508,5 +502,6 @@ def get_report_generator(use_llm: bool = True, **kwargs) -> Union[ReportGenerato
             return SimpleReportGenerator()
     else:
         return SimpleReportGenerator()
+
 
 
