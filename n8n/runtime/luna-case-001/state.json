@@ -16,7 +16,7 @@
   "medsam2_checkpoint": "C:\\GitHub\\chest-ct-report-generator\\segmentation\\MedSAM2\\checkpoints\\MedSAM2_CTLesion.pt",
   "feature_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\04_feature",
   "features_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\04_feature\\lesion_features.json",
-  "nodule_count": 1,
+  "nodule_count": 2,
   "report_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report",
   "report_text_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\AUTO_luna-case-001.txt",
   "report_json_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\AUTO_luna-case-001.json",

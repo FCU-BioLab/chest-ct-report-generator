@@ -281,8 +281,9 @@ def _compute_features_for_mask(
     volume_mm3 = voxel_count * spacing_x * spacing_y * spacing_z
     equivalent_diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * math.pi)) ** (1.0 / 3.0)
 
-    z_min, y_min, x_min = vox.min(axis=0).tolist()
-    z_max, y_max, x_max = vox.max(axis=0).tolist()
+    # Mask/CT are in (x, y, z) axis order.
+    x_min, y_min, z_min = vox.min(axis=0).tolist()
+    x_max, y_max, z_max = vox.max(axis=0).tolist()
 
     bbox_x_mm = (x_max - x_min + 1) * spacing_x
     bbox_y_mm = (y_max - y_min + 1) * spacing_y
@@ -495,10 +496,14 @@ def main() -> None:
 
     elif args.stage == "run":
         state.update(stage_preprocess(case_dir, args.input_path or state["input_path"]))
+        _save_state(case_dir, state)
         model_path = args.model_path or state["detection_model_path"]
         state.update(stage_detect(case_dir, model_path, args.threshold, args.device))
+        _save_state(case_dir, state)
         state.update(stage_segment(case_dir, args.medsam2_checkpoint, propagate=not args.no_propagate))
+        _save_state(case_dir, state)
         state.update(stage_feature(case_dir))
+        _save_state(case_dir, state)
         state.update(stage_report(case_dir, use_llm=args.use_llm))
 
     _save_state(case_dir, state)

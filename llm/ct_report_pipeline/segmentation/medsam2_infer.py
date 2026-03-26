@@ -238,25 +238,30 @@ class MedSAM2Segmenter:
         Segment using point prompts.
         
         Args:
-            ct_volume: 3D CT volume (D, H, W)
+            ct_volume: 3D CT volume (X, Y, Z)
             point_prompts: List of {'coords': (z, y, x), 'label': 0 or 1}
             propagate: Whether to propagate through volume
         
         Returns:
-            List of 3D masks
+            List of 3D masks in (X, Y, Z)
         """
         import torch
         
         if self.predictor is None:
             self.load_model()
         
+        # Convert pipeline volume (X,Y,Z) -> model volume (Z,Y,X).
+        ct_zyx = np.transpose(ct_volume, (2, 1, 0))
+
         # Preprocess
-        img_tensor, orig_h, orig_w = self.preprocess_volume(ct_volume)
+        img_tensor, orig_h, orig_w = self.preprocess_volume(ct_zyx)
         
         # Group points by z-slice
         points_by_slice = {}
+        depth = int(ct_zyx.shape[0])
         for p in point_prompts:
-            z = p['coords'][0]
+            z = int(round(p['coords'][0]))
+            z = max(0, min(z, depth - 1))
             if z not in points_by_slice:
                 points_by_slice[z] = {'points': [], 'labels': []}
             
@@ -289,14 +294,14 @@ class MedSAM2Segmenter:
                     labels=labels
                 )
                 
-                # Create 3D mask
-                mask_3d = np.zeros(ct_volume.shape, dtype=np.uint8)
+                # Create 3D mask in model axis order (Z,Y,X).
+                mask_zyx = np.zeros(ct_zyx.shape, dtype=np.uint8)
                 
                 if propagate:
                     # Forward propagation
                     for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state):
                         mask_slice = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
-                        mask_3d[out_frame_idx] = mask_slice
+                        mask_zyx[out_frame_idx] = mask_slice
                     
                     self.predictor.reset_state(inference_state)
                     
@@ -312,16 +317,18 @@ class MedSAM2Segmenter:
                     # Backward propagation
                     for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state, reverse=True):
                         mask_slice = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
-                        mask_3d[out_frame_idx] = np.maximum(mask_3d[out_frame_idx], mask_slice)
+                        mask_zyx[out_frame_idx] = np.maximum(mask_zyx[out_frame_idx], mask_slice)
                 else:
                     # Single slice only
-                    mask_3d[z] = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
+                    mask_zyx[z] = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
                 
                 self.predictor.reset_state(inference_state)
-                masks.append(mask_3d)
+                # Convert back to pipeline axis order (X,Y,Z).
+                masks.append(np.transpose(mask_zyx, (2, 1, 0)))
         
         return masks
-    
+
+
     def segment_from_boxes(
         self,
         ct_volume: np.ndarray,
@@ -332,20 +339,23 @@ class MedSAM2Segmenter:
         Segment using bounding box prompts.
         
         Args:
-            ct_volume: 3D CT volume (D, H, W)
+            ct_volume: 3D CT volume (X, Y, Z)
             bounding_boxes: List of boxes with 'x_min', 'x_max', 'y_min', 'y_max', 'z_center'
             propagate: Whether to propagate through volume
         
         Returns:
-            List of 3D masks
+            List of 3D masks in (X, Y, Z)
         """
         import torch
         
         if self.predictor is None:
             self.load_model()
         
+        # Convert pipeline volume (X,Y,Z) -> model volume (Z,Y,X).
+        ct_zyx = np.transpose(ct_volume, (2, 1, 0))
+
         # Preprocess
-        img_tensor, orig_h, orig_w = self.preprocess_volume(ct_volume)
+        img_tensor, orig_h, orig_w = self.preprocess_volume(ct_zyx)
         
         masks = []
         
@@ -356,7 +366,8 @@ class MedSAM2Segmenter:
                 x_max = box['x_max'] * 512 / orig_w
                 y_min = box['y_min'] * 512 / orig_h
                 y_max = box['y_max'] * 512 / orig_h
-                z = box.get('z_center', ct_volume.shape[0] // 2)
+                z = int(round(box.get('z_center', ct_zyx.shape[0] // 2)))
+                z = max(0, min(z, int(ct_zyx.shape[0]) - 1))
                 
                 bbox = np.array([x_min, y_min, x_max, y_max])
                 
@@ -375,14 +386,14 @@ class MedSAM2Segmenter:
                     box=bbox
                 )
                 
-                # Create 3D mask
-                mask_3d = np.zeros(ct_volume.shape, dtype=np.uint8)
+                # Create 3D mask in model axis order (Z,Y,X).
+                mask_zyx = np.zeros(ct_zyx.shape, dtype=np.uint8)
                 
                 if propagate:
                     # Forward
                     for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state):
                         mask_slice = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
-                        mask_3d[out_frame_idx] = mask_slice
+                        mask_zyx[out_frame_idx] = mask_slice
                     
                     self.predictor.reset_state(inference_state)
                     
@@ -397,15 +408,17 @@ class MedSAM2Segmenter:
                     # Backward
                     for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state, reverse=True):
                         mask_slice = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
-                        mask_3d[out_frame_idx] = np.maximum(mask_3d[out_frame_idx], mask_slice)
+                        mask_zyx[out_frame_idx] = np.maximum(mask_zyx[out_frame_idx], mask_slice)
                 else:
-                    mask_3d[z] = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
+                    mask_zyx[z] = (out_mask_logits[0] > 0.0).cpu().numpy()[0]
                 
                 self.predictor.reset_state(inference_state)
-                masks.append(mask_3d)
+                # Convert back to pipeline axis order (X,Y,Z).
+                masks.append(np.transpose(mask_zyx, (2, 1, 0)))
         
         return masks
-    
+
+
     @staticmethod
     def load_ct_volume(ct_path: str) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -415,14 +428,17 @@ class MedSAM2Segmenter:
             ct_path: Path to CT file (.nii.gz or .mhd)
         
         Returns:
-            Tuple of (volume array, affine matrix)
+            Tuple of (volume array, affine matrix), where volume is always (X, Y, Z).
         """
         ct_path = Path(ct_path)
         
         if ct_path.suffix == '.mhd':
             import SimpleITK as sitk
             sitk_img = sitk.ReadImage(str(ct_path))
-            volume = sitk.GetArrayFromImage(sitk_img)
+
+            # SimpleITK array is (Z, Y, X); convert to (X, Y, Z).
+            volume_zyx = sitk.GetArrayFromImage(sitk_img)
+            volume = np.transpose(volume_zyx, (2, 1, 0)).astype(np.float32)
             
             spacing = sitk_img.GetSpacing()
             origin = sitk_img.GetOrigin()
@@ -436,6 +452,6 @@ class MedSAM2Segmenter:
         else:
             import nibabel as nib
             nii_img = nib.load(str(ct_path))
-            volume = nii_img.get_fdata()
+            volume = nii_img.get_fdata().astype(np.float32)
             affine = nii_img.affine
             return volume, affine
