@@ -5,6 +5,8 @@ Professional radiology report templates (English only) for generating
 structured CT reports from segmentation features with Lung-RADS 2022 scoring.
 """
 
+from typing import Any, Mapping, Optional
+
 # System prompt for the LLM
 SYSTEM_PROMPT_BILINGUAL = """You are an experienced radiologist assistant. Generate professional CT chest reports based on provided nodule measurements.
 
@@ -28,10 +30,10 @@ NODULE DATA:
 {nodule_descriptions}
 
 LUNG-RADS GUIDE:
-- Solid <6mm → Category 2, <1% malignancy, annual screening
-- Solid 6-8mm → Category 3, 1-2% malignancy, 6-month follow-up
-- Solid 8-15mm → Category 4A, 5-15% malignancy, 3-month follow-up or PET/CT
-- Solid ≥15mm → Category 4B, >15% malignancy, PET/CT or biopsy
+- Solid <6mm -> Category 2, <1% malignancy, annual screening
+- Solid 6-8mm -> Category 3, 1-2% malignancy, 6-month follow-up
+- Solid 8-15mm -> Category 4A, 5-15% malignancy, 3-month follow-up or PET/CT
+- Solid >=15mm -> Category 4B, >15% malignancy, PET/CT or biopsy
 
 Write the report:
 
@@ -62,7 +64,7 @@ Recommendation:
 # Nodule description template (HU used internally for classification, not shown in report)
 NODULE_DESCRIPTION_TEMPLATE = """Nodule {nodule_id}:
 - Size: {size_mm:.1f} mm
-- Volume: {volume_mm3:.1f} mm³
+- Volume: {volume_mm3:.1f} mm3
 - Type: {nodule_type}
 """
 
@@ -78,6 +80,57 @@ FLEISCHNER_CRITERIA = {
         ">=6mm": "CT at 3-6 months",
     },
 }
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_nodule_type_from_features(features: Mapping[str, Any]) -> str:
+    """
+    Classify nodule type from HU statistics.
+
+    Priority:
+    1) Robust percentiles (when present),
+    2) Fallback to legacy mean-HU rule.
+    """
+    mean_hu = _to_float(features.get("mean_hu"))
+    p25_hu = _to_float(features.get("p25_hu"))
+    p75_hu = _to_float(features.get("p75_hu"))
+    p90_hu = _to_float(features.get("p90_hu"))
+    max_hu = _to_float(features.get("max_hu"))
+
+    # Calcification should remain detectable even if distribution is broad.
+    if max_hu is not None and max_hu > 200:
+        return "calcified"
+
+    # Predominantly low-attenuation lesion.
+    if p90_hu is not None and p90_hu < -500:
+        return "ground-glass"
+
+    # Mixed attenuation lesion: low quartile in GGN range and upper quartile in soft tissue range.
+    if p25_hu is not None and p75_hu is not None and p25_hu < -500 and p75_hu > -300:
+        return "part-solid"
+
+    # Soft fallback for mostly low distribution.
+    if p75_hu is not None and p75_hu < -300:
+        return "ground-glass"
+
+    # Legacy fallback keeps backward behavior when percentile stats are unavailable.
+    if mean_hu is None:
+        mean_hu = 0.0
+    if mean_hu < -600:
+        return "ground-glass"
+    if mean_hu < -300:
+        return "part-solid"
+    if mean_hu > 200:
+        return "calcified"
+    return "solid"
 
 
 def get_fleischner_recommendation(size_mm: float, nodule_type: str = "solid") -> str:
@@ -99,19 +152,10 @@ def get_fleischner_recommendation(size_mm: float, nodule_type: str = "solid") ->
 def format_nodule_descriptions(lesion_features_list: list) -> str:
     """Format lesion features into text descriptions for the prompt."""
     descriptions = []
-    
+
     for i, features in enumerate(lesion_features_list, 1):
-        # Determine nodule type from HU value
-        mean_hu = features.get("mean_hu", 0)
-        if mean_hu < -600:
-            nodule_type = "ground-glass"
-        elif mean_hu < -300:
-            nodule_type = "part-solid"
-        elif mean_hu > 200:
-            nodule_type = "calcified"
-        else:
-            nodule_type = "solid"
-        
+        nodule_type = classify_nodule_type_from_features(features)
+
         desc = NODULE_DESCRIPTION_TEMPLATE.format(
             nodule_id=i,
             size_mm=features.get("equivalent_diameter_mm", 0),
@@ -119,7 +163,7 @@ def format_nodule_descriptions(lesion_features_list: list) -> str:
             nodule_type=nodule_type,
         )
         descriptions.append(desc)
-    
+
     return "\n".join(descriptions)
 
 
@@ -130,20 +174,20 @@ def build_report_prompt(
 ) -> str:
     """Build the complete prompt for report generation."""
     from datetime import datetime
-    
+
     if not scan_date:
         scan_date = datetime.now().strftime("%Y/%m/%d")
-    
+
     if not report_id:
         report_id = f"AUTO_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    
+
     nodule_descriptions = format_nodule_descriptions(lesion_features_list)
-    
+
     prompt = REPORT_GENERATION_PROMPT.format(
         scan_date=scan_date,
         report_id=report_id,
         nodule_descriptions=nodule_descriptions,
     )
-    
+
     return prompt
 
