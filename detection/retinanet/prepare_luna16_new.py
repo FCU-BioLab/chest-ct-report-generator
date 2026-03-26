@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 XML_NS = {"ns": "http://www.nih.gov"}
 
 
+def _default_output_json() -> Path:
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "detection" / "manifests" / "dataset_luna16_new.json"
+
+
 @dataclass
 class SeriesEntry:
     series_uid: str
@@ -254,7 +259,12 @@ def split_dataset(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare RetinaNet dataset JSON from LUNA16-New DICOM/XML.")
     parser.add_argument("--base_dir", type=str, required=True, help="LUNA16-New root directory.")
-    parser.add_argument("--output_json", type=str, required=True, help="Output dataset json path.")
+    parser.add_argument(
+        "--output_json",
+        type=str,
+        default="",
+        help="Output dataset json path. Default: detection/manifests/dataset_luna16_new.json",
+    )
     parser.add_argument(
         "--output_image_dir",
         type=str,
@@ -273,7 +283,10 @@ def main() -> None:
     if not base_dir.exists():
         raise FileNotFoundError(f"Base dir not found: {base_dir}")
 
-    output_json = Path(args.output_json).resolve()
+    if args.output_json:
+        output_json = Path(args.output_json).resolve()
+    else:
+        output_json = _default_output_json().resolve()
     output_json.parent.mkdir(parents=True, exist_ok=True)
 
     if args.output_image_dir:

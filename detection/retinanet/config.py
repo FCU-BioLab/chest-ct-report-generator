@@ -36,7 +36,7 @@ def _default_val_patch_size() -> List[int]:
 class RetinaNetConfig:
     """MONAI 3D RetinaNet training/inference configuration."""
 
-    data_path: str = "dataset_lndb.json"
+    data_path: str = "detection/manifests/dataset_lndb.json"
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     test_ratio: float = 0.1

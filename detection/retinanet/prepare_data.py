@@ -26,6 +26,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
+def _default_output_path(dataset: str) -> Path:
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "detection" / "manifests" / f"dataset_{dataset}.json"
+
+
 def process_lndb(base_dir: Path, csv_path: Path) -> List[Dict]:
     """
     處理 LNDb 資料集。
@@ -193,7 +198,12 @@ def main():
     parser.add_argument("--dataset", type=str, required=True, choices=["lndb", "luna16"], help="資料集類型 (lndb 或 luna16)")
     parser.add_argument("--base_dir", type=str, required=True, help="資料集根目錄路徑")
     parser.add_argument("--csv_path", type=str, help="標註 CSV 檔案路徑 (若未指定，將嘗試使用預設路徑)")
-    parser.add_argument("--output", type=str, default="dataset.json", help="輸出 JSON 檔案路徑")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="",
+        help="輸出 JSON 檔案路徑（預設為 detection/manifests/dataset_<dataset>.json）",
+    )
     parser.add_argument("--seed", type=int, default=42, help="隨機種子")
     parser.add_argument("--train_ratio", type=float, default=0.8, help="訓練集比例")
     parser.add_argument("--val_ratio", type=float, default=0.1, help="驗證集比例")
@@ -245,7 +255,11 @@ def main():
         "testing": test_ds
     }
     
-    output_path = Path(args.output).resolve()
+    if args.output:
+        output_path = Path(args.output).resolve()
+    else:
+        output_path = _default_output_path(args.dataset).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding='utf-8') as f:
         json.dump(json_data, f, indent=4, ensure_ascii=False)
         

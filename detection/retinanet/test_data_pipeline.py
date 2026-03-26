@@ -5,7 +5,7 @@ RetinaNet Data Pipeline 驗證腳本
 
 驗證 MONAI Transform Pipeline 是否正確產出格式。
 用法:
-    python -m detection.retinanet.test_data_pipeline --data_path dataset_luna16.json
+    python -m detection.retinanet.test_data_pipeline --data_path detection/manifests/dataset_luna16.json
 """
 
 import argparse

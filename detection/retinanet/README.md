@@ -25,14 +25,14 @@ pip install "monai[all]>=1.3" pandas simpleitk imageio matplotlib
 ## 雿輻??
 
 ### 1. 鞈?皞?
-????鞈??蒂?? `dataset.json`??
+????鞈??蒂?? `detection/manifests/*.json`??
 
 **LNDb 蝭?:**
 ```bash
 python -m detection.retinanet.prepare_data \
   --dataset lndb \
   --base_dir "cache/LNDb" \
-  --output "dataset_lndb.json"
+  --output "detection/manifests/dataset_lndb.json"
 ```
 
 **LUNA16 蝭?:**
@@ -40,14 +40,14 @@ python -m detection.retinanet.prepare_data \
 python -m detection.retinanet.prepare_data \
   --dataset luna16 \
   --base_dir "cache/LUNA16" \
-  --output "dataset_luna16.json"
+  --output "detection/manifests/dataset_luna16.json"
 ```
 
 **LUNA16-New (NBIA DICOM/XML) 範例:**
 ```bash
 python -m detection.retinanet.prepare_luna16_new \
   --base_dir "E:\\lung_ct_lesion_dataset\\LUNA16-New" \
-  --output_json "dataset_luna16_new.json"
+  --output_json "detection/manifests/dataset_luna16_new.json"
 ```
 
 ### 2. 閮毀璅∪? (Training)
@@ -56,7 +56,7 @@ python -m detection.retinanet.prepare_luna16_new \
 **雿輻 JSON 鞈??”:**
 ```bash
 python -m detection.retinanet.main train \
-  --data_path "dataset_lndb.json" \
+  --data_path "detection/manifests/dataset_lndb.json" \
   --epochs 300 \
   --output_dir "results/experiment_1"
 ```

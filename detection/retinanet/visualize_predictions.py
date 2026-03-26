@@ -9,7 +9,7 @@
 
 用法:
     python -m detection.retinanet.visualize_predictions \
-        --data_path dataset_luna16.json \
+        --data_path detection/manifests/dataset_luna16.json \
         --num_samples 5 \
         --score_thresh 0.3
 """
@@ -212,7 +212,7 @@ def create_prediction_gif(
 
 def main():
     parser = argparse.ArgumentParser(description="生成 RetinaNet 預測 GIF")
-    parser.add_argument("--data_path", default="dataset_luna16.json", help="資料路徑")
+    parser.add_argument("--data_path", default="detection/manifests/dataset_luna16.json", help="資料路徑")
     parser.add_argument("--pretrained_weights", default=None, help="預訓練權重路徑")
     parser.add_argument("--num_samples", type=int, default=5, help="生成幾個 GIF")
     parser.add_argument("--score_thresh", type=float, default=0.3, help="顯示的分數閾值")

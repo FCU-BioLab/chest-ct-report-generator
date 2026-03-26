@@ -18,6 +18,8 @@ dataset
 detection/__pycache__
 detection/video_result
 detection/nndet_data/Task100_LUNA16Nodule
+detection/manifests
+detection/backup
 models
 *.pt
 *.html

@@ -254,7 +254,7 @@ def collect_from_dataset(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect FPR patches from RetinaNet predictions.")
     parser.add_argument("--checkpoint", required=True, help="RetinaNet checkpoint path")
-    parser.add_argument("--data_path", default="dataset_luna16.json", help="dataset JSON path")
+    parser.add_argument("--data_path", default="detection/manifests/dataset_luna16.json", help="dataset JSON path")
     parser.add_argument("--output_dir", default="detection/results/fpr_dataset", help="output directory")
     parser.add_argument("--source_split", default="train", choices=["train", "val", "test"], help="dataset split used to collect FPR patches")
     parser.add_argument("--score_thresh", type=float, default=0.05, help="collect predictions with score >= this threshold")
