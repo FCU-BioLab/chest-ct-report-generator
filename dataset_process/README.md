@@ -1,18 +1,21 @@
-# dataset_process
+﻿# dataset_process
 
-This directory was cleaned to remove legacy, unreferenced YOLO/viewer utilities.
+此目錄保留資料前處理與 manifest 相關工具，已移除舊版且未被使用的 YOLO / viewer 程式。
 
-## Kept
+## 保留工具
 
 - `create_lidc_minimal_manifests.ps1`
-  - Purpose: generate minimal NBIA/LIDC manifest batches.
-  - Typical use: dataset acquisition support for LIDC/LUNA16-New workflows.
+  - 用途：產生最小化 NBIA/LIDC manifest 批次
+  - 場景：資料下載與整理（LIDC / LUNA16-New）
+
 - `normalize_retinanet_jsons.py`
-  - Purpose: normalize RetinaNet dataset JSON schema (`training`/`validation`/`testing`) and key aliases.
-  - Typical use: one-time cleanup when migrating old dataset JSON files.
+  - 用途：統一 RetinaNet dataset JSON 結構（`training` / `validation` / `testing`）與欄位別名
+  - 場景：遷移舊版 dataset JSON 時的一次性整理
 
-## Notes
+## 相關主流程
 
-- Current active dataset preparation for RetinaNet is under:
-  - `detection/retinanet/prepare_data.py`
-  - `detection/retinanet/prepare_luna16_new.py`
+目前 RetinaNet 使用的資料生成腳本位於：
+
+- `detection/retinanet/prepare_data.py`
+- `detection/retinanet/prepare_luna16_new.py`
+- `detection/retinanet/make_kfold_json.py`
