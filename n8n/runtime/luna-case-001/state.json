@@ -6,6 +6,7 @@
   "detection_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\02_detect",
   "detection_report": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\02_detect\\report.json",
   "detection_model_path": "C:/GitHub/chest-ct-report-generator/detection/results/retinanet_20260222_223955/model_best.pt",
+  "detection_gt_label_path": "C:\\GitHub\\chest-ct-report-generator\\detection\\nndet_data\\Task100_LUNA16Nodule\\labelsTr\\c_1_3_6_1_4_1_14519_5_2_1_6279_6001_100225287222365663678666836860.nii.gz",
   "segment_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\03_segment",
   "mask_paths": [
     "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\03_segment\\mask_nodule_001.nii.gz",
@@ -15,10 +16,9 @@
   "medsam2_checkpoint": "C:\\GitHub\\chest-ct-report-generator\\segmentation\\MedSAM2\\checkpoints\\MedSAM2_CTLesion.pt",
   "feature_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\04_feature",
   "features_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\04_feature\\lesion_features.json",
-  "nodule_count": 0,
+  "nodule_count": 1,
   "report_dir": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report",
-  "report_text_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\report.txt",
-  "report_json_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\report.json",
-  "report_meta_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\report_meta.json",
-  "report_status": "empty_features"
+  "report_text_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\AUTO_luna-case-001.txt",
+  "report_json_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\AUTO_luna-case-001.json",
+  "report_meta_path": "C:\\GitHub\\chest-ct-report-generator\\n8n\\runtime\\luna-case-001\\05_report\\report_meta.json"
 }
