@@ -1,9 +1,9 @@
 # CT Report Pipeline - Configuration
-project_root: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline"
+project_root: "${PIPELINE_ROOT}"
 
 datasets:
   lndb:
-    root: "C:/GitHub/chest-ct-report-generator/datasets/aLL_patients_data/LNDb"
+    root: "${REPO_ROOT}/dataset/LNDb"
     ct_dir: "data/LNDb-0001_4/data"
     masks_dir: "masks/masks"
     lung_masks_dir: "lung_masks"
@@ -11,7 +11,7 @@ datasets:
     trainNodules_gt: "trainset_csv/trainNodules_gt.csv"
 
   msd_lung:
-    root: "C:/GitHub/chest-ct-report-generator/datasets/MSD/Task06_Lung"
+    root: "${REPO_ROOT}/dataset/MSD/Task06_Lung"
     images_dir: "imagesTr"
     labels_dir: "labelsTr"
     lung_masks_dir: "lung_masks"
@@ -19,17 +19,17 @@ datasets:
     dataset_json: "dataset.json"
 
   luna16:
-    root: "C:/GitHub/chest-ct-report-generator/datasets/aLL_patients_data"
+    root: "${REPO_ROOT}/dataset/LUNA16"
     annotations_csv: "annotations.csv"
     candidates_csv: "candidates.csv"
 
 medsam2:
-  root: "C:/GitHub/chest-ct-report-generator/segmentation/MedSAM2"
+  root: "${REPO_ROOT}/segmentation/MedSAM2"
   config: "sam2.1_hiera_t512.yaml"
   checkpoints:
-    pretrained: "C:/GitHub/chest-ct-report-generator/segmentation/MedSAM2/checkpoints/MedSAM2_CTLesion.pt"
-    finetuned: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/segmentation/MedSAM2_best_model.pth"
-    latest: "C:/GitHub/chest-ct-report-generator/segmentation/MedSAM2/checkpoints/MedSAM2_latest.pt"
+    pretrained: "${REPO_ROOT}/segmentation/MedSAM2/checkpoints/MedSAM2_CTLesion.pt"
+    finetuned: "${PIPELINE_ROOT}/segmentation/MedSAM2_best_model.pth"
+    latest: "${REPO_ROOT}/segmentation/MedSAM2/checkpoints/MedSAM2_latest.pt"
   default_checkpoint: "pretrained"
 
 llm:
@@ -38,20 +38,20 @@ llm:
   max_length: 2048
   temperature: 0.3
   lora_weights:
-    base_dir: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/assets/models/lora_ct_report"
-    latest: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/assets/models/lora_ct_report/lora_20251220_000011/final"
+    base_dir: "${PIPELINE_ROOT}/assets/models/lora_ct_report"
+    latest: "${PIPELINE_ROOT}/assets/models/lora_ct_report/lora_20251220_000011/final"
 
 outputs:
-  root: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/outputs"
-  processed_data: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/processed_data"
-  segmentation_results: "C:/GitHub/chest-ct-report-generator/segmentation/result"
-  training_data: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/assets/data"
+  root: "${PIPELINE_ROOT}/outputs"
+  processed_data: "${PIPELINE_ROOT}/processed_data"
+  segmentation_results: "${REPO_ROOT}/segmentation/result"
+  training_data: "${PIPELINE_ROOT}/assets/data"
 
 dataset_split:
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
-  saved_split: "C:/GitHub/chest-ct-report-generator/segmentation/result/segmentation_20251215_170725/dataset_split.json"
+  saved_split: "${REPO_ROOT}/segmentation/result/dataset_split.json"
 
 training:
   segmentation:
@@ -94,5 +94,5 @@ features:
 device: "cuda"
 
 reports:
-  raw_reports: "C:/GitHub/chest-ct-report-generator/report_data/splited_reports"
-  processed_reports: "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/assets/data/finetune_real_reports.jsonl"
+  raw_reports: "${REPO_ROOT}/report_data/splited_reports"
+  processed_reports: "${PIPELINE_ROOT}/assets/data/finetune_real_reports.jsonl"

@@ -96,7 +96,15 @@ if Path(config_dir).exists():
     initialize_config_dir(config_dir=config_dir, version_base="1.2")
 
 # 匯入自定義模組
-from finetune_medsam2.dataset import LNDbDataset, DataAugmentation, CachedSliceDataset
+from finetune_medsam2.dataset import (
+    LNDbDataset,
+    DataAugmentation,
+    CachedSliceDataset,
+    NiftiManifestDataset,
+    load_manifest_dataset,
+    split_manifest_records_by_patient,
+    infer_manifest_patient_id,
+)
 from finetune_medsam2.trainer import MedSAM2Trainer
 from finetune_medsam2.config import Config, get_default_config
 from finetune_medsam2.utils import (
@@ -119,7 +127,7 @@ def main():
     
     # 命令列參數解析
     parser = argparse.ArgumentParser(
-        description="Fine-tune MedSAM2 for Chest Tumor Segmentation (Cache-Only Mode)"
+        description="Fine-tune MedSAM2 for Chest Tumor Segmentation (cache or manifest mode)"
     )
     
     # 資料參數（僅快取模式）
@@ -135,6 +143,43 @@ def main():
         default=_default_config.data.cache_dataset_type,
         choices=["lndb", "msd", "both"],
         help="快取資料集類型: lndb/msd/both (預設: both)"
+    )
+    parser.add_argument(
+        "--data_mode",
+        type=str,
+        default="cache",
+        choices=["cache", "manifest"],
+        help="資料來源模式: cache 或 manifest"
+    )
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default=None,
+        help="manifest JSON 路徑（data_mode=manifest 時必填）"
+    )
+    parser.add_argument(
+        "--prompt_mode",
+        type=str,
+        default="gt",
+        choices=["gt", "det", "hybrid"],
+        help="prompt 來源: gt=mask bbox, det=偵測框, hybrid=優先偵測框"
+    )
+    parser.add_argument(
+        "--det_prompt_json",
+        type=str,
+        default=None,
+        help="Detection prompt JSON 路徑（可選，供 manifest 模式使用）"
+    )
+    parser.add_argument(
+        "--prompt_jitter_px",
+        type=int,
+        default=0,
+        help="對 prompt bbox 加入像素擾動（訓練健壯性）"
+    )
+    parser.add_argument(
+        "--include_empty_slices",
+        action="store_true",
+        help="manifest 模式下，沒有病灶也保留空切片"
     )
     parser.add_argument(
         "--data_fraction", 
@@ -345,7 +390,9 @@ def main():
                 'accumulation_steps', 'config', 'checkpoint', 'augmentation', 
                 'num_workers', 'cache_data', 'segmentation_method', 'seed', 
                 'loss_type', 'warmup_epochs', 'strong_augmentation',
-                'min_nodule_diameter', 'fixed_bbox_size'
+                'min_nodule_diameter', 'fixed_bbox_size', 'use_2_5d',
+                'data_mode', 'manifest', 'prompt_mode', 'det_prompt_json',
+                'prompt_jitter_px', 'include_empty_slices'
             ]
             
             # 取得使用者在命令列中明確指定的參數
@@ -372,7 +419,15 @@ def main():
                 'loss_type': "combined",
                 'warmup_epochs': 5,
                 'strong_augmentation': False,
-                'min_nodule_diameter': 0.0
+                'min_nodule_diameter': 0.0,
+                'fixed_bbox_size': 0,
+                'use_2_5d': True,
+                'data_mode': "cache",
+                'manifest': None,
+                'prompt_mode': "gt",
+                'det_prompt_json': None,
+                'prompt_jitter_px': 0,
+                'include_empty_slices': False,
             }
             
             inherited_params = []
@@ -464,80 +519,205 @@ def main():
             )
             logger.info("🔄 已啟用基本資料增強（翻轉 + 旋轉 + 輕微強度調整）")
     
-    # 建立資料集（僅快取模式）
     logger.info("🔧 建立資料集...")
-    
-    # ============================================
-    # 快取資料集模式（預處理的 .npz 切片）
-    # ============================================
-    cache_path = Path(args.cache_dir)
-    if not cache_path.is_absolute():
-        cache_path = Path(__file__).parent.parent / args.cache_dir
-    
-    if not cache_path.exists():
-        logger.error(f"❌ 快取目錄不存在: {cache_path}")
-        logger.error(f"請先執行預處理腳本生成快取資料")
-        sys.exit(1)
-    
-    logger.info(f"📂 使用快取資料集: {cache_path}")
-    logger.info(f"📊 資料集類型: {args.cache_dataset_type}")
-    
-    # 取得所有可用的患者 ID
-    all_cache_patients = []
-    lndb_dir = cache_path / 'lndb_slices'
-    msd_dir = cache_path / 'msd_lung_slices'
-    
-    if args.cache_dataset_type in ('lndb', 'both') and lndb_dir.exists():
-        all_cache_patients.extend([d.name for d in lndb_dir.iterdir() if d.is_dir()])
-    if args.cache_dataset_type in ('msd', 'both') and msd_dir.exists():
-        all_cache_patients.extend([d.name for d in msd_dir.iterdir() if d.is_dir()])
-    
-    if len(all_cache_patients) == 0:
-        logger.error(f"❌ 快取目錄中沒有找到患者資料")
-        logger.error(f"   LNDb 目錄: {lndb_dir} (存在: {lndb_dir.exists()})")
-        logger.error(f"   MSD 目錄: {msd_dir} (存在: {msd_dir.exists()})")
-        logger.error(f"請先執行預處理腳本生成快取資料")
-        sys.exit(1)
-    
-    logger.info(f"📊 找到 {len(all_cache_patients)} 個患者")
-    
-    # 依比例減少資料集
-    if args.data_fraction < 1.0:
+
+    def _unique_patient_ids(records):
+        return sorted({infer_manifest_patient_id(r) for r in records})
+
+    def _downsample_records_by_patient(records, fraction, seed):
+        if fraction >= 1.0 or len(records) == 0:
+            return records
         import random
-        rng = random.Random(args.seed) if args.seed is not None else random.Random()
-        num_samples = max(1, int(len(all_cache_patients) * args.data_fraction))
-        all_cache_patients = sorted(rng.sample(all_cache_patients, num_samples))
-        logger.info(f"✂️ 依比例 {args.data_fraction} 縮減: 剩餘 {len(all_cache_patients)} 個患者")
-    
-    # 分割資料集
-    train_ids, val_ids, test_ids = split_dataset(all_cache_patients, seed=args.seed)
-    logger.info(f"📊 資料集分割: Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
-    
-    # 建立資料集
-    train_dataset = CachedSliceDataset(
-        str(cache_path),
-        dataset_type=args.cache_dataset_type,
-        patient_ids=train_ids,
-        transform=transform,
-        use_2_5d=getattr(args, 'use_2_5d', True),
-        fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
-    )
-    val_dataset = CachedSliceDataset(
-        str(cache_path),
-        dataset_type=args.cache_dataset_type,
-        patient_ids=val_ids,
-        transform=None,
-        use_2_5d=getattr(args, 'use_2_5d', True),
-        fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
-    )
-    test_dataset = CachedSliceDataset(
-        str(cache_path),
-        dataset_type=args.cache_dataset_type,
-        patient_ids=test_ids,
-        transform=None,
-        use_2_5d=getattr(args, 'use_2_5d', True),
-        fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
-    )
+
+        patient_ids = _unique_patient_ids(records)
+        if len(patient_ids) == 0:
+            return records
+        rng = random.Random(seed) if seed is not None else random.Random()
+        num_keep = max(1, int(len(patient_ids) * fraction))
+        keep_ids = set(rng.sample(patient_ids, num_keep))
+        return [r for r in records if infer_manifest_patient_id(r) in keep_ids]
+
+    train_ids, val_ids, test_ids = [], [], []
+
+    use_manifest_mode = (args.data_mode == "manifest") or bool(args.manifest)
+
+    if use_manifest_mode:
+        if not args.manifest:
+            logger.error("❌ data_mode=manifest 時必須提供 --manifest")
+            sys.exit(1)
+
+        manifest_path = Path(args.manifest)
+        if not manifest_path.is_absolute():
+            manifest_path = (Path.cwd() / manifest_path).resolve()
+
+        if not manifest_path.exists():
+            logger.error(f"❌ manifest 不存在: {manifest_path}")
+            sys.exit(1)
+
+        manifest_splits = load_manifest_dataset(str(manifest_path))
+        has_predefined_split = bool(manifest_splits["validation"] or manifest_splits["testing"])
+        logger.info(f"📂 使用 manifest: {manifest_path}")
+        logger.info(
+            "📊 manifest 原始樣本: train=%d, val=%d, test=%d",
+            len(manifest_splits["training"]),
+            len(manifest_splits["validation"]),
+            len(manifest_splits["testing"]),
+        )
+
+        if args.split_file:
+            train_ids, val_ids, test_ids = load_dataset_split_info(args.split_file)
+            all_records = (
+                list(manifest_splits["training"])
+                + list(manifest_splits["validation"])
+                + list(manifest_splits["testing"])
+            )
+            if len(all_records) == 0:
+                logger.error("❌ manifest 沒有任何樣本可供 split_file 篩選")
+                sys.exit(1)
+
+            train_id_set = set(train_ids)
+            val_id_set = set(val_ids)
+            test_id_set = set(test_ids)
+            train_records = [r for r in all_records if infer_manifest_patient_id(r) in train_id_set]
+            val_records = [r for r in all_records if infer_manifest_patient_id(r) in val_id_set]
+            test_records = [r for r in all_records if infer_manifest_patient_id(r) in test_id_set]
+        elif has_predefined_split:
+            train_records = list(manifest_splits["training"])
+            val_records = list(manifest_splits["validation"])
+            test_records = list(manifest_splits["testing"])
+        else:
+            base_records = list(manifest_splits["training"])
+            train_records, val_records, test_records = split_manifest_records_by_patient(
+                base_records, seed=args.seed
+            )
+
+        if args.data_fraction < 1.0:
+            train_records = _downsample_records_by_patient(train_records, args.data_fraction, args.seed)
+            val_records = _downsample_records_by_patient(val_records, args.data_fraction, args.seed)
+            test_records = _downsample_records_by_patient(test_records, args.data_fraction, args.seed)
+
+        train_ids = _unique_patient_ids(train_records)
+        val_ids = _unique_patient_ids(val_records)
+        test_ids = _unique_patient_ids(test_records)
+        if len(train_records) == 0:
+            logger.error("❌ manifest 分割後 train 為空，無法訓練")
+            sys.exit(1)
+        if len(val_records) == 0:
+            logger.warning("⚠️ manifest 分割後 validation 為空，驗證指標可能無法代表模型表現")
+        if len(test_records) == 0:
+            logger.warning("⚠️ manifest 分割後 testing 為空，測試模式將沒有樣本")
+        logger.info(
+            "📊 資料集分割: Train=%d, Val=%d, Test=%d",
+            len(train_ids),
+            len(val_ids),
+            len(test_ids),
+        )
+
+        train_dataset = NiftiManifestDataset(
+            records=train_records,
+            manifest_path=str(manifest_path),
+            transform=transform,
+            use_2_5d=getattr(args, "use_2_5d", True),
+            fixed_bbox_size=getattr(args, "fixed_bbox_size", 0),
+            prompt_mode=args.prompt_mode,
+            det_prompt_json=args.det_prompt_json,
+            prompt_jitter_px=max(0, args.prompt_jitter_px),
+            include_empty_slices=args.include_empty_slices,
+        )
+        val_dataset = NiftiManifestDataset(
+            records=val_records,
+            manifest_path=str(manifest_path),
+            transform=None,
+            use_2_5d=getattr(args, "use_2_5d", True),
+            fixed_bbox_size=getattr(args, "fixed_bbox_size", 0),
+            prompt_mode=args.prompt_mode,
+            det_prompt_json=args.det_prompt_json,
+            prompt_jitter_px=0,
+            include_empty_slices=args.include_empty_slices,
+        )
+        test_dataset = NiftiManifestDataset(
+            records=test_records,
+            manifest_path=str(manifest_path),
+            transform=None,
+            use_2_5d=getattr(args, "use_2_5d", True),
+            fixed_bbox_size=getattr(args, "fixed_bbox_size", 0),
+            prompt_mode=args.prompt_mode,
+            det_prompt_json=args.det_prompt_json,
+            prompt_jitter_px=0,
+            include_empty_slices=True,
+        )
+    else:
+        # ============================================
+        # 快取資料集模式（預處理的 .npz 切片）
+        # ============================================
+        cache_path = Path(args.cache_dir)
+        if not cache_path.is_absolute():
+            cache_path = Path(__file__).parent.parent / args.cache_dir
+        
+        if not cache_path.exists():
+            logger.error(f"❌ 快取目錄不存在: {cache_path}")
+            logger.error(f"請先執行預處理腳本生成快取資料")
+            sys.exit(1)
+        
+        logger.info(f"📂 使用快取資料集: {cache_path}")
+        logger.info(f"📊 資料集類型: {args.cache_dataset_type}")
+        
+        # 取得所有可用的患者 ID
+        all_cache_patients = []
+        lndb_dir = cache_path / 'lndb_slices'
+        msd_dir = cache_path / 'msd_lung_slices'
+        
+        if args.cache_dataset_type in ('lndb', 'both') and lndb_dir.exists():
+            all_cache_patients.extend([d.name for d in lndb_dir.iterdir() if d.is_dir()])
+        if args.cache_dataset_type in ('msd', 'both') and msd_dir.exists():
+            all_cache_patients.extend([d.name for d in msd_dir.iterdir() if d.is_dir()])
+        
+        if len(all_cache_patients) == 0:
+            logger.error(f"❌ 快取目錄中沒有找到患者資料")
+            logger.error(f"   LNDb 目錄: {lndb_dir} (存在: {lndb_dir.exists()})")
+            logger.error(f"   MSD 目錄: {msd_dir} (存在: {msd_dir.exists()})")
+            logger.error(f"請先執行預處理腳本生成快取資料")
+            sys.exit(1)
+        
+        logger.info(f"📊 找到 {len(all_cache_patients)} 個患者")
+        
+        # 依比例減少資料集
+        if args.data_fraction < 1.0:
+            import random
+            rng = random.Random(args.seed) if args.seed is not None else random.Random()
+            num_samples = max(1, int(len(all_cache_patients) * args.data_fraction))
+            all_cache_patients = sorted(rng.sample(all_cache_patients, num_samples))
+            logger.info(f"✂️ 依比例 {args.data_fraction} 縮減: 剩餘 {len(all_cache_patients)} 個患者")
+        
+        # 分割資料集
+        train_ids, val_ids, test_ids = split_dataset(all_cache_patients, seed=args.seed)
+        logger.info(f"📊 資料集分割: Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}")
+        
+        # 建立資料集
+        train_dataset = CachedSliceDataset(
+            str(cache_path),
+            dataset_type=args.cache_dataset_type,
+            patient_ids=train_ids,
+            transform=transform,
+            use_2_5d=getattr(args, 'use_2_5d', True),
+            fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
+        )
+        val_dataset = CachedSliceDataset(
+            str(cache_path),
+            dataset_type=args.cache_dataset_type,
+            patient_ids=val_ids,
+            transform=None,
+            use_2_5d=getattr(args, 'use_2_5d', True),
+            fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
+        )
+        test_dataset = CachedSliceDataset(
+            str(cache_path),
+            dataset_type=args.cache_dataset_type,
+            patient_ids=test_ids,
+            transform=None,
+            use_2_5d=getattr(args, 'use_2_5d', True),
+            fixed_bbox_size=getattr(args, 'fixed_bbox_size', 64)
+        )
     
     # 儲存分割資訊
     if not args.eval_only and not args.test:
@@ -708,8 +888,12 @@ def main():
         test_config = {
             'mode': 'test',
             'checkpoint': args.resume or args.checkpoint,
+            'data_mode': args.data_mode,
             'cache_dir': args.cache_dir,  # ✅ 使用 cache_dir 而非 data_dir
             'cache_dataset_type': args.cache_dataset_type,
+            'manifest': args.manifest,
+            'prompt_mode': args.prompt_mode,
+            'det_prompt_json': args.det_prompt_json,
             'test_samples': test_results['total_samples'],
             'test_lesions': test_results['total_lesions'],
             'test_patients': len(test_results['patient_features']),

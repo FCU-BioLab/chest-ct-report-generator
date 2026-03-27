@@ -5,8 +5,9 @@
 """
 
 import logging
+import json
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Any, Tuple
 
 import numpy as np
 import torch
@@ -1116,4 +1117,660 @@ class CachedSliceDataset(Dataset):
             'bboxes': bboxes,
             'patient_id': data['patient_id'],
             'slice_index': data['slice_index']
+        }
+
+
+_MANIFEST_TRAIN_KEYS = ("training", "train")
+_MANIFEST_VAL_KEYS = ("validation", "val")
+_MANIFEST_TEST_KEYS = ("testing", "test")
+
+
+def _pick_first_record_value(record: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[Any]:
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def infer_manifest_patient_id(record: Dict[str, Any]) -> str:
+    pid = _pick_first_record_value(
+        record,
+        ("patient_id", "seriesuid", "lndb_id", "id", "case_id", "name"),
+    )
+    if pid is not None:
+        return str(pid)
+
+    image_path = _pick_first_record_value(record, ("image", "image_path", "ct_path"))
+    if image_path:
+        stem = Path(str(image_path)).name
+        if stem.endswith(".nii.gz"):
+            return stem[:-7]
+        return Path(stem).stem
+
+    return "unknown"
+
+
+def _resolve_manifest_path(path_value: Any, manifest_path: Optional[str]) -> Path:
+    path = Path(str(path_value))
+    if path.is_absolute():
+        return path
+    if manifest_path:
+        return (Path(manifest_path).resolve().parent / path).resolve()
+    return path.resolve()
+
+
+def _normalize_manifest_splits(raw_data: Any) -> Dict[str, List[Dict[str, Any]]]:
+    if isinstance(raw_data, list):
+        return {"training": raw_data, "validation": [], "testing": []}
+
+    if not isinstance(raw_data, dict):
+        raise ValueError("Manifest JSON 必須是 list 或 dict")
+
+    train_items = []
+    val_items = []
+    test_items = []
+
+    for key in _MANIFEST_TRAIN_KEYS:
+        if key in raw_data:
+            train_items = raw_data[key] or []
+            break
+    for key in _MANIFEST_VAL_KEYS:
+        if key in raw_data:
+            val_items = raw_data[key] or []
+            break
+    for key in _MANIFEST_TEST_KEYS:
+        if key in raw_data:
+            test_items = raw_data[key] or []
+            break
+
+    if not train_items and not val_items and not test_items:
+        # fallback: treat entire dict as one split only when data is under "data"
+        if isinstance(raw_data.get("data"), list):
+            return {"training": raw_data["data"], "validation": [], "testing": []}
+        raise ValueError("Manifest JSON 缺少 training/validation/testing 欄位")
+
+    return {
+        "training": train_items,
+        "validation": val_items,
+        "testing": test_items,
+    }
+
+
+def load_manifest_dataset(manifest_path: str) -> Dict[str, List[Dict[str, Any]]]:
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    return _normalize_manifest_splits(raw)
+
+
+def split_manifest_records_by_patient(
+    records: List[Dict[str, Any]],
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    del test_ratio  # keep API symmetric with split_dataset
+
+    import random
+
+    patient_to_records: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        pid = infer_manifest_patient_id(record)
+        patient_to_records.setdefault(pid, []).append(record)
+
+    patient_ids = list(patient_to_records.keys())
+    rng = random.Random(seed) if seed is not None else random.Random()
+    rng.shuffle(patient_ids)
+
+    n_patients = len(patient_ids)
+    if n_patients == 0:
+        return [], [], []
+
+    train_end = int(n_patients * train_ratio)
+    val_end = train_end + int(n_patients * val_ratio)
+
+    if n_patients >= 3:
+        train_end = max(1, min(train_end, n_patients - 2))
+        val_end = max(train_end + 1, min(val_end, n_patients - 1))
+    elif n_patients == 2:
+        train_end = 1
+        val_end = 1
+    else:
+        train_end = 1
+        val_end = 1
+
+    train_ids = patient_ids[:train_end]
+    val_ids = patient_ids[train_end:val_end]
+    test_ids = patient_ids[val_end:]
+
+    def _collect(ids: List[str]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for pid in ids:
+            out.extend(patient_to_records.get(pid, []))
+        return out
+
+    return _collect(train_ids), _collect(val_ids), _collect(test_ids)
+
+
+class NiftiManifestDataset(Dataset):
+    """
+    以 NIfTI/MHD + manifest JSON 作為輸入的切片資料集。
+
+    每個 manifest record 需至少包含:
+    - image / image_path / ct_path
+    可選:
+    - mask / mask_path / label / seg_path
+    - patient_id / seriesuid
+    - slice_bboxes / det_bboxes / detections / boxes (3D boxes)
+    """
+
+    def __init__(
+        self,
+        records: List[Dict[str, Any]],
+        manifest_path: Optional[str] = None,
+        transform: Optional[Callable] = None,
+        target_size: Tuple[int, int] = (512, 512),
+        use_2_5d: bool = True,
+        fixed_bbox_size: int = 0,
+        prompt_mode: str = "gt",
+        det_prompt_json: Optional[str] = None,
+        prompt_jitter_px: int = 0,
+        include_empty_slices: bool = False,
+        hu_min: float = -1000.0,
+        hu_max: float = 800.0,
+        max_cached_volumes: int = 6,
+    ):
+        self.records = records
+        self.manifest_path = manifest_path
+        self.transform = transform
+        self.target_size = target_size
+        self.use_2_5d = use_2_5d
+        self.fixed_bbox_size = int(fixed_bbox_size)
+        self.prompt_mode = prompt_mode.lower()
+        self.prompt_jitter_px = max(0, int(prompt_jitter_px))
+        self.include_empty_slices = include_empty_slices
+        self.hu_min = float(hu_min)
+        self.hu_max = float(hu_max)
+        self.max_cached_volumes = max(1, int(max_cached_volumes))
+
+        if self.prompt_mode not in ("gt", "det", "hybrid"):
+            raise ValueError("prompt_mode must be one of: gt, det, hybrid")
+
+        self.logger = logging.getLogger(__name__)
+        self._volume_cache: Dict[str, np.ndarray] = {}
+        self._volume_cache_order: List[str] = []
+        self._external_prompt_lookup = self._load_external_prompt_lookup(det_prompt_json)
+        self._resolved_records: List[Dict[str, Any]] = []
+        self.samples: List[Dict[str, Any]] = []
+        self._filter_stats = {
+            "patients_input": 0,
+            "patients_no_ct": 0,
+            "patients_no_nodules": 0,
+            "patients_has_nodules": 0,
+            "patients_filtered": 0,
+            "patients_kept": 0,
+            "patients_total": 0,
+            "nodules_total": 0,
+            "nodules_kept": 0,
+            "nodules_filtered": 0,
+            "size_micro": 0,
+            "size_small": 0,
+            "size_medium": 0,
+            "size_large": 0,
+        }
+
+        self._resolve_records()
+        self._build_sample_index()
+        self.logger.info(
+            "NiftiManifestDataset: %d slices, %d patients (prompt_mode=%s, 2.5D=%s)",
+            len(self.samples),
+            self._filter_stats["patients_kept"],
+            self.prompt_mode,
+            self.use_2_5d,
+        )
+
+    def _cache_put(self, key: str, value: np.ndarray) -> None:
+        if key in self._volume_cache:
+            try:
+                self._volume_cache_order.remove(key)
+            except ValueError:
+                pass
+        self._volume_cache[key] = value
+        self._volume_cache_order.append(key)
+        while len(self._volume_cache_order) > self.max_cached_volumes:
+            old_key = self._volume_cache_order.pop(0)
+            self._volume_cache.pop(old_key, None)
+
+    def _load_volume(self, path: Path) -> Optional[np.ndarray]:
+        if not path.exists():
+            return None
+        key = str(path)
+        cached = self._volume_cache.get(key)
+        if cached is not None:
+            return cached
+        itk_image = sitk.ReadImage(str(path))
+        arr = sitk.GetArrayFromImage(itk_image)
+        arr = arr.astype(np.float32, copy=False)
+        self._cache_put(key, arr)
+        return arr
+
+    def _resolve_records(self) -> None:
+        self._filter_stats["patients_input"] = len(self.records)
+        for record in self.records:
+            image_value = _pick_first_record_value(record, ("image", "image_path", "ct_path"))
+            if image_value is None:
+                self._filter_stats["patients_no_ct"] += 1
+                continue
+
+            image_path = _resolve_manifest_path(image_value, self.manifest_path)
+            if not image_path.exists():
+                self._filter_stats["patients_no_ct"] += 1
+                continue
+
+            mask_value = _pick_first_record_value(record, ("mask", "mask_path", "label", "seg_path"))
+            mask_path = _resolve_manifest_path(mask_value, self.manifest_path) if mask_value else None
+
+            resolved = dict(record)
+            resolved["_image_path"] = str(image_path)
+            resolved["_mask_path"] = str(mask_path) if mask_path else None
+            resolved["_patient_id"] = infer_manifest_patient_id(record)
+
+            record_prompt_map = self._extract_record_prompt_map(record)
+            external_prompt_map = self._external_prompt_lookup.get(resolved["_patient_id"], {})
+            resolved["_prompt_map"] = self._merge_prompt_maps(record_prompt_map, external_prompt_map)
+            self._resolved_records.append(resolved)
+
+    @staticmethod
+    def _parse_box2d_list(raw_boxes: Any) -> List[List[float]]:
+        out: List[List[float]] = []
+        if raw_boxes is None:
+            return out
+        if isinstance(raw_boxes, np.ndarray):
+            raw_boxes = raw_boxes.tolist()
+        if not isinstance(raw_boxes, list):
+            return out
+        for box in raw_boxes:
+            if isinstance(box, np.ndarray):
+                box = box.tolist()
+            if isinstance(box, list) and len(box) >= 4:
+                try:
+                    x1, y1, x2, y2 = [float(v) for v in box[:4]]
+                except (TypeError, ValueError):
+                    continue
+                if x2 > x1 and y2 > y1:
+                    out.append([x1, y1, x2, y2])
+        return out
+
+    @staticmethod
+    def _normalize_prompt_map(raw_map: Any) -> Dict[int, List[List[float]]]:
+        normalized: Dict[int, List[List[float]]] = {}
+        if raw_map is None:
+            return normalized
+
+        if isinstance(raw_map, list):
+            # format: [{"slice_index": 10, "bbox": [...]}, ...]
+            for item in raw_map:
+                if not isinstance(item, dict):
+                    continue
+                slice_idx = item.get("slice_index")
+                if slice_idx is None:
+                    continue
+                try:
+                    z = int(slice_idx)
+                except (TypeError, ValueError):
+                    continue
+                boxes = NiftiManifestDataset._parse_box2d_list(
+                    item.get("bboxes", item.get("boxes", [item.get("bbox")]))
+                )
+                if boxes:
+                    normalized.setdefault(z, []).extend(boxes)
+            return normalized
+
+        if not isinstance(raw_map, dict):
+            return normalized
+
+        for key, value in raw_map.items():
+            try:
+                z = int(key)
+            except (TypeError, ValueError):
+                continue
+            boxes = NiftiManifestDataset._parse_box2d_list(value)
+            if boxes:
+                normalized.setdefault(z, []).extend(boxes)
+        return normalized
+
+    @staticmethod
+    def _merge_prompt_maps(
+        a: Dict[int, List[List[float]]], b: Dict[int, List[List[float]]]
+    ) -> Dict[int, List[List[float]]]:
+        merged: Dict[int, List[List[float]]] = {}
+        for source in (a, b):
+            for z, boxes in source.items():
+                if not boxes:
+                    continue
+                merged.setdefault(z, []).extend(boxes)
+        return merged
+
+    def _load_external_prompt_lookup(self, det_prompt_json: Optional[str]) -> Dict[str, Dict[int, List[List[float]]]]:
+        if not det_prompt_json:
+            return {}
+
+        path = _resolve_manifest_path(det_prompt_json, self.manifest_path)
+        if not path.exists():
+            self.logger.warning("det_prompt_json 不存在: %s", path)
+            return {}
+
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        lookup: Dict[str, Dict[int, List[List[float]]]] = {}
+
+        if isinstance(raw, dict) and isinstance(raw.get("patients"), list):
+            raw = raw["patients"]
+
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                pid = infer_manifest_patient_id(item)
+                prompt_map = self._normalize_prompt_map(
+                    item.get("slice_bboxes", item.get("det_bboxes", item.get("detections")))
+                )
+                if prompt_map:
+                    lookup[pid] = self._merge_prompt_maps(lookup.get(pid, {}), prompt_map)
+            return lookup
+
+        if isinstance(raw, dict):
+            for pid, payload in raw.items():
+                if isinstance(payload, dict):
+                    prompt_map = self._normalize_prompt_map(
+                        payload.get("slice_bboxes", payload.get("det_bboxes", payload))
+                    )
+                    if prompt_map:
+                        lookup[str(pid)] = prompt_map
+            return lookup
+
+        return lookup
+
+    def _extract_record_prompt_map(self, record: Dict[str, Any]) -> Dict[int, List[List[float]]]:
+        prompt_map = {}
+        for key in ("slice_bboxes", "det_bboxes", "prompt_bboxes", "bbox_by_slice"):
+            value = record.get(key)
+            if value is not None:
+                prompt_map = self._merge_prompt_maps(prompt_map, self._normalize_prompt_map(value))
+
+        detections = record.get("detections")
+        if detections is not None:
+            prompt_map = self._merge_prompt_maps(prompt_map, self._normalize_prompt_map(detections))
+
+        # 3D boxes: [x1, y1, z1, x2, y2, z2]
+        boxes_3d = record.get("box", record.get("boxes"))
+        if isinstance(boxes_3d, np.ndarray):
+            boxes_3d = boxes_3d.tolist()
+        if isinstance(boxes_3d, list):
+            projected: Dict[int, List[List[float]]] = {}
+            for box in boxes_3d:
+                if not isinstance(box, list) or len(box) < 6:
+                    continue
+                try:
+                    x1, y1, z1, x2, y2, z2 = [float(v) for v in box[:6]]
+                except (TypeError, ValueError):
+                    continue
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                start_z = int(np.floor(min(z1, z2)))
+                end_z = int(np.ceil(max(z1, z2)))
+                if end_z <= start_z:
+                    end_z = start_z + 1
+                for z in range(start_z, end_z):
+                    projected.setdefault(z, []).append([x1, y1, x2, y2])
+            prompt_map = self._merge_prompt_maps(prompt_map, projected)
+
+        return prompt_map
+
+    def _build_sample_index(self) -> None:
+        kept_patients = set()
+        for record_idx, record in enumerate(self._resolved_records):
+            image_path = Path(record["_image_path"])
+            mask_path = Path(record["_mask_path"]) if record["_mask_path"] else None
+            patient_id = record["_patient_id"]
+
+            image_volume = self._load_volume(image_path)
+            if image_volume is None or image_volume.ndim != 3:
+                self._filter_stats["patients_no_ct"] += 1
+                continue
+
+            depth = int(image_volume.shape[0])
+            prompt_map = {
+                z: boxes for z, boxes in (record.get("_prompt_map") or {}).items()
+                if 0 <= int(z) < depth and len(boxes) > 0
+            }
+
+            positive_slices: List[int] = []
+            mask_volume = None
+            if mask_path is not None and mask_path.exists():
+                mask_volume = self._load_volume(mask_path)
+                if mask_volume is not None and mask_volume.ndim == 3:
+                    positive_slices = np.where((mask_volume > 0).reshape(depth, -1).any(axis=1))[0].tolist()
+
+            if positive_slices:
+                target_slices = positive_slices
+                self._filter_stats["patients_has_nodules"] += 1
+            elif prompt_map:
+                target_slices = sorted(prompt_map.keys())
+                self._filter_stats["patients_has_nodules"] += 1
+            elif self.include_empty_slices:
+                target_slices = list(range(depth))
+                self._filter_stats["patients_no_nodules"] += 1
+            else:
+                self._filter_stats["patients_no_nodules"] += 1
+                self._filter_stats["patients_filtered"] += 1
+                continue
+
+            for z in target_slices:
+                self.samples.append(
+                    {
+                        "record_idx": record_idx,
+                        "patient_id": patient_id,
+                        "slice_index": int(z),
+                    }
+                )
+
+            self._filter_stats["nodules_total"] += len(target_slices)
+            self._filter_stats["nodules_kept"] += len(target_slices)
+            self._filter_stats["patients_kept"] += 1
+            kept_patients.add(patient_id)
+
+        self._filter_stats["patients_total"] = self._filter_stats["patients_kept"]
+        self._filter_stats["patients_input"] = max(
+            self._filter_stats["patients_input"],
+            len(self._resolved_records),
+        )
+        self._kept_patient_ids = sorted(list(kept_patients))
+
+    def _resize_image(self, image_2d: np.ndarray) -> np.ndarray:
+        import cv2
+
+        target_h, target_w = self.target_size
+        if image_2d.shape == (target_h, target_w):
+            return image_2d
+        return cv2.resize(image_2d.astype(np.float32), (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+    def _resize_mask(self, mask_2d: np.ndarray) -> np.ndarray:
+        import cv2
+
+        target_h, target_w = self.target_size
+        if mask_2d.shape == (target_h, target_w):
+            return (mask_2d > 0).astype(np.uint8)
+        resized = cv2.resize(mask_2d.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        return (resized > 0).astype(np.uint8)
+
+    def _normalize_to_uint8(self, image_2d: np.ndarray) -> np.ndarray:
+        if image_2d.dtype == np.uint8:
+            return image_2d
+
+        arr = image_2d.astype(np.float32, copy=False)
+        if arr.max() <= 1.0 and arr.min() >= 0.0:
+            arr = arr * 255.0
+            return np.clip(arr, 0, 255).astype(np.uint8)
+
+        arr = np.clip(arr, self.hu_min, self.hu_max)
+        arr = (arr - self.hu_min) / (self.hu_max - self.hu_min + 1e-8)
+        arr = arr * 255.0
+        return np.clip(arr, 0, 255).astype(np.uint8)
+
+    def _extract_mask_bboxes(self, mask: np.ndarray) -> np.ndarray:
+        if mask.sum() == 0:
+            return np.zeros((0, 4), dtype=np.float32)
+
+        h, w = mask.shape
+        labeled_mask = measure.label(mask > 0)
+        regions = measure.regionprops(labeled_mask)
+        out = []
+        for region in regions:
+            if self.fixed_bbox_size > 0:
+                cy, cx = region.centroid
+                half = self.fixed_bbox_size // 2
+                x1 = max(0, int(cx - half))
+                y1 = max(0, int(cy - half))
+                x2 = min(w, int(cx + half))
+                y2 = min(h, int(cy + half))
+                if x2 > x1 and y2 > y1:
+                    out.append([x1, y1, x2, y2])
+            else:
+                minr, minc, maxr, maxc = region.bbox
+                out.append([minc, minr, maxc, maxr])
+
+        if not out:
+            return np.zeros((0, 4), dtype=np.float32)
+        return np.asarray(out, dtype=np.float32)
+
+    def _rescale_prompt_boxes(
+        self,
+        boxes: List[List[float]],
+        src_hw: Tuple[int, int],
+    ) -> np.ndarray:
+        if not boxes:
+            return np.zeros((0, 4), dtype=np.float32)
+        src_h, src_w = src_hw
+        target_h, target_w = self.target_size
+        sx = float(target_w) / max(1.0, float(src_w))
+        sy = float(target_h) / max(1.0, float(src_h))
+
+        out = []
+        for box in boxes:
+            if len(box) < 4:
+                continue
+            x1, y1, x2, y2 = box[:4]
+            x1 = max(0.0, min(float(target_w - 1), float(x1) * sx))
+            y1 = max(0.0, min(float(target_h - 1), float(y1) * sy))
+            x2 = max(1.0, min(float(target_w), float(x2) * sx))
+            y2 = max(1.0, min(float(target_h), float(y2) * sy))
+            if x2 > x1 and y2 > y1:
+                out.append([x1, y1, x2, y2])
+        if not out:
+            return np.zeros((0, 4), dtype=np.float32)
+        return np.asarray(out, dtype=np.float32)
+
+    def _jitter_boxes(self, boxes: np.ndarray) -> np.ndarray:
+        if self.prompt_jitter_px <= 0 or boxes.size == 0:
+            return boxes
+        out = boxes.copy()
+        noise = np.random.randint(-self.prompt_jitter_px, self.prompt_jitter_px + 1, size=out.shape)
+        out += noise.astype(np.float32)
+        h, w = self.target_size
+        out[:, 0] = np.clip(out[:, 0], 0, w - 1)
+        out[:, 1] = np.clip(out[:, 1], 0, h - 1)
+        out[:, 2] = np.clip(out[:, 2], 1, w)
+        out[:, 3] = np.clip(out[:, 3], 1, h)
+        valid = (out[:, 2] > out[:, 0]) & (out[:, 3] > out[:, 1])
+        return out[valid]
+
+    def _load_sample(self, idx: int) -> Dict[str, Any]:
+        sample = self.samples[idx]
+        record = self._resolved_records[sample["record_idx"]]
+        z = int(sample["slice_index"])
+
+        image_path = Path(record["_image_path"])
+        mask_path = Path(record["_mask_path"]) if record["_mask_path"] else None
+
+        image_volume = self._load_volume(image_path)
+        if image_volume is None:
+            raise RuntimeError(f"image volume not found: {image_path}")
+        depth, src_h, src_w = image_volume.shape
+        z_prev = max(0, z - 1)
+        z_next = min(depth - 1, z + 1)
+
+        if self.use_2_5d:
+            slices = [image_volume[z_prev], image_volume[z], image_volume[z_next]]
+        else:
+            slices = [image_volume[z]]
+
+        resized_slices = [self._normalize_to_uint8(self._resize_image(slc)) for slc in slices]
+        if self.use_2_5d:
+            image_rgb = np.stack(resized_slices, axis=-1)
+        else:
+            image_rgb = np.stack([resized_slices[0], resized_slices[0], resized_slices[0]], axis=-1)
+
+        if mask_path is not None and mask_path.exists():
+            mask_volume = self._load_volume(mask_path)
+            if mask_volume is not None and mask_volume.ndim == 3 and z < mask_volume.shape[0]:
+                mask_2d = mask_volume[z]
+            else:
+                mask_2d = np.zeros((src_h, src_w), dtype=np.uint8)
+        else:
+            mask_2d = np.zeros((src_h, src_w), dtype=np.uint8)
+
+        mask = self._resize_mask(mask_2d)
+        gt_bboxes = self._extract_mask_bboxes(mask)
+
+        prompt_map = record.get("_prompt_map", {})
+        prompt_boxes_src = prompt_map.get(z, [])
+        det_bboxes = self._rescale_prompt_boxes(prompt_boxes_src, (src_h, src_w))
+
+        if self.prompt_mode == "gt":
+            bboxes = gt_bboxes
+        elif self.prompt_mode == "det":
+            bboxes = det_bboxes if len(det_bboxes) > 0 else gt_bboxes
+        else:  # hybrid
+            bboxes = det_bboxes if len(det_bboxes) > 0 else gt_bboxes
+
+        bboxes = self._jitter_boxes(bboxes)
+        if len(bboxes) == 0:
+            bboxes = np.array([[0, 0, 1, 1]], dtype=np.float32)
+
+        return {
+            "image": image_rgb,
+            "mask": mask.astype(np.uint8),
+            "bboxes": bboxes.astype(np.float32),
+            "patient_id": sample["patient_id"],
+            "slice_index": z,
+        }
+
+    def get_filter_stats(self) -> Dict[str, Any]:
+        return self._filter_stats.copy()
+
+    def get_kept_patient_ids(self) -> List[str]:
+        return list(self._kept_patient_ids)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        data = self._load_sample(idx)
+
+        if self.transform is not None:
+            data = self.transform(data)
+
+        image = torch.from_numpy(data["image"]).permute(2, 0, 1).float()
+        mask = torch.from_numpy(data["mask"]).unsqueeze(0).float()
+        bboxes = torch.from_numpy(data["bboxes"]).float()
+
+        return {
+            "image": image,
+            "mask": mask,
+            "bboxes": bboxes,
+            "patient_id": data["patient_id"],
+            "slice_index": data["slice_index"],
         }
