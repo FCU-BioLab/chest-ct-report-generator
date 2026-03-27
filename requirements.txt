@@ -1,89 +1,74 @@
 # Chest CT Report Generator - Unified Requirements
-# Includes support for Faster R-CNN, YOLOv7, YOLOv8, and YOLOv11 detection models
-# Updated 2025-10-08: Consolidated YOLOv7 and YOLOv8 medical CT requirements
+#
+# This file intentionally does NOT install torch / torchvision.
+# Install the matching PyTorch build for each machine first.
+# Example:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# After PyTorch is ready, install the commented "PyTorch-dependent" section as needed.
 
-# Core ML/DL Libraries
-
-# Computer Vision and Image Processing
-opencv-python>=4.8.0
-Pillow>=10.0.0
-# segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
-
-# Medical Image Processing
-SimpleITK>=2.2.0
-nibabel>=5.1.0
-pydicom>=2.4.0  # DICOM file handling (required for medical CT processing)
-
-# Data Science and Analysis
+# Core scientific stack
 numpy>=1.24.0
 pandas>=2.0.0
-scikit-learn>=1.3.0
 scipy>=1.10.0
+scikit-learn>=1.3.0
 scikit-image>=0.21.0
 
-# Visualization and Monitoring
+# Medical imaging
+SimpleITK>=2.2.0
+nibabel>=5.1.0
+pydicom>=2.4.0
+
+# Vision / visualization
+opencv-python>=4.8.0
+Pillow>=10.0.0
 matplotlib>=3.7.0
-seaborn>=0.12.0
-tensorboard>=2.13.0
-plotly>=5.15.0
-albumentations>=1.3.0,<1.4.0  # Advanced image augmentation (pinned to 1.3.x to avoid C++ build requirement)
-matplotlib-inline>=0.1.6
+imageio>=2.34.0
+albumentations>=1.3.0,<1.4.0
 
-# ML Training and Fine-tuning
-datasets>=2.13.0
-peft
-huggingface_hub
-bitsandbytes
-accelerate>=0.20.0
-evaluate>=0.4.0
-wandb>=0.15.0  # Experiment tracking (supports YOLOv7 training)
-hydra-core>=1.2.0  # Configuration management (required for MedSAM2 fine-tuning)
-iopath>=0.1.10  # Path management (required for MedSAM2/SAM2)
-transformers>=4.50.0 # Hugging Face Transformers (for LLM integration)
-
-# Utilities and Progress
+# Config / utilities
+PyYAML>=6.0
+python-dotenv>=1.0.0
 tqdm>=4.65.0
-PyYAML>=6.0  # YAML config parsing (required for YOLOv7)
-colorlog>=6.7.0
-wget>=3.2
-gdown>=4.7.0
-psutil>=5.9.0  # System monitoring during training
+hydra-core>=1.3.2
+omegaconf>=2.3.0
+iopath>=0.1.10
 
-# Object Detection and YOLO
-ultralytics>=8.0.0  # YOLOv8/YOLOv11 framework (medical CT tumor detection)
-roboflow  # Dataset management and augmentation (optional)
-supervision>=0.14.0  # Computer vision utilities (optional)
-onnx>=1.14.0  # ONNX model export for deployment
-onnxruntime>=1.15.0  # ONNX runtime for inference
+# Hugging Face / LLM tooling that does not pin torch directly here
+transformers>=4.50.0
+datasets>=2.14.0
+evaluate>=0.4.0
+huggingface_hub>=0.25.0
+nltk>=3.8.1
+ollama>=0.4.0
 
-# YOLOv7 Native Support (for train_yolov7_medical.py)
-# Note: YOLOv7 uses native PyTorch implementation (not Ultralytics)
-# Enhanced YOLOv7 Medical CT Detection Requirements:
-# Core: torch>=1.10.0, torchvision>=0.11.0
-# CV: opencv-python-headless>=4.5.0, albumentations>=1.3.0, Pillow>=9.0.0
-# Visualization: matplotlib>=3.3.0, seaborn>=0.11.0
-# Data: numpy>=1.21.0, pandas>=1.3.0
-# Config: pyyaml>=6.0, tqdm>=4.62.0
-# Medical: pydicom>=2.3.0, SimpleITK>=2.2.0
-# ML Utils: scikit-learn>=1.0.0, scipy>=1.7.0
-# All YOLOv7 dependencies already satisfied by versions above
+# GUI / RAG / document tools
+PyQt6>=6.7.0
+PyMuPDF>=1.24.0
+faiss-cpu>=1.8.0
 
-# RAG and Embeddings
-faiss-cpu
-sentence-transformers
+# Optional non-PyTorch extras for specific scripts
+ffmpeg-python>=0.2.0
+moviepy>=1.0.3
 
-# LLM Integration
-ollama
+# Test / development helpers
+pytest>=7.4.0
 
-# GUI and PDF Processing
-PyQt6
-pymupdf
-
-# Development Tools (Optional)
-pytest>=7.4.0  # Testing framework
-black>=23.7.0  # Code formatting
-flake8>=6.1.0  # Linting
-mypy>=1.5.0  # Type checking
-
-# Packaging
-pyinstaller
+# ---------------------------------------------------------------------------
+# PyTorch-dependent packages
+# Install these only AFTER you manually install the correct torch/torchvision.
+# Keeping them commented avoids pip pulling an incompatible CPU/CUDA torch build.
+# ---------------------------------------------------------------------------
+# accelerate>=0.27.0
+# peft>=0.10.0
+# bitsandbytes>=0.43.0
+# monai>=1.3.0
+# segmentation-models-pytorch>=0.3.0
+# sentence-transformers>=3.0.0
+# lungmask>=0.2.20
+# trl>=0.9.0
+# submitit>=1.5.1
+# tensordict>=0.5.0
+# eva-decord>=0.6.1
+# pycocotools>=2.0.8
+# gradio==3.38.0

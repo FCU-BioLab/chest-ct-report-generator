@@ -1,4 +1,4 @@
-﻿"""
+"""
 Fine-tune Llama-3.2-3B-Instruct for CT Report Generation
 
 Uses LoRA (Low-Rank Adaptation) for efficient fine-tuning.
@@ -112,12 +112,11 @@ def tokenize_function(examples, tokenizer, max_length=2048):
 
 def load_config():
     """Load settings from pipeline_config.yaml."""
-    import yaml
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from config.config_loader import load_config as load_pipeline_config
+
     config_path = Path(__file__).parent.parent / "config" / "pipeline_config.yaml"
-    if config_path.exists():
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    return {}
+    return load_pipeline_config(str(config_path))
 
 
 def main():
@@ -474,5 +473,6 @@ def evaluate_generation(model, tokenizer, val_data_path, max_samples=5, max_new_
 
 if __name__ == "__main__":
     main()
+
 
 

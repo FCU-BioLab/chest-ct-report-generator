@@ -1,7 +1,10 @@
-﻿# Chest CT Report Generator
+# Chest CT Report Generator
 
 胸部 CT 結節偵測、分割、特徵量化與報告生成專案。
 
+## 文件索引
+
+- [外接硬碟 Repo + 內接硬碟 venv 使用說明](instruction.md)
 ## 專案架構
 
 - `detection/retinanet/`
@@ -46,6 +49,20 @@ python -m detection.retinanet.main train --data_path "detection/manifests/datase
 python -m detection.retinanet.main test --data_path "detection/manifests/dataset_lndb.json" --output_dir "results/experiment_1"
 python -m detection.retinanet.inference --input_path "data/patient_01" --model_path "results/experiment_1/model_best.pt" --output_dir "results/patient_01"
 ```
+
+## 分割模組（MedSAM2：Manifest + Prompt）
+
+建議改用 `manifest` 模式（不依賴 `.npz`），可直接串接 detection prompt：
+
+```bash
+python -m segmentation.finetune_medsam2.build_manifest --image_dir "E:/dataset/images" --mask_dir "E:/dataset/masks" --output_json "segmentation/manifests/dataset_segmentation.json" --relative_paths
+
+python -m segmentation.finetune_medsam2.main --data_mode manifest --manifest "segmentation/manifests/dataset_segmentation.json" --prompt_mode hybrid --epochs 100
+```
+
+可選參數：
+- `--det_prompt_json <path>`：載入 detection prompt JSON
+- `--prompt_jitter_px <int>`：訓練時對 prompt bbox 加擾動
 
 ## JSON 生成邏輯 Smoke Test（Windows CMD）
 
