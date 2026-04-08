@@ -260,6 +260,7 @@ def main() -> None:
     parser.add_argument("--score_thresh", type=float, default=0.05, help="collect predictions with score >= this threshold")
     parser.add_argument("--patch_size", type=int, default=32, help="cubic patch size")
     parser.add_argument("--val_patch_size", type=int, nargs=3, default=None, metavar=("H", "W", "D"), help="sliding-window ROI size for full-volume inference")
+    parser.add_argument("--no_cache", action="store_true", help="disable MONAI PersistentDataset disk cache during FPR collection")
     parser.add_argument("--keep_duplicate_as_negative", action="store_true", help="keep duplicate matches (IoU>=0.1 but GT already matched) as negative samples")
     parser.add_argument("--hard_negative_mining", action="store_true", help="keep only hard negatives (high-score, low-IoU, per-scan top-K)")
     parser.add_argument("--hard_negative_min_score", type=float, default=0.3, help="minimum score for hard negatives")
@@ -275,7 +276,7 @@ def main() -> None:
     pos_dir.mkdir(parents=True, exist_ok=True)
     neg_dir.mkdir(parents=True, exist_ok=True)
 
-    from monai.data import PersistentDataset
+    from monai.data import Dataset, PersistentDataset
     from monai.utils import set_determinism
 
     from .config import RetinaNetConfig
@@ -314,11 +315,20 @@ def main() -> None:
         hu_min=config.hu_min,
         hu_max=config.hu_max,
     )
-    dataset = PersistentDataset(
-        data=raw_items,
-        transform=val_transform,
-        cache_dir=str(Path("cache/monai_persistent_cache") / f"fpr_{section_name}"),
-    )
+    if args.no_cache:
+        logger.info("  🧹 停用 PersistentDataset 磁碟快取 (--no_cache)")
+        dataset = Dataset(
+            data=raw_items,
+            transform=val_transform,
+        )
+    else:
+        cache_dir = str(Path("cache/monai_persistent_cache") / f"fpr_{section_name}")
+        logger.info("  📦 使用 PersistentDataset 磁碟快取: %s", cache_dir)
+        dataset = PersistentDataset(
+            data=raw_items,
+            transform=val_transform,
+            cache_dir=cache_dir,
+        )
 
     total_tp, total_fp, total_ignored, samples = collect_from_dataset(
         trainer=trainer,
@@ -358,6 +368,7 @@ def main() -> None:
             "data_path": args.data_path,
             "score_thresh": args.score_thresh,
             "patch_size": args.patch_size,
+            "no_cache": args.no_cache,
             "keep_duplicate_as_negative": args.keep_duplicate_as_negative,
             "hard_negative_mining": args.hard_negative_mining,
             "hard_negative_min_score": args.hard_negative_min_score,

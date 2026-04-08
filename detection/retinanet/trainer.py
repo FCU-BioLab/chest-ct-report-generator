@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -150,6 +150,9 @@ class RetinaNetTrainer:
         logger.info(f"  輸出路徑: {self.output_dir}")
         logger.info(f"  patch_size: {config.patch_size}")
         logger.info(f"  max_boxes_for_crop: {config.max_boxes_for_crop}")
+        logger.info(f"  crop_pos_neg_ratio: {config.crop_pos_ratio}:{config.crop_neg_ratio}")
+        logger.info(f"  train_pos_oversample_weight: {config.train_pos_oversample_weight}")
+        logger.info(f"  train_epoch_samples: {config.train_epoch_samples}")
         logger.info(f"  feature_map_scales: {config.feature_map_scales}")
         logger.info(f"  iou_list: {config.iou_list}")
 
@@ -469,6 +472,8 @@ class RetinaNetTrainer:
                 patch_size=cfg.patch_size,
                 batch_size=cfg.batch_size,
                 max_boxes_for_crop=cfg.max_boxes_for_crop,
+                crop_pos_ratio=cfg.crop_pos_ratio,
+                crop_neg_ratio=cfg.crop_neg_ratio,
             )
 
             cache_dir = Path("cache/monai_persistent_cache")
@@ -497,6 +502,8 @@ class RetinaNetTrainer:
                 patch_size=cfg.patch_size,
                 batch_size=cfg.batch_size,
                 max_boxes_for_crop=cfg.max_boxes_for_crop,
+                crop_pos_ratio=cfg.crop_pos_ratio,
+                crop_neg_ratio=cfg.crop_neg_ratio,
                 spacing=cfg.spacing,
                 hu_min=cfg.hu_min,
                 hu_max=cfg.hu_max,
@@ -504,10 +511,45 @@ class RetinaNetTrainer:
             train_ds = M["Dataset"](train_data, transform=train_transform)
             val_ds = M["Dataset"](val_data, transform=val_transform)
 
+        # Optional case-level oversampling:
+        # increase chance of drawing scans with nodules before patch-level RandCrop.
+        train_sampler = None
+        train_shuffle = True
+        pos_flags = [1 if len((it.get("box", []) or [])) > 0 else 0 for it in train_data]
+        if len(pos_flags) > 0 and (cfg.train_pos_oversample_weight > 1.0 or cfg.train_epoch_samples > 0):
+            sample_weights = [
+                float(cfg.train_pos_oversample_weight) if flag else 1.0
+                for flag in pos_flags
+            ]
+            num_samples = int(cfg.train_epoch_samples) if cfg.train_epoch_samples > 0 else len(sample_weights)
+            train_sampler = WeightedRandomSampler(
+                weights=torch.as_tensor(sample_weights, dtype=torch.double),
+                num_samples=num_samples,
+                replacement=True,
+            )
+            train_shuffle = False
+
+            pos_cnt = int(sum(pos_flags))
+            neg_cnt = int(len(pos_flags) - pos_cnt)
+            weighted_pos = float(cfg.train_pos_oversample_weight) * pos_cnt
+            expected_pos_ratio = weighted_pos / max(weighted_pos + float(neg_cnt), 1.0)
+            logger.info(
+                "  啟用 case-level oversampling: pos_weight=%.3f, epoch_samples=%d",
+                cfg.train_pos_oversample_weight,
+                num_samples,
+            )
+            logger.info(
+                "  預期被抽中正樣本比例約 %.2f%% (dataset pos=%d, neg=%d)",
+                expected_pos_ratio * 100.0,
+                pos_cnt,
+                neg_cnt,
+            )
+
         train_loader = DataLoader(
             train_ds,
             batch_size=1,  # MONAI detection 使用 batch_size=1 配合 no_collation
-            shuffle=True,
+            shuffle=train_shuffle,
+            sampler=train_sampler,
             num_workers=cfg.num_workers,
             pin_memory=torch.cuda.is_available(),
             collate_fn=M["no_collation"],
@@ -525,6 +567,7 @@ class RetinaNetTrainer:
 
         logger.info(f"  訓練集樣本數: {len(train_ds)}")
         logger.info(f"  驗證集樣本數: {len(val_ds)}")
+        logger.info(f"  每個 epoch 訓練 steps: {len(train_loader)}")
         return train_loader, val_loader
 
     def _setup_optimizer(self):
