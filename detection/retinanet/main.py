@@ -51,6 +51,14 @@ def _apply_train_overrides(config, args) -> None:
         config.early_stop_min_delta = args.early_stop_min_delta
     if args.max_boxes_for_crop is not None:
         config.max_boxes_for_crop = args.max_boxes_for_crop
+    if args.crop_pos_ratio is not None:
+        config.crop_pos_ratio = args.crop_pos_ratio
+    if args.crop_neg_ratio is not None:
+        config.crop_neg_ratio = args.crop_neg_ratio
+    if args.train_pos_oversample_weight is not None:
+        config.train_pos_oversample_weight = args.train_pos_oversample_weight
+    if args.train_epoch_samples is not None:
+        config.train_epoch_samples = args.train_epoch_samples
     config.validate()
 
 
@@ -216,6 +224,10 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--early_stop_patience", type=int, default=None, help="early stop patience in epochs (0=disabled)")
     train_p.add_argument("--early_stop_min_delta", type=float, default=None, help="minimum mAP improvement to reset early stop")
     train_p.add_argument("--max_boxes_for_crop", type=int, default=None, help="cap boxes per scan before random crop to reduce RAM")
+    train_p.add_argument("--crop_pos_ratio", type=int, default=None, help="RandCrop positive sampling weight")
+    train_p.add_argument("--crop_neg_ratio", type=int, default=None, help="RandCrop negative sampling weight")
+    train_p.add_argument("--train_pos_oversample_weight", type=float, default=None, help="case-level weight for scans with nodules")
+    train_p.add_argument("--train_epoch_samples", type=int, default=None, help="number of scan-samples per epoch (0=dataset size)")
     train_p.add_argument("--train_ratio", type=float, default=0.8)
     train_p.add_argument("--val_ratio", type=float, default=0.1)
     train_p.add_argument("--test_ratio", type=float, default=0.1)

@@ -132,6 +132,8 @@ def build_rand_transform(
     patch_size: List[int],
     batch_size: int = 2,
     max_boxes_for_crop: int = 8,
+    crop_pos_ratio: int = 4,
+    crop_neg_ratio: int = 1,
 ) -> Compose:
     """
     Random augmentation transforms（每次重新執行，不快取）。
@@ -147,8 +149,8 @@ def build_rand_transform(
             spatial_size=patch_size,
             whole_box=True,
             num_samples=batch_size,
-            pos=1,
-            neg=1,
+            pos=crop_pos_ratio,
+            neg=crop_neg_ratio,
         ),
         # 隨機縮放
         RandZoomBoxd(
@@ -204,6 +206,8 @@ def build_train_transform(
     patch_size: List[int],
     batch_size: int = 2,
     max_boxes_for_crop: int = 8,
+    crop_pos_ratio: int = 4,
+    crop_neg_ratio: int = 1,
     spacing: List[float] = None,
     hu_min: float = -1024.0,
     hu_max: float = 300.0,
@@ -214,6 +218,8 @@ def build_train_transform(
         patch_size=patch_size,
         batch_size=batch_size,
         max_boxes_for_crop=max_boxes_for_crop,
+        crop_pos_ratio=crop_pos_ratio,
+        crop_neg_ratio=crop_neg_ratio,
     )
     return Compose([det, rand])
 

@@ -72,6 +72,13 @@ class RetinaNetConfig:
     patch_size: List[int] = field(default_factory=_default_patch_size)
     val_patch_size: List[int] = field(default_factory=_default_val_patch_size)
     max_boxes_for_crop: int = 8
+    crop_pos_ratio: int = 4
+    crop_neg_ratio: int = 1
+    # Case-level sampling controls.
+    # >1.0 increases sampling probability for scans with at least one box.
+    train_pos_oversample_weight: float = 1.0
+    # Number of scan-samples per epoch when using sampler (0 means use dataset size).
+    train_epoch_samples: int = 0
 
     atss_num_candidates: int = 4
     hn_batch_size_per_image: int = 64
@@ -129,6 +136,14 @@ class RetinaNetConfig:
                 raise ValueError("val_patch_size must be divisible by size_divisible on each axis")
         if self.max_boxes_for_crop <= 0:
             raise ValueError("max_boxes_for_crop must be > 0")
+        if self.crop_pos_ratio <= 0:
+            raise ValueError("crop_pos_ratio must be > 0")
+        if self.crop_neg_ratio <= 0:
+            raise ValueError("crop_neg_ratio must be > 0")
+        if self.train_pos_oversample_weight <= 0:
+            raise ValueError("train_pos_oversample_weight must be > 0")
+        if self.train_epoch_samples < 0:
+            raise ValueError("train_epoch_samples must be >= 0")
         if self.early_stop_patience < 0:
             raise ValueError("early_stop_patience must be >= 0")
         if self.early_stop_min_delta < 0:
