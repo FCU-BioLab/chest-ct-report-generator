@@ -1,7 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RML: Dense nodule, 3.5 mm.
-- Mediastinum: No enlarged lymph nodes.
-- Vessels: Atherosclerotic changes in coronary artery.
-- Pleura: No effusion or thickening.
-- Heart: Normal size, no pericardial effusion.
-- Impression: Dense nodule in RML; coronary artery atherosclerosis. Recommend follow-up in 12 months to confirm stability.

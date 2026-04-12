@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Lungs: Unremarkable, no active lesions.
-- Mediastinum: No lymphadenopathy.
-- Vessels: Unremarkable.
-- Pleura: No effusion or thickening.
-- Heart: Normal size, no pericardial effusion.
-- Bones: No significant lesions.
-- Impression: No active lung lesions.

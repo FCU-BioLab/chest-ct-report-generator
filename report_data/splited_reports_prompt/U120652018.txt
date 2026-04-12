@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Clinical Info: Post-operative follow-up for lung pathology.
-- LLL: Focal interlobular thickening with adjacent surgical stitches; linear infiltration, likely post-inflammatory or post-operative change.
-- Other Lung Fields: No nodules, masses, or significant parenchymal changes.
-- Mediastinum: No lymphadenopathy or abnormalities; heart and great vessels unremarkable.
-- Pleura: No effusion or pneumothorax; chest wall intact.
-- Impression: Post-operative thickening and inflammation in LLL. Stable findings.
-- Recommendation: Clinical follow-up advised.

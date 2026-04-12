@@ -1,4 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RUL opacity, size 18.6 mm.
-- No enlarged mediastinal lymph nodes.
-- Atherosclerotic changes in the aortic arch.

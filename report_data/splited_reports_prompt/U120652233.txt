@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Lungs: A 4.6 mm ground-glass opacity in the right lower lung (se/im 202/37). A small juxtapleural nodule in the right upper lung (se/im 202/15).
-- Mediastinum: No enlarged lymph nodes.
-- Vessels: No atherosclerotic changes.
-- Pleura: No effusion or thickening.
-- Heart: Normal size with no pericardial effusion.
-- Bones: No significant osseous lesions.
-- Impression: Stable 4.6 mm ground-glass opacity in RLL and small juxtapleural nodule in RUL. Recommend 12-month follow-up to confirm stability.

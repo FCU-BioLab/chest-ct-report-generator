@@ -1,7 +1,0 @@
-Generate a CT chest report based on the following segmentation results:
-
-Nodule 1:
-  - Size: 5.8 mm (ESD)
-  - Volume: 102.2 mm³
-  - Mean HU: -650
-  - Type: ground-glass

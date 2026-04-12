@@ -1,7 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RML: Multiple nodules, largest 1.6 cm, with interstitial infiltration suggesting inflammatory or infectious etiology.
-- Cardiovascular: Atherosclerotic plaques in coronary arteries and aortic arch.
-- Mediastinum: Normal contours, no lymphadenopathy or masses.
-- Pleura: No effusion or pneumothorax.
-- Bones: No acute fractures or abnormalities.
-- Impression: RML nodules with suspected inflammatory or infectious etiology; coronary and aortic arch plaques. Recommend clinical correlation and follow-up imaging.

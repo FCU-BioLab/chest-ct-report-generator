@@ -1,4 +1,0 @@
-Write a radiologic report about contrast-enhanced chest CT:
-- Multiple pulmonary nodules, consistent with metastases, stable in size and number compared to 2024/03/27.
-- No significant lymphadenopathy or pleural effusion.
-- Impression: Stable pulmonary metastasis from colon cancer; no pleural or lymph node involvement.

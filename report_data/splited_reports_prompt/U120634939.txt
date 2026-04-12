@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RUL: 7 mm well-circumscribed solid nodule.
-- RLL: Stable 3.6 mm GGO.
-- Mediastinum: Multiple subcentimeter lymph nodes, no significant enlargement.
-- Vessels: Atherosclerotic changes with mild to moderate calcific plaques in coronary arteries.
-- Pleura: No effusion or thickening.
-- Heart: Normal size, no pericardial effusion.
-- Impression: Stable GGO in RLL; recommend follow-up in 12 months to confirm stability.

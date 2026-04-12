@@ -1,7 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Lungs: Small GGO (<6 mm) in LUL and LLL; solid nodule (4.3 mm) in RLL.
-- Mediastinum: No enlarged lymph nodes.
-- Vessels: No significant changes.
-- Pleura: No effusion or thickening.
-- Heart: Normal size, no pericardial effusion.
-- Impression: Small GGO in LUL and LLL; solid nodule in RLL. Recommend follow-up in 12 months to confirm stability.

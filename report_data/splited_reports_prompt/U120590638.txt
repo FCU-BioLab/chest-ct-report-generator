@@ -1,7 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RLL and LLL: Consolidation with air bronchograms, suspicious for pneumonia. No cavitation or necrosis.
-- RML: Infiltration, likely infection or inflammatory change.
-- Pleura: Right and left pleural effusion.
-- Mediastinum: No lymphadenopathy; heart and great vessels unremarkable.
-- Bones: No fractures or destructive lesions.
-- Impression: Pneumonia in RLL and LLL; pleural effusion bilaterally; RML infiltration likely infectious. Recommend clinical correlation and appropriate management.

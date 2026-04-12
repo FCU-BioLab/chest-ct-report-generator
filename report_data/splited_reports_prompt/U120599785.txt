@@ -1,7 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Lungs: Infiltrates and consolidation in RLL and LLL with pleural effusion, likely pneumonia.
-- Heart: Mild cardiomegaly, no coronary plaques.
-- Pleura: Mild effusion, no pneumothorax.
-- Bones: No fractures.
-- Others: Bilateral renal stones.
-- Impression: Pneumonia with pleural effusion; mild cardiomegaly. Recommend clinical correlation.

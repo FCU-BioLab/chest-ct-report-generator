@@ -1,7 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Lungs: Bronchiectasis and honeycombing in bilateral lower lungs, consistent with UIP and IPF. Stable compared to 2023/09/19.
-- Mediastinum: Subcentimeter reactive lymph nodes.
-- Vessels: Atherosclerotic plaques in coronary artery and aortic arch.
-- Pleura: No effusion or thickening.
-- Heart: Cardiomegaly.
-- Impression: UIP/IPF with stable findings in lower lungs; coronary artery plaques; cardiomegaly. Recommend clinical correlation and cardiac ultrasound.

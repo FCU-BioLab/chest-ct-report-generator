@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Mediastinum: Post-surgical changes from anterior mediastinal tumor excision and pericardectomy; no recurrent thymoma. Enlarged lymph nodes, likely reactive or residual.
-- RML: Post-surgical changes from wedge resection.
-- RLL: Smaller consolidation, reduced size compared to 2024/03/18, indicating treatment response.
-- Pleura: No effusion or pneumothorax; post-surgical changes noted.
-- Heart: Normal size; mild coronary atherosclerosis.
-- Impression: Stable post-surgical mediastinal changes, no recurrent thymoma; reactive lymph nodes; reduced RLL consolidation indicating treatment response.
-- Recommendation: Continue clinical follow-up; further imaging if needed.

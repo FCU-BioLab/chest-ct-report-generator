@@ -1,5 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Lungs: Bilateral honeycombing, more pronounced in lower lobes, suggestive of interstitial lung disease (e.g., idiopathic pulmonary fibrosis).
-- Mediastinum: No significant lymphadenopathy.
-- Heart: Atherosclerotic plaques in coronary artery and aortic arch.
-- Impression: Extensive honeycombing consistent with interstitial lung disease; coronary artery plaques. Recommend clinical correlation.
