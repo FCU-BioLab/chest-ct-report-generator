@@ -1,6 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RUL: Multiple nodules, largest 8 mm with surrounding infiltration. Suggest infection, inflammation, or malignancy; recommend further evaluation.
-- LLL: Calcified nodule, 0.4 mm, likely benign granuloma.
-- Mediastinum: Intact, no lymphadenopathy.
-- Cardiovascular: Atherosclerotic plaques in coronary artery and aortic arch.
-- Impression: Nodules in RUL with infiltration; calcified nodule in LLL likely benign; coronary artery plaques.

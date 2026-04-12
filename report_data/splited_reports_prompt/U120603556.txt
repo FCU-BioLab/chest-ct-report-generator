@@ -1,6 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- LUL: Perilobular consolidation with GGO, 3.9 cm, suggestive of organizing pneumonia.
-- Other lobes: Multifocal opacities (2.0-3.0 cm), consistent with pneumonia or diffuse inflammation.
-- Mediastinum: No enlarged lymph nodes.
-- Heart: Cardiomegaly, coronary plaques.
-- Impression: Organizing pneumonia in LUL; multifocal pneumonia. Recommend clinical correlation.

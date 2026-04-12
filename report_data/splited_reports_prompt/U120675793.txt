@@ -1,1 +1,0 @@
-Generate a non-contrast chest CT report for a patient with abnormal GGO: bronchiectasis with opacities in the RML, left lingular segment, RLL, and LLL, suggesting chronic inflammation with possible infection; no pleural effusion, enlarged lymph nodes, or vascular abnormalities; heart and osseous structures normal. Recommend clinical and imaging follow-up.

@@ -1,6 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RLL: Small GGO and juxtapleura nodule, all <6 mm.
-- Mediastinum: No enlarged lymph nodes.
-- Vessels: No atherosclerotic changes in great vessels.
-- Pleura: No effusion or thickening.
-- Impression: Small GGO and nodule in RLL; recommend follow-up in 12 months to confirm stability.

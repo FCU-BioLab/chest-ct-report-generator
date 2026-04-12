@@ -1,6 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- LUL and LLL: Focal interlobular thickening with surgical stitches, stable since 2023/03. Small GGO, 3 mm, in LUL.
-- Other lung fields: No new nodules or masses.
-- Mediastinum: No lymphadenopathy.
-- Pleura: No effusion or pneumothorax.
-- Impression: Stable post-operative changes in LUL and LLL; small GGO in LUL. Recommend follow-up imaging in 6 months.

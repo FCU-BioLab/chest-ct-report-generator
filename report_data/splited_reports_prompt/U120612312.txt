@@ -1,6 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Lungs: Linear infiltrates in RLL, likely post-inflammatory. No nodules or discrete lesions. Stable compared to 2023/07/10.
-- Mediastinum: No masses or lymphadenopathy. Post-surgical changes consistent with subtotal esophagectomy and gastric tube reconstruction. No anastomotic leak or fluid collection.
-- Cardiovascular: Coronary artery plaques.
-- Bones: No lytic or blastic lesions.
-- Impression: Post-inflammatory RLL changes; no recurrent disease; stable compared to 2023/07/10. Recommend oncologic follow-up.

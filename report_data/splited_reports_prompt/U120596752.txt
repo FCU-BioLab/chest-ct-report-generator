@@ -1,5 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Heart: Cardiomegaly, aortic arch dilation (5.2 cm), atherosclerotic plaques.
-- Lungs: Large GGO in LLL (18.6 cm), bilateral subpleural reticulation, suggestive of interstitial lung disease or fibrosis.
-- Abdomen: Suspicious RLQ mass, suggest abdomen CT. Hepatic and renal cysts, suggest contrast CT.
-- Impression: Cardiomegaly, LLL GGO, interstitial lung findings, and RLQ mass. Recommend further imaging.

@@ -1,5 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- GGO opacities in both lungs, stable compared to 2024/03/18.
-- No lymphadenopathy.
-- Atherosclerotic plaques in coronary artery.
-- Impression: Stable GGO opacities and coronary artery plaques.

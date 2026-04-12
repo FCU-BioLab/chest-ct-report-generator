@@ -1,1 +1,0 @@
-Generate a non-contrast chest CT report: findings include unremarkable lungs, subcentimeter reactive mediastinal lymph nodes, atherosclerotic plaques in coronary arteries, and a stable small left adrenal gland nodule (compared to prior CT from 2021/10/07). Recommend follow-up chest CT in 12 months to assess stability.

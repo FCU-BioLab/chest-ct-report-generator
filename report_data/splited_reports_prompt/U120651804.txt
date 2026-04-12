@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Clinic Info: Esophageal SCC, s/p neoadjuvant CCRT.
-- Lungs: 17 mm GGO in RML; additional GGO opacities and linear infiltration in RLL, suggest R/O inflammatory/infectious or radiation changes. Recommend clinical correlation and follow-up imaging.
-- Esophagus: Post-CCRT changes in mid-esophagus; no discrete mass or significant thickening.
-- Mediastinum: No masses or lymphadenopathy; post-surgical changes in esophageal bed with gastric tube reconstruction.
-- Cardiovascular: Atherosclerotic plaques in coronary artery.
-- Bones: Intact, no lytic or blastic lesions.
-- Impression: Stable RML GGO; new RLL GGO and infiltration, likely inflammatory or radiation changes; post-CCRT esophageal changes.

@@ -1,1 +1,0 @@
-Generate a non-contrast chest CT report for a 7.4 mm GGO in the RUL, a 3.5 mm nodule in the left lingular lobe, and atherosclerotic plaques in the coronary artery. No significant findings in mediastinum, pleura, heart, or bones. Impression: Stable pulmonary findings, suggest follow-up in 12 months and cardiac sono for evaluation.

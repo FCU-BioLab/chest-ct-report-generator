@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RUL: Small 3 mm GGO.
-- Left Lingular Lobe: Linear infiltration, likely post-inflammatory.
-- Mediastinum: No enlarged lymph nodes.
-- Vessels: No atherosclerotic changes in coronary arteries or aortic arch.
-- Pleura: No effusion or thickening.
-- Heart: Normal size, no pericardial effusion.
-- Impression: Small GGO in RUL; linear infiltration in left lingular lobe, likely post-inflammatory. Recommend follow-up to confirm stability.

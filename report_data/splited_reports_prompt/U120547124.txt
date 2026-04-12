@@ -1,5 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- Multiple pulmonary nodules, largest 11.7 mm in RLL.
-- Thick-walled cavity lesion, 55.4 mm, in RUL.
-- Atherosclerotic plaques in coronary arteries.
-- Impression: Nodules and cavity lesion suggest infection, inflammation, or metastasis. Recommend PET-CT or biopsy.

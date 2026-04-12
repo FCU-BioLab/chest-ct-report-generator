@@ -1,8 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RML: Linear infiltration, possibly due to chronic inflammation or previous infections.
-- LLL: Mild bronchiectasis and linear infiltration.
-- Cardiovascular: Mild cardiomegaly and atherosclerotic plaques in coronary arteries and aortic arch.
-- Mediastinum: No significant lymphadenopathy or masses.
-- Pleura: No effusion or pneumothorax.
-- Bones: No fractures or significant abnormalities.
-- Impression: Mild bronchiectasis in RML and LLL; mild cardiomegaly with coronary atherosclerosis. Recommend pulmonology and cardiology follow-ups and clinical correlation for infiltration in LLL.

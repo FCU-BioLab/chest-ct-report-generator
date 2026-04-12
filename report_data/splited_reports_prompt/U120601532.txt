@@ -1,7 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- RLL: Subpleural reticulation, suggestive of interstitial changes or early fibrosis.
-- Mediastinum: No lymphadenopathy.
-- Heart: Normal size, coronary artery plaques.
-- Pleura: No effusion or pneumothorax.
-- Bones: No significant abnormalities.
-- Impression: Subpleural reticulation in RLL; coronary artery plaques. Recommend clinical correlation.

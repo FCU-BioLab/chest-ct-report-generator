@@ -1,6 +1,0 @@
-Write a radiologic report about non-contrast chest CT:
-- LLL: GGO, 6.0 mm, stable since 2023/08/21, likely benign.
-- Mediastinum: No lymphadenopathy.
-- Pleura: No effusion or pneumothorax.
-- Cardiovascular: Atherosclerotic plaques in coronary artery.
-- Impression: Stable GGO in LLL; coronary artery plaques. Recommend continued monitoring.

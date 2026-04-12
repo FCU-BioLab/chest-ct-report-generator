@@ -1,9 +1,0 @@
-Write a brief radiologic report for a non-contrast chest CT:
-- Clinical Info: Abnormal GGO over chest CT.
-- Findings:
-  1. Small dense nodule in the RML.
-  2. Atherosclerotic plaques in coronary artery.
-  3. No mediastinal lymphadenopathy, pleural effusion, or significant soft tissue/bone abnormalities.
-- Impression:
-  1. Dense nodule in RML; suggest follow-up in 12 months for stability.
-  2. Coronary artery atherosclerosis; recommend evaluation if clinically indicated.
