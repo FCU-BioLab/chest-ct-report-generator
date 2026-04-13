@@ -151,6 +151,37 @@ def _summarize_samples(samples: Sequence[Dict]) -> Dict:
     }
 
 
+def _compute_best_threshold(y_true: np.ndarray, probs: np.ndarray) -> Dict[str, float]:
+    best = {
+        "threshold": 0.5,
+        "f1": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+    }
+    for thresh in np.arange(0.05, 0.951, 0.01):
+        pred = probs >= thresh
+        tp = int(np.sum((pred == 1) & (y_true == 1)))
+        fp = int(np.sum((pred == 1) & (y_true == 0)))
+        fn = int(np.sum((pred == 0) & (y_true == 1)))
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(tp + fn, 1)
+        f1 = 2.0 * precision * recall / max(precision + recall, 1e-8)
+        if f1 > best["f1"]:
+            best = {
+                "threshold": float(round(thresh, 2)),
+                "f1": float(f1),
+                "precision": float(precision),
+                "recall": float(recall),
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+            }
+    return best
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the FPR classifier.")
     parser.add_argument("--pos_dir", default="detection/results/fpr_dataset/positive", help="positive patch directory")
@@ -291,6 +322,7 @@ def main() -> None:
 
     best_val_f1 = -1.0
     best_epoch = 0
+    best_threshold = 0.5
     patience_counter = 0
     history: List[Dict] = []
 
@@ -323,7 +355,8 @@ def main() -> None:
         model.eval()
         val_loss = 0.0
         val_total = 0
-        val_tp = val_fp = val_fn = val_tn = 0
+        val_probs_list: List[np.ndarray] = []
+        val_labels_list: List[np.ndarray] = []
 
         with torch.no_grad():
             for batch_x, batch_y in tqdm(val_loader, desc=f"Epoch {epoch + 1}/{args.epochs} [Val]", leave=False, ncols=100):
@@ -334,18 +367,31 @@ def main() -> None:
                 loss = _compute_loss(logits, batch_y, args.loss, args.focal_gamma)
                 val_loss += loss.item() * batch_x.size(0)
                 val_total += batch_x.size(0)
-
-                preds = logits.argmax(dim=1)
-                val_tp += int(((preds == 1) & (batch_y == 1)).sum().item())
-                val_fp += int(((preds == 1) & (batch_y == 0)).sum().item())
-                val_fn += int(((preds == 0) & (batch_y == 1)).sum().item())
-                val_tn += int(((preds == 0) & (batch_y == 0)).sum().item())
+                probs = torch.softmax(logits, dim=1)[:, 1]
+                val_probs_list.append(probs.detach().cpu().numpy())
+                val_labels_list.append(batch_y.detach().cpu().numpy())
 
         val_loss /= max(val_total, 1)
-        val_precision = val_tp / max(val_tp + val_fp, 1)
-        val_recall = val_tp / max(val_tp + val_fn, 1)
-        val_f1 = 2.0 * val_precision * val_recall / max(val_precision + val_recall, 1e-6)
-        val_acc = (val_tp + val_tn) / max(val_total, 1)
+        y_val = np.concatenate(val_labels_list).astype(np.int64) if val_labels_list else np.zeros((0,), dtype=np.int64)
+        p_val = np.concatenate(val_probs_list).astype(np.float32) if val_probs_list else np.zeros((0,), dtype=np.float32)
+        val_best = _compute_best_threshold(y_val, p_val) if len(y_val) > 0 else {
+            "threshold": 0.5,
+            "f1": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+        }
+        val_threshold = float(val_best["threshold"])
+        val_f1 = float(val_best["f1"])
+        val_precision = float(val_best["precision"])
+        val_recall = float(val_best["recall"])
+        if len(y_val) > 0:
+            val_pred = p_val >= val_threshold
+            val_acc = float(np.mean(val_pred == y_val))
+        else:
+            val_acc = 0.0
 
         epoch_info = {
             "epoch": epoch + 1,
@@ -356,17 +402,19 @@ def main() -> None:
             "val_precision": val_precision,
             "val_recall": val_recall,
             "val_f1": val_f1,
+            "val_best_threshold": val_threshold,
         }
         history.append(epoch_info)
 
         logger.info(
-            "Epoch %02d/%d | train_loss=%.4f train_acc=%.3f | val_loss=%.4f val_f1=%.3f (P=%.3f R=%.3f)",
+            "Epoch %02d/%d | train_loss=%.4f train_acc=%.3f | val_loss=%.4f val_f1=%.3f @ %.2f (P=%.3f R=%.3f)",
             epoch + 1,
             args.epochs,
             train_loss,
             train_acc,
             val_loss,
             val_f1,
+            val_threshold,
             val_precision,
             val_recall,
         )
@@ -374,7 +422,9 @@ def main() -> None:
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             best_epoch = epoch + 1
+            best_threshold = val_threshold
             patience_counter = 0
+            output_dir.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -382,6 +432,7 @@ def main() -> None:
                     "val_f1": best_val_f1,
                     "val_precision": val_precision,
                     "val_recall": val_recall,
+                    "best_threshold": best_threshold,
                     "loss": args.loss,
                     "focal_gamma": args.focal_gamma,
                     "model_type": model_type,
@@ -395,12 +446,14 @@ def main() -> None:
             logger.info("Early stopping at epoch %d", epoch + 1)
             break
 
+    output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "training_history.json", "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2, ensure_ascii=False)
 
     logger.info("Training finished")
     logger.info("  best_epoch: %d", best_epoch)
     logger.info("  best_val_f1: %.4f", best_val_f1)
+    logger.info("  best_threshold: %.2f", best_threshold)
     logger.info("  model: %s", output_dir / "model_best.pt")
 
 
