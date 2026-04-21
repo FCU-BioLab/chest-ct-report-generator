@@ -94,6 +94,7 @@ def _build_samples(pos_dir: Path, neg_dir: Path, metadata: Dict) -> List[Dict]:
                     "source_split": meta.get("source_split", "unknown"),
                     "score": meta.get("score"),
                     "iou": meta.get("iou"),
+                    "neg_type": meta.get("neg_type"),
                     "pred_box_yxz": pred_box,
                 }
             )
@@ -143,11 +144,16 @@ def _compute_loss(logits: torch.Tensor, targets: torch.Tensor, loss_name: str, g
 def _summarize_samples(samples: Sequence[Dict]) -> Dict:
     n_pos = int(sum(sample["label_id"] for sample in samples))
     n_total = len(samples)
+    neg_counts = defaultdict(int)
+    for sample in samples:
+        if sample["label_id"] == 0:
+            neg_counts[str(sample.get("neg_type") or "unknown")] += 1
     return {
         "n_samples": n_total,
         "n_positive": n_pos,
         "n_negative": n_total - n_pos,
         "n_scans": len({sample["scan_id"] for sample in samples}),
+        "negative_breakdown": dict(sorted(neg_counts.items())),
     }
 
 
@@ -182,6 +188,33 @@ def _compute_best_threshold(y_true: np.ndarray, probs: np.ndarray) -> Dict[str, 
     return best
 
 
+def _infer_negative_type(
+    sample: Dict,
+    hard_negative_score_thresh: float,
+    hard_negative_iou_max: float,
+    near_miss_iou_min: float,
+    near_miss_iou_max: float,
+) -> str:
+    neg_type = sample.get("neg_type")
+    if isinstance(neg_type, str) and neg_type:
+        return neg_type
+    score = sample.get("score")
+    iou = sample.get("iou")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    try:
+        iou = float(iou) if iou is not None else None
+    except (TypeError, ValueError):
+        iou = None
+    if score is not None and score >= hard_negative_score_thresh and (iou is None or iou <= hard_negative_iou_max):
+        return "hard_negative"
+    if iou is not None and near_miss_iou_min < iou <= near_miss_iou_max:
+        return "near_miss_negative"
+    return "easy_negative"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the FPR classifier.")
     parser.add_argument("--pos_dir", default="detection/results/fpr_dataset/positive", help="positive patch directory")
@@ -199,9 +232,13 @@ def main() -> None:
     parser.add_argument("--loss", choices=["ce", "focal"], default="focal", help="classification loss")
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="gamma for focal loss")
     parser.add_argument("--allowed_source_splits", nargs="*", default=["training"], help="metadata source splits allowed for FPR training")
-    parser.add_argument("--hard_negative_weight", type=float, default=3.0, help="extra sampling weight multiplier for hard negatives")
+    parser.add_argument("--hard_negative_weight", type=float, default=2.0, help="extra sampling weight multiplier for hard negatives")
+    parser.add_argument("--near_miss_weight", type=float, default=1.5, help="extra sampling weight multiplier for near-miss negatives")
+    parser.add_argument("--easy_negative_weight", type=float, default=1.0, help="extra sampling weight multiplier for easy negatives")
     parser.add_argument("--hard_negative_score_thresh", type=float, default=0.5, help="detector score threshold defining hard negatives")
     parser.add_argument("--hard_negative_iou_max", type=float, default=0.05, help="maximum IoU for hard negatives")
+    parser.add_argument("--near_miss_iou_min", type=float, default=0.05, help="minimum IoU for near-miss negatives")
+    parser.add_argument("--near_miss_iou_max", type=float, default=0.20, help="maximum IoU for near-miss negatives")
     parser.add_argument("--fpr_model_type", choices=["3d", "2.5d"], default="3d", help="FPR backbone input type")
     args = parser.parse_args()
 
@@ -214,6 +251,17 @@ def main() -> None:
     metadata = _load_metadata(metadata_path) if metadata_path.exists() else {"samples": []}
     samples = _build_samples(pos_dir, neg_dir, metadata)
     samples = _filter_by_source_split(samples, args.allowed_source_splits)
+    for sample in samples:
+        if sample["label_id"] == 0:
+            sample["neg_type"] = _infer_negative_type(
+                sample,
+                hard_negative_score_thresh=args.hard_negative_score_thresh,
+                hard_negative_iou_max=args.hard_negative_iou_max,
+                near_miss_iou_min=args.near_miss_iou_min,
+                near_miss_iou_max=args.near_miss_iou_max,
+            )
+        else:
+            sample["neg_type"] = "positive"
 
     if not samples:
         raise RuntimeError("No FPR patches found. Run collect_fpr_data.py first.")
@@ -252,26 +300,28 @@ def main() -> None:
     n_pos = int(np.sum(train_labels == 1))
     n_neg = int(np.sum(train_labels == 0))
     sample_weights = np.where(train_labels == 1, 1.0 / max(n_pos, 1), 1.0 / max(n_neg, 1))
-    if args.hard_negative_weight > 1.0:
-        hard_neg_flags = []
-        for sample in train_samples:
-            if sample["label_id"] != 0:
-                hard_neg_flags.append(False)
-                continue
-            score = sample.get("score")
-            iou = sample.get("iou")
-            score_ok = (score is not None) and (float(score) >= args.hard_negative_score_thresh)
-            iou_ok = (iou is None) or (float(iou) <= args.hard_negative_iou_max)
-            hard_neg_flags.append(score_ok and iou_ok)
-        hard_neg_flags = np.asarray(hard_neg_flags, dtype=bool)
-        sample_weights[hard_neg_flags] *= float(args.hard_negative_weight)
+    neg_type_counts = defaultdict(int)
+    for idx, sample in enumerate(train_samples):
+        if sample["label_id"] != 0:
+            continue
+        neg_type = sample.get("neg_type") or "easy_negative"
+        train_samples[idx]["neg_type"] = neg_type
+        neg_type_counts[neg_type] += 1
+        if neg_type == "hard_negative":
+            sample_weights[idx] *= float(args.hard_negative_weight)
+        elif neg_type == "near_miss_negative":
+            sample_weights[idx] *= float(args.near_miss_weight)
+        else:
+            sample_weights[idx] *= float(args.easy_negative_weight)
+    if n_neg > 0:
         logger.info(
-            "Hard-negative weighting: +%.2fx for %d/%d train negatives (score>=%.2f, iou<=%.2f)",
+            "Negative sampling weights: hard=%.2fx (%d) | near_miss=%.2fx (%d) | easy=%.2fx (%d)",
             float(args.hard_negative_weight),
-            int(np.sum(hard_neg_flags)),
-            int(n_neg),
-            float(args.hard_negative_score_thresh),
-            float(args.hard_negative_iou_max),
+            int(neg_type_counts.get("hard_negative", 0)),
+            float(args.near_miss_weight),
+            int(neg_type_counts.get("near_miss_negative", 0)),
+            float(args.easy_negative_weight),
+            int(neg_type_counts.get("easy_negative", 0)),
         )
     sampler = WeightedRandomSampler(
         weights=torch.as_tensor(sample_weights, dtype=torch.double),
@@ -311,8 +361,12 @@ def main() -> None:
                 "device": str(device),
                 "allowed_source_splits": args.allowed_source_splits,
                 "hard_negative_weight": args.hard_negative_weight,
+                "near_miss_weight": args.near_miss_weight,
+                "easy_negative_weight": args.easy_negative_weight,
                 "hard_negative_score_thresh": args.hard_negative_score_thresh,
                 "hard_negative_iou_max": args.hard_negative_iou_max,
+                "near_miss_iou_min": args.near_miss_iou_min,
+                "near_miss_iou_max": args.near_miss_iou_max,
                 "model_type": model_type,
             },
             f,

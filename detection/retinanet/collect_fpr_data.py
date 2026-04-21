@@ -4,6 +4,7 @@ Collect FPR patches from RetinaNet predictions.
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+import SimpleITK as sitk
 import torch
 from tqdm import tqdm
 
@@ -91,6 +93,39 @@ def _safe_stem(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value)[:80]
 
 
+def _load_lung_mask_yxz(mask_path: Path) -> np.ndarray:
+    mask_img = sitk.ReadImage(str(mask_path))
+    mask_arr_zyx = sitk.GetArrayFromImage(mask_img)
+    if mask_arr_zyx.ndim != 3:
+        raise ValueError(f"Expected 3D lung mask, got shape={mask_arr_zyx.shape}")
+    return (mask_arr_zyx.transpose(1, 2, 0) > 0).astype(np.float32)
+
+
+def _classify_negative_type(
+    pred_score: float,
+    best_iou: float,
+    hard_negative_min_score: float,
+    hard_negative_iou_max: float,
+    near_miss_iou_min: float,
+    near_miss_iou_max: float,
+) -> str:
+    if pred_score >= hard_negative_min_score and best_iou <= hard_negative_iou_max:
+        return "hard_negative"
+    if near_miss_iou_min < best_iou <= near_miss_iou_max:
+        return "near_miss_negative"
+    return "easy_negative"
+
+
+def _keep_easy_negative(scan_id: str, pred_index: int, keep_ratio: float) -> bool:
+    if keep_ratio >= 1.0:
+        return True
+    if keep_ratio <= 0.0:
+        return False
+    digest = hashlib.md5(f"{scan_id}:{pred_index}".encode("utf-8")).hexdigest()
+    value = int(digest[:8], 16) / float(0xFFFFFFFF)
+    return value < keep_ratio
+
+
 def collect_from_dataset(
     trainer,
     dataset,
@@ -106,6 +141,13 @@ def collect_from_dataset(
     hard_negative_min_score: float,
     hard_negative_iou_max: float,
     hard_negative_max_per_scan: int,
+    near_miss_iou_min: float,
+    near_miss_iou_max: float,
+    easy_negative_keep_ratio: float,
+    hard_negative_only: bool,
+    lung_mask_dir: Path | None,
+    require_lung_mask: bool,
+    lung_mask_min_overlap: float,
 ) -> Tuple[int, int, int, List[Dict]]:
     total_tp = 0
     total_fp = 0
@@ -119,8 +161,18 @@ def collect_from_dataset(
             scan_id = _get_scan_id(record)
             scan_name = _safe_stem(scan_id)
             image_path = str(record.get("image", ""))
+            lung_mask = None
+            lung_mask_path = None
 
             try:
+                if lung_mask_dir is not None:
+                    candidate_mask_path = lung_mask_dir / f"{scan_id}.mhd"
+                    if candidate_mask_path.exists():
+                        lung_mask = _load_lung_mask_yxz(candidate_mask_path)
+                        lung_mask_path = str(candidate_mask_path)
+                    elif require_lung_mask:
+                        raise FileNotFoundError(f"Missing lung mask: {candidate_mask_path}")
+
                 data_item = dataset[idx]
                 img_tensor = data_item["image"].to(trainer.device)
                 gt_boxes = data_item[trainer.detector.target_box_key].cpu().numpy()
@@ -143,12 +195,18 @@ def collect_from_dataset(
                 if len(pred_boxes) == 0:
                     continue
 
+                if lung_mask is not None and lung_mask.shape != tuple(img_tensor[0].shape):
+                    raise ValueError(
+                        f"Lung mask shape {lung_mask.shape} does not match image shape {tuple(img_tensor[0].shape)}"
+                    )
+
                 order = np.argsort(-pred_scores)
                 pred_boxes = pred_boxes[order]
                 pred_scores = pred_scores[order]
                 img_np = img_tensor[0].cpu().numpy()
                 gt_matched = set()
                 neg_saved_this_scan = 0
+                hard_neg_saved_this_scan = 0
 
                 for pred_index, (pred_box, pred_score) in enumerate(zip(pred_boxes, pred_scores)):
                     best_iou = 0.0
@@ -170,35 +228,92 @@ def collect_from_dataset(
                         (pred_box[2] + pred_box[5]) / 2.0,
                     )
                     patch = crop_patch(img_np, center, patch_size)
-
                     is_duplicate_match = is_candidate_match and not is_tp
                     hard_negative_candidate = (not is_tp) and (not is_duplicate_match)
                     hard_negative_selected = False
                     hard_negative_reason = None
+                    neg_type = None
+                    lung_patch = None
+                    lung_overlap = None
+                    if lung_mask is not None:
+                        lung_patch = crop_patch(lung_mask, center, patch_size)
+                        lung_overlap = float(lung_patch.mean())
+                        if lung_overlap < lung_mask_min_overlap:
+                            label = "ignored"
+                            save_dir = None
+                            hard_negative_reason = "lung_overlap_below_min"
+                            neg_type = "outside_lung"
+                            total_ignored += 1
+                            filename = (
+                                f"{section_name}_{scan_name}_pred{pred_index:03d}"
+                                f"_iou{best_iou:.3f}_s{pred_score:.3f}.npy"
+                            )
+                            metadata.append(
+                                {
+                                    "filename": filename,
+                                    "relative_path": None,
+                                    "label": label,
+                                    "score": float(pred_score),
+                                    "iou": float(best_iou),
+                                    "matched_gt_index": int(best_gt_index),
+                                    "is_candidate_match": bool(is_candidate_match),
+                                    "is_duplicate_match": bool(is_duplicate_match),
+                                    "hard_negative_mining": bool(hard_negative_mining),
+                                    "hard_negative_candidate": bool(hard_negative_candidate),
+                                    "hard_negative_selected": bool(hard_negative_selected),
+                                    "hard_negative_reason": hard_negative_reason,
+                                    "neg_type": neg_type,
+                                    "scan_id": scan_id,
+                                    "seriesuid": record.get("seriesuid"),
+                                    "lndb_id": record.get("lndb_id"),
+                                    "source_image": image_path,
+                                    "source_split": section_name,
+                                    "scan_index_in_split": idx,
+                                    "pred_box_yxz": [float(v) for v in pred_box.tolist()],
+                                    "center_yxz": [float(v) for v in center],
+                                    "patch_size": patch_size,
+                                    "lung_mask_path": lung_mask_path,
+                                    "lung_overlap": lung_overlap,
+                                }
+                            )
+                            continue
+                        patch = patch * lung_patch
+
                     if is_tp:
                         label = "positive"
                         save_dir = pos_dir
+                        neg_type = "positive"
                     elif is_duplicate_match and not keep_duplicate_as_negative:
                         label = "ignored"
                         save_dir = None
+                        neg_type = "duplicate_match"
                     else:
                         label = "negative"
                         save_dir = neg_dir
-                        if hard_negative_mining:
-                            if pred_score < hard_negative_min_score:
-                                label = "ignored"
-                                save_dir = None
-                                hard_negative_reason = "score_below_min"
-                            elif best_iou > hard_negative_iou_max:
-                                label = "ignored"
-                                save_dir = None
-                                hard_negative_reason = "iou_above_max"
-                            elif hard_negative_max_per_scan > 0 and neg_saved_this_scan >= hard_negative_max_per_scan:
+                        neg_type = _classify_negative_type(
+                            float(pred_score),
+                            float(best_iou),
+                            hard_negative_min_score,
+                            hard_negative_iou_max,
+                            near_miss_iou_min,
+                            near_miss_iou_max,
+                        )
+                        if hard_negative_only and neg_type != "hard_negative":
+                            label = "ignored"
+                            save_dir = None
+                            hard_negative_reason = "hard_negative_only_filtered"
+                        elif neg_type == "hard_negative":
+                            if hard_negative_max_per_scan > 0 and hard_neg_saved_this_scan >= hard_negative_max_per_scan:
                                 label = "ignored"
                                 save_dir = None
                                 hard_negative_reason = "per_scan_limit"
                             else:
                                 hard_negative_selected = True
+                        elif hard_negative_mining and neg_type == "easy_negative":
+                            if not _keep_easy_negative(scan_id, pred_index, easy_negative_keep_ratio):
+                                label = "ignored"
+                                save_dir = None
+                                hard_negative_reason = "easy_negative_subsampled"
 
                     filename = (
                         f"{section_name}_{scan_name}_pred{pred_index:03d}"
@@ -212,6 +327,8 @@ def collect_from_dataset(
                     elif label == "negative":
                         total_fp += 1
                         neg_saved_this_scan += 1
+                        if neg_type == "hard_negative":
+                            hard_neg_saved_this_scan += 1
                     else:
                         total_ignored += 1
 
@@ -229,6 +346,7 @@ def collect_from_dataset(
                             "hard_negative_candidate": bool(hard_negative_candidate),
                             "hard_negative_selected": bool(hard_negative_selected),
                             "hard_negative_reason": hard_negative_reason,
+                            "neg_type": neg_type,
                             "scan_id": scan_id,
                             "seriesuid": record.get("seriesuid"),
                             "lndb_id": record.get("lndb_id"),
@@ -238,6 +356,8 @@ def collect_from_dataset(
                             "pred_box_yxz": [float(v) for v in pred_box.tolist()],
                             "center_yxz": [float(v) for v in center],
                             "patch_size": patch_size,
+                            "lung_mask_path": lung_mask_path,
+                            "lung_overlap": lung_overlap,
                         }
                     )
             except Exception as exc:
@@ -266,6 +386,13 @@ def main() -> None:
     parser.add_argument("--hard_negative_min_score", type=float, default=0.3, help="minimum score for hard negatives")
     parser.add_argument("--hard_negative_iou_max", type=float, default=0.05, help="maximum IoU for hard negatives")
     parser.add_argument("--hard_negative_max_per_scan", type=int, default=20, help="max negatives kept per scan when hard-negative mining is enabled (0=unlimited)")
+    parser.add_argument("--near_miss_iou_min", type=float, default=0.05, help="minimum IoU for near-miss negatives")
+    parser.add_argument("--near_miss_iou_max", type=float, default=0.20, help="maximum IoU for near-miss negatives")
+    parser.add_argument("--easy_negative_keep_ratio", type=float, default=0.2, help="deterministic keep ratio for easy negatives during hard-negative mining")
+    parser.add_argument("--hard_negative_only", action="store_true", help="keep only detector high-score low-IoU false positives as negatives")
+    parser.add_argument("--lung_mask_dir", default=None, help="directory containing lung masks named <seriesuid>.mhd")
+    parser.add_argument("--require_lung_mask", action="store_true", help="skip/error when lung mask is missing")
+    parser.add_argument("--lung_mask_min_overlap", type=float, default=0.05, help="minimum fraction of patch voxels inside lung mask")
     parser.add_argument("--device", default="cuda", help="device")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
     args = parser.parse_args()
@@ -345,10 +472,20 @@ def main() -> None:
         hard_negative_min_score=args.hard_negative_min_score,
         hard_negative_iou_max=args.hard_negative_iou_max,
         hard_negative_max_per_scan=args.hard_negative_max_per_scan,
+        near_miss_iou_min=args.near_miss_iou_min,
+        near_miss_iou_max=args.near_miss_iou_max,
+        easy_negative_keep_ratio=args.easy_negative_keep_ratio,
+        hard_negative_only=args.hard_negative_only,
+        lung_mask_dir=Path(args.lung_mask_dir) if args.lung_mask_dir else None,
+        require_lung_mask=args.require_lung_mask,
+        lung_mask_min_overlap=args.lung_mask_min_overlap,
     )
 
     n_hard_selected = sum(1 for s in samples if s.get("hard_negative_selected"))
     n_hard_ignored = sum(1 for s in samples if s.get("hard_negative_mining") and s.get("label") == "ignored")
+    n_hard = sum(1 for s in samples if s.get("label") == "negative" and s.get("neg_type") == "hard_negative")
+    n_near_miss = sum(1 for s in samples if s.get("label") == "negative" and s.get("neg_type") == "near_miss_negative")
+    n_easy = sum(1 for s in samples if s.get("label") == "negative" and s.get("neg_type") == "easy_negative")
 
     metadata = {
         "version": 2,
@@ -361,6 +498,9 @@ def main() -> None:
             "n_ignored_duplicate": total_ignored,
             "n_hard_negative_selected": int(n_hard_selected),
             "n_hard_negative_ignored": int(n_hard_ignored),
+            "n_hard_negative": int(n_hard),
+            "n_near_miss_negative": int(n_near_miss),
+            "n_easy_negative": int(n_easy),
             "negative_to_positive_ratio": float(total_fp / max(total_tp, 1)),
         },
         "config": {
@@ -374,6 +514,13 @@ def main() -> None:
             "hard_negative_min_score": args.hard_negative_min_score,
             "hard_negative_iou_max": args.hard_negative_iou_max,
             "hard_negative_max_per_scan": args.hard_negative_max_per_scan,
+            "near_miss_iou_min": args.near_miss_iou_min,
+            "near_miss_iou_max": args.near_miss_iou_max,
+            "easy_negative_keep_ratio": args.easy_negative_keep_ratio,
+            "hard_negative_only": args.hard_negative_only,
+            "lung_mask_dir": args.lung_mask_dir,
+            "require_lung_mask": args.require_lung_mask,
+            "lung_mask_min_overlap": args.lung_mask_min_overlap,
             "val_patch_size": config.val_patch_size,
             "spacing": config.spacing,
             "split_seed": config.split_seed,
@@ -389,6 +536,7 @@ def main() -> None:
     logger.info("  positive: %d", total_tp)
     logger.info("  negative: %d", total_fp)
     logger.info("  ignored_duplicate: %d", total_ignored)
+    logger.info("  hard_negative: %d | near_miss_negative: %d | easy_negative: %d", n_hard, n_near_miss, n_easy)
     if args.hard_negative_mining:
         logger.info("  hard_negative_selected: %d", n_hard_selected)
         logger.info("  hard_negative_ignored: %d", n_hard_ignored)

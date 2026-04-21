@@ -178,10 +178,15 @@ def cmd_test(args):
         fpr_weight=args.fpr_weight,
         fpr_mode=args.fpr_mode,
         fpr_fuser_model_path=args.fpr_fuser_model,
+        fpr_regression_json=args.fpr_regression_json,
+        fpr_regression_threshold_mode=args.fpr_regression_threshold_mode,
         fp_max_elongation=args.fp_max_elongation,
         fp_min_solidity=args.fp_min_solidity,
         fp_min_vol=args.fp_min_vol,
         fp_max_vol=args.fp_max_vol,
+        morph_skip_small_diam=args.morph_skip_small_diam,
+        morph_three_plane=args.morph_three_plane,
+        morph_min_bad_planes=args.morph_min_bad_planes,
         eval_split=args.eval_split,
         max_samples=args.max_samples,
         fpr_score_aware=args.fpr_score_aware,
@@ -189,6 +194,11 @@ def cmd_test(args):
         fpr_det_mid_thresh=args.fpr_det_mid_thresh,
         fpr_high_thresh=args.fpr_high_thresh,
         fpr_mid_thresh=args.fpr_mid_thresh,
+        size_aware_small_diam=args.size_aware_small_diam,
+        size_aware_fpr_thresh=args.size_aware_fpr_thresh,
+        size_aware_final_thresh=args.size_aware_final_thresh,
+        export_case_analysis=args.export_case_analysis,
+        case_analysis_dir=args.case_analysis_dir,
     )
 
 
@@ -293,20 +303,30 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("--filter_fp", action="store_true")
     test_p.add_argument("--filter_lung_mask", action="store_true")
     test_p.add_argument("--fpr_model", default=None)
-    test_p.add_argument("--fpr_mode", choices=["fuse", "gate", "hybrid", "learned"], default="hybrid")
+    test_p.add_argument("--fpr_mode", choices=["fuse", "gate", "hybrid", "learned", "regression"], default="hybrid")
     test_p.add_argument("--fpr_thresh", type=float, default=0.5)
     test_p.add_argument("--fpr_patch_size", type=int, default=32)
     test_p.add_argument("--fpr_weight", type=float, default=0.5)
     test_p.add_argument("--fpr_fuser_model", default=None, help="optional learned fuser checkpoint (model_best.pt)")
+    test_p.add_argument("--fpr_regression_json", default=None, help="optional regression fuser JSON from fit_trace_fuser_regression.py")
+    test_p.add_argument("--fpr_regression_threshold_mode", choices=["best_f1", "coverage_safe", "custom"], default="best_f1", help="threshold source for regression mode")
     test_p.add_argument("--fpr_score_aware", action="store_true", help="enable score-aware gate policy for FPR filtering")
     test_p.add_argument("--fpr_det_high_thresh", type=float, default=0.9, help="detector high-score boundary")
     test_p.add_argument("--fpr_det_mid_thresh", type=float, default=0.6, help="detector mid-score lower bound")
     test_p.add_argument("--fpr_high_thresh", type=float, default=0.15, help="FPR gate threshold for high-score proposals")
     test_p.add_argument("--fpr_mid_thresh", type=float, default=0.25, help="FPR gate threshold for mid-score proposals")
+    test_p.add_argument("--size_aware_small_diam", type=float, default=0.0, help="enable size-aware postprocess for proposals with max diameter <= this value")
+    test_p.add_argument("--size_aware_fpr_thresh", type=float, default=None, help="FPR gate threshold for small proposals")
+    test_p.add_argument("--size_aware_final_thresh", type=float, default=None, help="final score threshold for small proposals")
     test_p.add_argument("--fp_max_elongation", type=float, default=5.0)
     test_p.add_argument("--fp_min_solidity", type=float, default=0.3)
     test_p.add_argument("--fp_min_vol", type=float, default=4.2)
     test_p.add_argument("--fp_max_vol", type=float, default=65450.0)
+    test_p.add_argument("--morph_skip_small_diam", type=float, default=0.0, help="skip morphology FP filtering for boxes with max diameter <= this value")
+    test_p.add_argument("--morph_three_plane", action="store_true", help="apply morphology FP filtering on axial/coronal/sagittal projections")
+    test_p.add_argument("--morph_min_bad_planes", type=int, default=2, help="remove a box only if at least this many planes fail morphology checks")
+    test_p.add_argument("--export_case_analysis", action="store_true", help="export per-case CT/masks/HTML for TP/FP/FN analysis")
+    test_p.add_argument("--case_analysis_dir", default=None, help="output directory for per-case analysis exports")
 
     pred_p = subparsers.add_parser("predict", help="predict from a single input")
     pred_p.add_argument("--checkpoint", required=True)
