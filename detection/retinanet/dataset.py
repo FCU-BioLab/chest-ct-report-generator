@@ -9,6 +9,7 @@ RetinaNet 偵測資料集 (Dataset)
 
 import json
 import logging
+import os
 import random
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
@@ -43,6 +44,16 @@ from monai.apps.detection.transforms.dictionary import (
 from scipy import ndimage
 
 logger = logging.getLogger(__name__)
+
+
+def get_monai_cache_dir(*parts: str) -> Path:
+    """Return the MONAI PersistentDataset cache directory.
+
+    Set MONAI_CACHE_DIR to move cache off the repo drive, e.g.
+    MONAI_CACHE_DIR=F:/monai_persistent_cache.
+    """
+    root = (os.environ.get("MONAI_CACHE_DIR") or "cache/monai_persistent_cache").strip().strip('"')
+    return Path(root).joinpath(*parts)
 
 
 def _reshape_empty_box(x):
