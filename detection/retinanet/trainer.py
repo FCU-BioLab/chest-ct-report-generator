@@ -1210,6 +1210,8 @@ class RetinaNetTrainer:
         fpr_det_mid_thresh: float = 0.6,
         fpr_high_thresh: float = 0.15,
         fpr_mid_thresh: float = 0.25,
+        fpr_apply_min_diam: float = None,
+        fpr_apply_max_diam: float = None,
         size_aware_small_diam: float = 0.0,
         size_aware_fpr_thresh: float = None,
     ) -> Dict[str, Any]:
@@ -1262,6 +1264,12 @@ class RetinaNetTrainer:
         dy_mm = dy * float(spacing_np[1])
         dz_mm = dz * float(spacing_np[2])
         max_axis_mm = np.maximum(np.maximum(dx_mm, dy_mm), dz_mm)
+        active_fpr_np = np.ones(len(boxes_np), dtype=bool)
+        if fpr_apply_min_diam is not None:
+            active_fpr_np &= max_axis_mm >= float(fpr_apply_min_diam)
+        if fpr_apply_max_diam is not None:
+            active_fpr_np &= max_axis_mm <= float(fpr_apply_max_diam)
+        active_fpr = torch.as_tensor(active_fpr_np, device=ps.device, dtype=torch.bool)
         small_box_np = (max_axis_mm <= float(size_aware_small_diam)) if size_aware_small_diam and size_aware_small_diam > 0 else np.zeros(len(boxes_np), dtype=bool)
         small_box = torch.as_tensor(small_box_np, device=ps.device, dtype=torch.bool)
         patch_mean = patch_arr.mean(axis=(1, 2, 3))
@@ -1290,16 +1298,20 @@ class RetinaNetTrainer:
                 self.device,
                 extra_features=fuser_extra,
             ).to(ps.device)
-            final_score_np = fused_prob.detach().cpu().numpy().astype(np.float32, copy=False)
+            final_score_all = torch.where(active_fpr, fused_prob, ps)
+            final_score_np = final_score_all.detach().cpu().numpy().astype(np.float32, copy=False)
             filtered = 0
             if fpr_thresh is not None and fpr_thresh > 0:
-                keep_mask = fused_prob >= fpr_thresh
+                keep_mask = (~active_fpr) | (fused_prob >= fpr_thresh)
                 keep_mask_np = keep_mask.detach().cpu().numpy().astype(bool, copy=False)
                 applied_thresh_np[:] = float(fpr_thresh)
+                applied_thresh_np = np.where(active_fpr_np, applied_thresh_np, np.nan).astype(np.float32, copy=False)
                 det_band[:] = "learned"
+                det_band = np.where(active_fpr_np, det_band, "inactive_size")
                 filtered = self._apply_prediction_mask(output, keep_mask)
             else:
                 det_band[:] = "learned"
+                det_band = np.where(active_fpr_np, det_band, "inactive_size")
             trace = [
                 {
                     "proposal_index": int(i),
@@ -1313,6 +1325,7 @@ class RetinaNetTrainer:
                     "applied_threshold": None if np.isnan(applied_thresh_np[i]) else float(applied_thresh_np[i]),
                     "fpr_mode": fpr_mode,
                     "max_diameter_mm": float(max_axis_mm[i]),
+                    "fpr_active": bool(active_fpr_np[i]),
                     "size_aware_small": bool(small_box_np[i]),
                     **{name: float(values[i]) for name, values in morph_features_np.items()},
                 }
@@ -1321,8 +1334,8 @@ class RetinaNetTrainer:
             if len(output[self.detector.target_box_key]) == 0:
                 return {"rescored": int(len(pb)), "filtered": int(filtered), "trace": trace}
             if fpr_thresh is not None and fpr_thresh > 0:
-                fused_prob = fused_prob[keep_mask]
-            output[self.detector.pred_score_key] = fused_prob
+                final_score_all = final_score_all[keep_mask]
+            output[self.detector.pred_score_key] = final_score_all
             return {"rescored": int(len(pb)), "filtered": int(filtered), "trace": trace}
 
         filtered = 0
@@ -1340,7 +1353,7 @@ class RetinaNetTrainer:
                     keep_high = torch.where(small_box, keep_small, keep_high)
                     keep_mid = torch.where(small_box, keep_small, keep_mid)
                     keep_low = torch.where(small_box, keep_small, keep_low)
-                keep_mask = (keep_high_band & keep_high) | (keep_mid_band & keep_mid) | (keep_low_band & keep_low)
+                keep_mask = (~active_fpr) | (keep_high_band & keep_high) | (keep_mid_band & keep_mid) | (keep_low_band & keep_low)
                 keep_high_band_np = keep_high_band.detach().cpu().numpy().astype(bool, copy=False)
                 keep_mid_band_np = keep_mid_band.detach().cpu().numpy().astype(bool, copy=False)
                 det_band = np.where(keep_high_band_np, "high", np.where(keep_mid_band_np, "mid", "low"))
@@ -1352,27 +1365,34 @@ class RetinaNetTrainer:
                 if size_aware_fpr_thresh is not None and size_aware_small_diam and size_aware_small_diam > 0:
                     applied_thresh_np = np.where(small_box_np, np.float32(size_aware_fpr_thresh), applied_thresh_np).astype(np.float32, copy=False)
                     det_band = np.where(small_box_np, np.char.add(det_band.astype(str), "_small"), det_band)
+                applied_thresh_np = np.where(active_fpr_np, applied_thresh_np, np.nan).astype(np.float32, copy=False)
+                det_band = np.where(active_fpr_np, det_band, "inactive_size")
             else:
                 fpr_thresholds = torch.full_like(nodule_prob, float(fpr_thresh))
                 if size_aware_fpr_thresh is not None and size_aware_small_diam and size_aware_small_diam > 0:
                     fpr_thresholds = torch.where(small_box, torch.full_like(nodule_prob, float(size_aware_fpr_thresh)), fpr_thresholds)
-                keep_mask = nodule_prob >= fpr_thresholds
+                keep_mask = (~active_fpr) | (nodule_prob >= fpr_thresholds)
                 applied_thresh_np[:] = float(fpr_thresh)
                 if size_aware_fpr_thresh is not None and size_aware_small_diam and size_aware_small_diam > 0:
                     applied_thresh_np = np.where(small_box_np, np.float32(size_aware_fpr_thresh), applied_thresh_np).astype(np.float32, copy=False)
                 det_band[:] = "all"
                 if size_aware_fpr_thresh is not None and size_aware_small_diam and size_aware_small_diam > 0:
                     det_band = np.where(small_box_np, "all_small", det_band)
+                applied_thresh_np = np.where(active_fpr_np, applied_thresh_np, np.nan).astype(np.float32, copy=False)
+                det_band = np.where(active_fpr_np, det_band, "inactive_size")
             keep_mask_np = keep_mask.detach().cpu().numpy().astype(bool, copy=False)
             filtered = self._apply_prediction_mask(output, keep_mask)
             ps = output[self.detector.pred_score_key]
             if len(output[self.detector.target_box_key]) > 0:
                 nodule_prob = nodule_prob[keep_mask]
+                active_fpr = active_fpr[keep_mask]
 
         if fpr_mode in {"fuse", "hybrid"}:
             final_score_np = det_scores_np * (1.0 - float(fpr_weight)) + nodule_prob_np * float(fpr_weight)
+            final_score_np = np.where(active_fpr_np, final_score_np, det_scores_np).astype(np.float32, copy=False)
             if len(output[self.detector.target_box_key]) > 0:
-                output[self.detector.pred_score_key] = ps * (1.0 - fpr_weight) + nodule_prob * fpr_weight
+                fused_scores = ps * (1.0 - fpr_weight) + nodule_prob * fpr_weight
+                output[self.detector.pred_score_key] = torch.where(active_fpr, fused_scores, ps)
 
         trace = [
             {
@@ -1384,6 +1404,7 @@ class RetinaNetTrainer:
                 "keep_after_fpr": bool(keep_mask_np[i]),
                 "removed_by_fpr": bool(not keep_mask_np[i]),
                 "max_diameter_mm": float(max_axis_mm[i]),
+                "fpr_active": bool(active_fpr_np[i]),
                 "size_aware_small": bool(small_box_np[i]),
                 **{name: float(values[i]) for name, values in morph_features_np.items()},
                 "det_band": str(det_band[i]),
@@ -1569,7 +1590,7 @@ class RetinaNetTrainer:
             label_key: torch.as_tensor(fused_labels_np[keep_order], device=base_device, dtype=base_label_dtype),
         }
 
-    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, morph_require_round_planes: bool = False, morph_min_round_planes: int = 2, morph_max_round_elongation: float = 1.8, morph_min_plane_area_ratio: float = 0.5, morph_axial_similarity: bool = False, morph_max_elongation_delta: float = 1.5, morph_max_solidity_delta: float = 0.35, morph_max_fill_delta: float = 0.35, morph_min_axial_area_ratio: float = 0.35, bbox_filter: bool = False, bbox_max_aspect_ratio: float = 3.5, bbox_aspect_skip_small_diam: float = 0.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_fuser_model_path: str = None, size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
+    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, morph_require_round_planes: bool = False, morph_min_round_planes: int = 2, morph_max_round_elongation: float = 1.8, morph_min_plane_area_ratio: float = 0.5, morph_axial_similarity: bool = False, morph_max_elongation_delta: float = 1.5, morph_max_solidity_delta: float = 0.35, morph_max_fill_delta: float = 0.35, morph_min_axial_area_ratio: float = 0.35, bbox_filter: bool = False, bbox_max_aspect_ratio: float = 3.5, bbox_aspect_skip_small_diam: float = 0.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_apply_min_diam: float = None, fpr_apply_max_diam: float = None, fpr_fuser_model_path: str = None, size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
         """訓練結束後，自動載入最佳模型並在測試集上評估。"""
         cfg = self.config
         M = self.monai
@@ -1983,6 +2004,8 @@ class RetinaNetTrainer:
                             fpr_det_mid_thresh=fpr_det_mid_thresh,
                             fpr_high_thresh=fpr_high_thresh,
                             fpr_mid_thresh=fpr_mid_thresh,
+                            fpr_apply_min_diam=fpr_apply_min_diam,
+                            fpr_apply_max_diam=fpr_apply_max_diam,
                             size_aware_small_diam=size_aware_small_diam,
                             size_aware_fpr_thresh=size_aware_fpr_thresh,
                         )
@@ -2188,6 +2211,8 @@ class RetinaNetTrainer:
                 "det_mid_thresh": float(fpr_det_mid_thresh),
                 "high_thresh": float(fpr_high_thresh),
                 "mid_thresh": float(fpr_mid_thresh),
+                "apply_min_diam_mm": fpr_apply_min_diam,
+                "apply_max_diam_mm": fpr_apply_max_diam,
                 "patch_size": fpr_patch_size,
                 "weight": fpr_weight,
                 "rescored_boxes": fpr_stats["rescored"],

@@ -157,6 +157,29 @@ def _filter_by_source_split(samples: Sequence[Dict], allowed_splits: Sequence[st
     return [sample for sample in samples if sample.get("source_split") in allowed]
 
 
+def _filter_by_candidate_diameter(
+    samples: Sequence[Dict],
+    min_diam_mm: float | None,
+    max_diam_mm: float | None,
+) -> List[Dict]:
+    if min_diam_mm is None and max_diam_mm is None:
+        return list(samples)
+
+    filtered = []
+    for sample in samples:
+        diameter = _safe_float(sample.get("pred_max_diameter_mm"))
+        if diameter is None:
+            diameter = _safe_float(sample.get("effective_diameter_mm"))
+        if diameter is None:
+            continue
+        if min_diam_mm is not None and diameter < float(min_diam_mm):
+            continue
+        if max_diam_mm is not None and diameter > float(max_diam_mm):
+            continue
+        filtered.append(sample)
+    return filtered
+
+
 def _split_by_scan(samples: Sequence[Dict], val_ratio: float, seed: int) -> Tuple[List[Dict], List[Dict], List[str], List[str]]:
     scans_to_samples: Dict[str, List[Dict]] = defaultdict(list)
     for sample in samples:
@@ -330,6 +353,8 @@ def main() -> None:
     parser.add_argument("--augment_rotate_prob", type=float, default=0.5, help="probability of random 90-degree patch rotation during training")
     parser.add_argument("--augment_noise", type=float, default=0.05, help="uniform intensity jitter amplitude during training")
     parser.add_argument("--allowed_source_splits", nargs="*", default=["training"], help="metadata source splits allowed for FPR training")
+    parser.add_argument("--min_candidate_diam_mm", type=float, default=None, help="train only on candidates with predicted max diameter >= this value in mm")
+    parser.add_argument("--max_candidate_diam_mm", type=float, default=None, help="train only on candidates with predicted max diameter <= this value in mm")
     parser.add_argument("--hard_negative_weight", type=float, default=2.0, help="extra sampling weight multiplier for hard negatives")
     parser.add_argument("--near_miss_weight", type=float, default=1.5, help="extra sampling weight multiplier for near-miss negatives")
     parser.add_argument("--easy_negative_weight", type=float, default=1.0, help="extra sampling weight multiplier for easy negatives")
@@ -356,6 +381,12 @@ def main() -> None:
     metadata = _load_metadata(metadata_path) if metadata_path.exists() else {"samples": []}
     samples = _build_samples(pos_dir, neg_dir, metadata)
     samples = _filter_by_source_split(samples, args.allowed_source_splits)
+    before_diam_filter = len(samples)
+    samples = _filter_by_candidate_diameter(
+        samples,
+        min_diam_mm=args.min_candidate_diam_mm,
+        max_diam_mm=args.max_candidate_diam_mm,
+    )
     for sample in samples:
         if sample["label_id"] == 0:
             sample["neg_type"] = _infer_negative_type(
@@ -376,6 +407,14 @@ def main() -> None:
         raise RuntimeError("Scan-level split produced an empty train or validation split.")
 
     logger.info("Loaded %d FPR patches", len(samples))
+    if args.min_candidate_diam_mm is not None or args.max_candidate_diam_mm is not None:
+        logger.info(
+            "  candidate diameter filter: min=%s max=%s kept=%d/%d",
+            "None" if args.min_candidate_diam_mm is None else f"{float(args.min_candidate_diam_mm):.2f}mm",
+            "None" if args.max_candidate_diam_mm is None else f"{float(args.max_candidate_diam_mm):.2f}mm",
+            len(samples),
+            before_diam_filter,
+        )
     logger.info("  train: %s", _summarize_samples(train_samples))
     logger.info("  val:   %s", _summarize_samples(val_samples))
 
@@ -389,6 +428,9 @@ def main() -> None:
                 "train_scan_ids": train_scans,
                 "val_scan_ids": val_scans,
                 "metadata_path": str(metadata_path) if metadata_path.exists() else None,
+                "min_candidate_diam_mm": args.min_candidate_diam_mm,
+                "max_candidate_diam_mm": args.max_candidate_diam_mm,
+                "n_samples_before_candidate_diam_filter": before_diam_filter,
             },
             f,
             indent=2,
@@ -520,6 +562,8 @@ def main() -> None:
                 "seed": args.seed,
                 "device": str(device),
                 "allowed_source_splits": args.allowed_source_splits,
+                "min_candidate_diam_mm": args.min_candidate_diam_mm,
+                "max_candidate_diam_mm": args.max_candidate_diam_mm,
                 "hard_negative_weight": args.hard_negative_weight,
                 "near_miss_weight": args.near_miss_weight,
                 "easy_negative_weight": args.easy_negative_weight,
