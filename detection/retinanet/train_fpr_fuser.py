@@ -21,7 +21,13 @@ from .fpr_fuser import (
     build_features,
     build_fpr_fuser,
 )
-from .fpr_model import get_model_type_from_model, load_fpr_model, patch_to_model_input
+from .fpr_model import (
+    get_model_backbone_from_model,
+    get_model_num_slices_per_view,
+    get_model_type_from_model,
+    load_fpr_model,
+    patch_to_model_input,
+)
 from .train_fpr import (
     _build_samples,
     _filter_by_source_split,
@@ -40,9 +46,10 @@ logger = logging.getLogger(__name__)
 
 
 class FuserPatchDataset(Dataset):
-    def __init__(self, samples: Sequence[Dict], model_type: str):
+    def __init__(self, samples: Sequence[Dict], model_type: str, num_slices_per_view: int = 1):
         self.samples = list(samples)
         self.model_type = model_type
+        self.num_slices_per_view = int(num_slices_per_view)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -50,7 +57,11 @@ class FuserPatchDataset(Dataset):
     def __getitem__(self, idx: int):
         sample = self.samples[idx]
         patch_3d = np.load(sample["file_path"]).astype(np.float32)
-        patch = patch_to_model_input(patch_3d, self.model_type)
+        patch = patch_to_model_input(
+            patch_3d,
+            self.model_type,
+            num_slices_per_view=self.num_slices_per_view,
+        )
         det_score = float(sample.get("score", 0.0))
         label = int(sample["label_id"])
 
@@ -127,12 +138,17 @@ def _extract_feature_tensors(
     samples: Sequence[Dict],
     fpr_model,
     fpr_model_type: str,
+    fpr_num_slices_per_view: int,
     feature_names: Sequence[str],
     device: torch.device,
     batch_size: int,
     num_workers: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    ds = FuserPatchDataset(samples, model_type=fpr_model_type)
+    ds = FuserPatchDataset(
+        samples,
+        model_type=fpr_model_type,
+        num_slices_per_view=fpr_num_slices_per_view,
+    )
     loader = DataLoader(
         ds,
         batch_size=batch_size,
@@ -243,7 +259,14 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     fpr_model = load_fpr_model(args.fpr_model, device=str(device))
     fpr_model_type = get_model_type_from_model(fpr_model)
-    logger.info("FPR backbone type for fuser features: %s", fpr_model_type)
+    fpr_backbone = get_model_backbone_from_model(fpr_model)
+    fpr_num_slices_per_view = get_model_num_slices_per_view(fpr_model)
+    logger.info(
+        "FPR backbone for fuser features: type=%s backbone=%s slices/view=%d",
+        fpr_model_type,
+        fpr_backbone,
+        fpr_num_slices_per_view,
+    )
     logger.info("Fuser feature_set=%s (%s)", args.feature_set, ", ".join(feature_names))
 
     logger.info("Extracting train features...")
@@ -251,6 +274,7 @@ def main() -> None:
         train_samples,
         fpr_model,
         fpr_model_type,
+        fpr_num_slices_per_view,
         feature_names,
         device,
         args.feature_batch_size,
@@ -261,6 +285,7 @@ def main() -> None:
         val_samples,
         fpr_model,
         fpr_model_type,
+        fpr_num_slices_per_view,
         feature_names,
         device,
         args.feature_batch_size,

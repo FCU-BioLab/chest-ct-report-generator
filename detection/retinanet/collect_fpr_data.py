@@ -47,6 +47,20 @@ def compute_iou_3d(box_a: np.ndarray, box_b: np.ndarray) -> float:
     return float(inter / (vol_a + vol_b - inter + 1e-6))
 
 
+def _box_dims_mm(box: np.ndarray, spacing: List[float]) -> List[float]:
+    """Return box side lengths in mm for boxes in transformed Y, X, Z order."""
+    if box is None or len(box) < 6:
+        return [0.0, 0.0, 0.0]
+    dy = max(0.0, float(box[3]) - float(box[0])) * float(spacing[0])
+    dx = max(0.0, float(box[4]) - float(box[1])) * float(spacing[1])
+    dz = max(0.0, float(box[5]) - float(box[2])) * float(spacing[2])
+    return [dy, dx, dz]
+
+
+def _box_max_diameter_mm(box: np.ndarray, spacing: List[float]) -> float:
+    return float(max(_box_dims_mm(box, spacing)))
+
+
 def crop_patch(image_np: np.ndarray, center: Tuple[float, float, float], patch_size: int = PATCH_SIZE) -> np.ndarray:
     """Crop a cubic patch from a transformed image tensor in (Y, X, Z) order."""
     half = patch_size // 2
@@ -145,6 +159,8 @@ def collect_from_dataset(
     near_miss_iou_max: float,
     easy_negative_keep_ratio: float,
     hard_negative_only: bool,
+    tp_iou_thresh: float,
+    ambiguous_iou_min: float,
     lung_mask_dir: Path | None,
     require_lung_mask: bool,
     lung_mask_min_overlap: float,
@@ -217,7 +233,11 @@ def collect_from_dataset(
                             best_iou = iou
                             best_gt_index = gt_index
 
-                    is_candidate_match = best_iou >= IOU_THRESH
+                    is_candidate_match = best_iou >= float(tp_iou_thresh)
+                    is_ambiguous_match = (
+                        best_iou >= float(ambiguous_iou_min)
+                        and best_iou < float(tp_iou_thresh)
+                    )
                     is_tp = is_candidate_match and best_gt_index not in gt_matched
                     if is_tp:
                         gt_matched.add(best_gt_index)
@@ -227,6 +247,15 @@ def collect_from_dataset(
                         (pred_box[1] + pred_box[4]) / 2.0,
                         (pred_box[2] + pred_box[5]) / 2.0,
                     )
+                    pred_dims_mm = _box_dims_mm(pred_box, config.spacing)
+                    pred_max_diameter_mm = float(max(pred_dims_mm))
+                    gt_box_yxz = None
+                    gt_dims_mm = None
+                    gt_max_diameter_mm = None
+                    if best_gt_index >= 0 and best_gt_index < len(gt_boxes):
+                        gt_box_yxz = [float(v) for v in gt_boxes[best_gt_index].tolist()]
+                        gt_dims_mm = _box_dims_mm(gt_boxes[best_gt_index], config.spacing)
+                        gt_max_diameter_mm = float(max(gt_dims_mm))
                     patch = crop_patch(img_np, center, patch_size)
                     is_duplicate_match = is_candidate_match and not is_tp
                     hard_negative_candidate = (not is_tp) and (not is_duplicate_match)
@@ -257,6 +286,7 @@ def collect_from_dataset(
                                     "iou": float(best_iou),
                                     "matched_gt_index": int(best_gt_index),
                                     "is_candidate_match": bool(is_candidate_match),
+                                    "is_ambiguous_match": bool(is_ambiguous_match),
                                     "is_duplicate_match": bool(is_duplicate_match),
                                     "hard_negative_mining": bool(hard_negative_mining),
                                     "hard_negative_candidate": bool(hard_negative_candidate),
@@ -270,6 +300,11 @@ def collect_from_dataset(
                                     "source_split": section_name,
                                     "scan_index_in_split": idx,
                                     "pred_box_yxz": [float(v) for v in pred_box.tolist()],
+                                    "pred_dims_mm": pred_dims_mm,
+                                    "pred_max_diameter_mm": pred_max_diameter_mm,
+                                    "gt_box_yxz": gt_box_yxz,
+                                    "gt_dims_mm": gt_dims_mm,
+                                    "gt_max_diameter_mm": gt_max_diameter_mm,
                                     "center_yxz": [float(v) for v in center],
                                     "patch_size": patch_size,
                                     "lung_mask_path": lung_mask_path,
@@ -283,6 +318,11 @@ def collect_from_dataset(
                         label = "positive"
                         save_dir = pos_dir
                         neg_type = "positive"
+                    elif is_ambiguous_match:
+                        label = "ignored"
+                        save_dir = None
+                        neg_type = "ambiguous_match"
+                        hard_negative_reason = "ambiguous_iou"
                     elif is_duplicate_match and not keep_duplicate_as_negative:
                         label = "ignored"
                         save_dir = None
@@ -341,6 +381,7 @@ def collect_from_dataset(
                             "iou": float(best_iou),
                             "matched_gt_index": int(best_gt_index),
                             "is_candidate_match": bool(is_candidate_match),
+                            "is_ambiguous_match": bool(is_ambiguous_match),
                             "is_duplicate_match": bool(is_duplicate_match),
                             "hard_negative_mining": bool(hard_negative_mining),
                             "hard_negative_candidate": bool(hard_negative_candidate),
@@ -354,6 +395,11 @@ def collect_from_dataset(
                             "source_split": section_name,
                             "scan_index_in_split": idx,
                             "pred_box_yxz": [float(v) for v in pred_box.tolist()],
+                            "pred_dims_mm": pred_dims_mm,
+                            "pred_max_diameter_mm": pred_max_diameter_mm,
+                            "gt_box_yxz": gt_box_yxz,
+                            "gt_dims_mm": gt_dims_mm,
+                            "gt_max_diameter_mm": gt_max_diameter_mm,
                             "center_yxz": [float(v) for v in center],
                             "patch_size": patch_size,
                             "lung_mask_path": lung_mask_path,
@@ -390,6 +436,8 @@ def main() -> None:
     parser.add_argument("--near_miss_iou_max", type=float, default=0.20, help="maximum IoU for near-miss negatives")
     parser.add_argument("--easy_negative_keep_ratio", type=float, default=0.2, help="deterministic keep ratio for easy negatives during hard-negative mining")
     parser.add_argument("--hard_negative_only", action="store_true", help="keep only detector high-score low-IoU false positives as negatives")
+    parser.add_argument("--tp_iou_thresh", type=float, default=IOU_THRESH, help="minimum IoU for proposal positives")
+    parser.add_argument("--ambiguous_iou_min", type=float, default=IOU_THRESH, help="ignore non-TP proposals with IoU in [ambiguous_iou_min, tp_iou_thresh)")
     parser.add_argument("--lung_mask_dir", default=None, help="directory containing lung masks named <seriesuid>.mhd")
     parser.add_argument("--require_lung_mask", action="store_true", help="skip/error when lung mask is missing")
     parser.add_argument("--lung_mask_min_overlap", type=float, default=0.05, help="minimum fraction of patch voxels inside lung mask")
@@ -407,7 +455,7 @@ def main() -> None:
     from monai.utils import set_determinism
 
     from .config import RetinaNetConfig
-    from .dataset import build_val_transform, prepare_datalist
+    from .dataset import build_val_transform, get_monai_cache_dir, prepare_datalist
     from .trainer import RetinaNetTrainer
 
     config = RetinaNetConfig(
@@ -421,7 +469,7 @@ def main() -> None:
     config.validate()
     set_determinism(seed=config.split_seed)
 
-    trainer = RetinaNetTrainer(config)
+    trainer = RetinaNetTrainer(config, inference_only=True)
     trainer.detector.network = torch.jit.load(args.checkpoint).to(trainer.device)
     trainer.detector.eval()
     logger.info("Loaded RetinaNet checkpoint: %s", args.checkpoint)
@@ -449,12 +497,12 @@ def main() -> None:
             transform=val_transform,
         )
     else:
-        cache_dir = str(Path("cache/monai_persistent_cache") / f"fpr_{section_name}")
+        cache_dir = get_monai_cache_dir(f"fpr_{section_name}")
         logger.info("  📦 使用 PersistentDataset 磁碟快取: %s", cache_dir)
         dataset = PersistentDataset(
             data=raw_items,
             transform=val_transform,
-            cache_dir=cache_dir,
+            cache_dir=str(cache_dir),
         )
 
     total_tp, total_fp, total_ignored, samples = collect_from_dataset(
@@ -476,6 +524,8 @@ def main() -> None:
         near_miss_iou_max=args.near_miss_iou_max,
         easy_negative_keep_ratio=args.easy_negative_keep_ratio,
         hard_negative_only=args.hard_negative_only,
+        tp_iou_thresh=args.tp_iou_thresh,
+        ambiguous_iou_min=args.ambiguous_iou_min,
         lung_mask_dir=Path(args.lung_mask_dir) if args.lung_mask_dir else None,
         require_lung_mask=args.require_lung_mask,
         lung_mask_min_overlap=args.lung_mask_min_overlap,
@@ -486,6 +536,7 @@ def main() -> None:
     n_hard = sum(1 for s in samples if s.get("label") == "negative" and s.get("neg_type") == "hard_negative")
     n_near_miss = sum(1 for s in samples if s.get("label") == "negative" and s.get("neg_type") == "near_miss_negative")
     n_easy = sum(1 for s in samples if s.get("label") == "negative" and s.get("neg_type") == "easy_negative")
+    n_ambiguous = sum(1 for s in samples if s.get("label") == "ignored" and s.get("neg_type") == "ambiguous_match")
 
     metadata = {
         "version": 2,
@@ -501,6 +552,7 @@ def main() -> None:
             "n_hard_negative": int(n_hard),
             "n_near_miss_negative": int(n_near_miss),
             "n_easy_negative": int(n_easy),
+            "n_ambiguous_match_ignored": int(n_ambiguous),
             "negative_to_positive_ratio": float(total_fp / max(total_tp, 1)),
         },
         "config": {
@@ -518,9 +570,12 @@ def main() -> None:
             "near_miss_iou_max": args.near_miss_iou_max,
             "easy_negative_keep_ratio": args.easy_negative_keep_ratio,
             "hard_negative_only": args.hard_negative_only,
+            "tp_iou_thresh": args.tp_iou_thresh,
+            "ambiguous_iou_min": args.ambiguous_iou_min,
             "lung_mask_dir": args.lung_mask_dir,
             "require_lung_mask": args.require_lung_mask,
             "lung_mask_min_overlap": args.lung_mask_min_overlap,
+            "monai_cache_dir": str(get_monai_cache_dir()),
             "val_patch_size": config.val_patch_size,
             "spacing": config.spacing,
             "split_seed": config.split_seed,
@@ -537,6 +592,7 @@ def main() -> None:
     logger.info("  negative: %d", total_fp)
     logger.info("  ignored_duplicate: %d", total_ignored)
     logger.info("  hard_negative: %d | near_miss_negative: %d | easy_negative: %d", n_hard, n_near_miss, n_easy)
+    logger.info("  ambiguous_match_ignored: %d", n_ambiguous)
     if args.hard_negative_mining:
         logger.info("  hard_negative_selected: %d", n_hard_selected)
         logger.info("  hard_negative_ignored: %d", n_hard_ignored)

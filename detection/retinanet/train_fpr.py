@@ -25,10 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 class FPRPatchDataset(Dataset):
-    def __init__(self, samples: Sequence[Dict], model_type: str, augment: bool = False):
+    def __init__(
+        self,
+        samples: Sequence[Dict],
+        model_type: str,
+        num_slices_per_view: int = 1,
+        augment: bool = False,
+        augment_rotate_prob: float = 0.5,
+        augment_noise: float = 0.05,
+    ):
         self.samples = list(samples)
         self.model_type = model_type
+        self.num_slices_per_view = int(num_slices_per_view)
         self.augment = augment
+        self.augment_rotate_prob = float(augment_rotate_prob)
+        self.augment_noise = float(augment_noise)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -43,9 +54,17 @@ class FPRPatchDataset(Dataset):
             for axis in range(3):
                 if np.random.random() > 0.5:
                     patch = np.flip(patch, axis=axis).copy()
-            patch = np.clip(patch + np.random.uniform(-0.05, 0.05), 0.0, 1.0)
+            if np.random.random() < self.augment_rotate_prob:
+                axes = [(0, 1), (0, 2), (1, 2)][np.random.randint(0, 3)]
+                patch = np.rot90(patch, k=int(np.random.randint(1, 4)), axes=axes).copy()
+            if self.augment_noise > 0:
+                patch = np.clip(patch + np.random.uniform(-self.augment_noise, self.augment_noise), 0.0, 1.0)
 
-        patch = patch_to_model_input(patch, self.model_type)
+        patch = patch_to_model_input(
+            patch,
+            self.model_type,
+            num_slices_per_view=self.num_slices_per_view,
+        )
         label = torch.tensor(sample["label_id"], dtype=torch.long)
         return torch.from_numpy(patch), label
 
@@ -65,8 +84,30 @@ def _infer_metadata_path(pos_dir: Path, neg_dir: Path, metadata_path: str = None
     return common_root / "metadata.json"
 
 
+def _safe_float(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _box_max_diameter_mm(box, spacing: Sequence[float]) -> float | None:
+    if not isinstance(box, (list, tuple)) or len(box) != 6:
+        return None
+    try:
+        dy = max(float(box[3]) - float(box[0]), 0.0) * float(spacing[0])
+        dx = max(float(box[4]) - float(box[1]), 0.0) * float(spacing[1])
+        dz = max(float(box[5]) - float(box[2]), 0.0) * float(spacing[2])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return float(max(dy, dx, dz))
+
+
 def _build_samples(pos_dir: Path, neg_dir: Path, metadata: Dict) -> List[Dict]:
     samples = []
+    spacing = metadata.get("config", {}).get("spacing") or [1.0, 1.0, 1.0]
     meta_by_filename = {
         item["filename"]: item
         for item in metadata.get("samples", [])
@@ -84,6 +125,11 @@ def _build_samples(pos_dir: Path, neg_dir: Path, metadata: Dict) -> List[Dict]:
                     pred_box = None
             else:
                 pred_box = None
+            pred_max_diameter_mm = _safe_float(meta.get("pred_max_diameter_mm"))
+            if pred_max_diameter_mm is None:
+                pred_max_diameter_mm = _box_max_diameter_mm(pred_box, spacing)
+            gt_max_diameter_mm = _safe_float(meta.get("gt_max_diameter_mm"))
+            effective_diameter_mm = gt_max_diameter_mm if label_id == 1 and gt_max_diameter_mm is not None else pred_max_diameter_mm
             samples.append(
                 {
                     "file_path": str(file_path),
@@ -96,6 +142,9 @@ def _build_samples(pos_dir: Path, neg_dir: Path, metadata: Dict) -> List[Dict]:
                     "iou": meta.get("iou"),
                     "neg_type": meta.get("neg_type"),
                     "pred_box_yxz": pred_box,
+                    "pred_max_diameter_mm": pred_max_diameter_mm,
+                    "gt_max_diameter_mm": gt_max_diameter_mm,
+                    "effective_diameter_mm": effective_diameter_mm,
                 }
             )
     return samples
@@ -188,6 +237,52 @@ def _compute_best_threshold(y_true: np.ndarray, probs: np.ndarray) -> Dict[str, 
     return best
 
 
+def _val_breakdown(
+    samples: Sequence[Dict],
+    y_true: np.ndarray,
+    probs: np.ndarray,
+    threshold: float,
+    small_positive_diam: float,
+    low_score_positive_thresh: float,
+) -> Dict[str, float]:
+    pred = probs >= float(threshold)
+
+    def recall_for(mask: np.ndarray) -> float:
+        denom = int(np.sum(mask & (y_true == 1)))
+        if denom <= 0:
+            return float("nan")
+        return float(np.sum(mask & (y_true == 1) & pred) / denom)
+
+    def fpr_for(mask: np.ndarray) -> float:
+        denom = int(np.sum(mask & (y_true == 0)))
+        if denom <= 0:
+            return float("nan")
+        return float(np.sum(mask & (y_true == 0) & pred) / denom)
+
+    diam = np.asarray([
+        _safe_float(sample.get("effective_diameter_mm"), float("nan"))
+        for sample in samples
+    ], dtype=np.float32)
+    score = np.asarray([
+        _safe_float(sample.get("score"), float("nan"))
+        for sample in samples
+    ], dtype=np.float32)
+    neg_types = np.asarray([str(sample.get("neg_type") or "") for sample in samples], dtype=object)
+
+    small_pos = (y_true == 1) & np.isfinite(diam) & (diam <= float(small_positive_diam))
+    large_pos = (y_true == 1) & (~small_pos)
+    low_score_pos = (y_true == 1) & np.isfinite(score) & (score < float(low_score_positive_thresh))
+
+    return {
+        "val_recall_small_pos": recall_for(small_pos),
+        "val_recall_large_pos": recall_for(large_pos),
+        "val_recall_low_score_pos": recall_for(low_score_pos),
+        "val_fpr_hard_neg": fpr_for(neg_types == "hard_negative"),
+        "val_fpr_near_miss_neg": fpr_for(neg_types == "near_miss_negative"),
+        "val_fpr_easy_neg": fpr_for(neg_types == "easy_negative"),
+    }
+
+
 def _infer_negative_type(
     sample: Dict,
     hard_negative_score_thresh: float,
@@ -224,6 +319,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=100, help="training epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
+    parser.add_argument("--weight_decay", type=float, default=1e-5, help="optimizer weight decay")
     parser.add_argument("--val_ratio", type=float, default=0.2, help="validation scan ratio")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument("--device", default="cuda", help="device")
@@ -231,15 +327,24 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=20, help="early stopping patience, 0 disables")
     parser.add_argument("--loss", choices=["ce", "focal"], default="focal", help="classification loss")
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="gamma for focal loss")
+    parser.add_argument("--augment_rotate_prob", type=float, default=0.5, help="probability of random 90-degree patch rotation during training")
+    parser.add_argument("--augment_noise", type=float, default=0.05, help="uniform intensity jitter amplitude during training")
     parser.add_argument("--allowed_source_splits", nargs="*", default=["training"], help="metadata source splits allowed for FPR training")
     parser.add_argument("--hard_negative_weight", type=float, default=2.0, help="extra sampling weight multiplier for hard negatives")
     parser.add_argument("--near_miss_weight", type=float, default=1.5, help="extra sampling weight multiplier for near-miss negatives")
     parser.add_argument("--easy_negative_weight", type=float, default=1.0, help="extra sampling weight multiplier for easy negatives")
+    parser.add_argument("--positive_weight", type=float, default=1.0, help="sampling weight multiplier for all positives")
+    parser.add_argument("--small_positive_weight", type=float, default=1.0, help="extra sampling weight multiplier for small positives")
+    parser.add_argument("--small_positive_diam", type=float, default=8.0, help="positive max diameter threshold in mm for small-positive weighting")
+    parser.add_argument("--low_score_positive_weight", type=float, default=1.0, help="extra sampling weight multiplier for low-score positives")
+    parser.add_argument("--low_score_positive_thresh", type=float, default=0.9, help="detector score threshold below which positives get low-score weighting")
     parser.add_argument("--hard_negative_score_thresh", type=float, default=0.5, help="detector score threshold defining hard negatives")
     parser.add_argument("--hard_negative_iou_max", type=float, default=0.05, help="maximum IoU for hard negatives")
     parser.add_argument("--near_miss_iou_min", type=float, default=0.05, help="minimum IoU for near-miss negatives")
     parser.add_argument("--near_miss_iou_max", type=float, default=0.20, help="maximum IoU for near-miss negatives")
     parser.add_argument("--fpr_model_type", choices=["3d", "2.5d"], default="3d", help="FPR backbone input type")
+    parser.add_argument("--fpr_backbone", choices=["resnet18", "resnet34"], default="resnet18", help="FPR classifier backbone")
+    parser.add_argument("--fpr_num_slices_per_view", type=int, default=1, help="odd number of slices per view for 2.5D input")
     args = parser.parse_args()
 
     pos_dir = Path(args.pos_dir)
@@ -290,19 +395,57 @@ def main() -> None:
             ensure_ascii=False,
         )
 
-    from .fpr_model import build_fpr_model, normalize_fpr_model_type
+    from .fpr_model import (
+        build_fpr_model,
+        normalize_fpr_backbone,
+        normalize_fpr_model_type,
+        normalize_fpr_num_slices_per_view,
+    )
 
     model_type = normalize_fpr_model_type(args.fpr_model_type)
-    train_ds = FPRPatchDataset(train_samples, model_type=model_type, augment=True)
-    val_ds = FPRPatchDataset(val_samples, model_type=model_type, augment=False)
+    backbone_name = normalize_fpr_backbone(args.fpr_backbone)
+    num_slices_per_view = normalize_fpr_num_slices_per_view(args.fpr_num_slices_per_view)
+    if model_type == "3d":
+        num_slices_per_view = 1
+    logger.info(
+        "FPR model config: type=%s backbone=%s num_slices_per_view=%d",
+        model_type,
+        backbone_name,
+        num_slices_per_view,
+    )
+    train_ds = FPRPatchDataset(
+        train_samples,
+        model_type=model_type,
+        num_slices_per_view=num_slices_per_view,
+        augment=True,
+        augment_rotate_prob=args.augment_rotate_prob,
+        augment_noise=args.augment_noise,
+    )
+    val_ds = FPRPatchDataset(
+        val_samples,
+        model_type=model_type,
+        num_slices_per_view=num_slices_per_view,
+        augment=False,
+    )
 
     train_labels = np.array([sample["label_id"] for sample in train_samples], dtype=np.int64)
     n_pos = int(np.sum(train_labels == 1))
     n_neg = int(np.sum(train_labels == 0))
     sample_weights = np.where(train_labels == 1, 1.0 / max(n_pos, 1), 1.0 / max(n_neg, 1))
     neg_type_counts = defaultdict(int)
+    small_positive_count = 0
+    low_score_positive_count = 0
     for idx, sample in enumerate(train_samples):
-        if sample["label_id"] != 0:
+        if sample["label_id"] == 1:
+            sample_weights[idx] *= float(args.positive_weight)
+            diameter = _safe_float(sample.get("effective_diameter_mm"))
+            score = _safe_float(sample.get("score"))
+            if diameter is not None and diameter <= float(args.small_positive_diam):
+                sample_weights[idx] *= float(args.small_positive_weight)
+                small_positive_count += 1
+            if score is not None and score < float(args.low_score_positive_thresh):
+                sample_weights[idx] *= float(args.low_score_positive_weight)
+                low_score_positive_count += 1
             continue
         neg_type = sample.get("neg_type") or "easy_negative"
         train_samples[idx]["neg_type"] = neg_type
@@ -323,6 +466,16 @@ def main() -> None:
             float(args.easy_negative_weight),
             int(neg_type_counts.get("easy_negative", 0)),
         )
+    logger.info(
+        "Positive sampling weights: base=%.2fx | small<=%.2fmm %.2fx (%d) | low_score<%.2f %.2fx (%d)",
+        float(args.positive_weight),
+        float(args.small_positive_diam),
+        float(args.small_positive_weight),
+        int(small_positive_count),
+        float(args.low_score_positive_thresh),
+        float(args.low_score_positive_weight),
+        int(low_score_positive_count),
+    )
     sampler = WeightedRandomSampler(
         weights=torch.as_tensor(sample_weights, dtype=torch.double),
         num_samples=len(train_ds),
@@ -345,8 +498,12 @@ def main() -> None:
     )
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    model = build_fpr_model(model_type=model_type).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    model = build_fpr_model(
+        model_type=model_type,
+        backbone_name=backbone_name,
+        num_slices_per_view=num_slices_per_view,
+    ).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=float(args.weight_decay))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     with open(output_dir / "training_config.json", "w", encoding="utf-8") as f:
@@ -355,19 +512,29 @@ def main() -> None:
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
                 "lr": args.lr,
+                "weight_decay": args.weight_decay,
                 "loss": args.loss,
                 "focal_gamma": args.focal_gamma,
+                "augment_rotate_prob": args.augment_rotate_prob,
+                "augment_noise": args.augment_noise,
                 "seed": args.seed,
                 "device": str(device),
                 "allowed_source_splits": args.allowed_source_splits,
                 "hard_negative_weight": args.hard_negative_weight,
                 "near_miss_weight": args.near_miss_weight,
                 "easy_negative_weight": args.easy_negative_weight,
+                "positive_weight": args.positive_weight,
+                "small_positive_weight": args.small_positive_weight,
+                "small_positive_diam": args.small_positive_diam,
+                "low_score_positive_weight": args.low_score_positive_weight,
+                "low_score_positive_thresh": args.low_score_positive_thresh,
                 "hard_negative_score_thresh": args.hard_negative_score_thresh,
                 "hard_negative_iou_max": args.hard_negative_iou_max,
                 "near_miss_iou_min": args.near_miss_iou_min,
                 "near_miss_iou_max": args.near_miss_iou_max,
                 "model_type": model_type,
+                "backbone_name": backbone_name,
+                "num_slices_per_view": num_slices_per_view,
             },
             f,
             indent=2,
@@ -446,6 +613,14 @@ def main() -> None:
             val_acc = float(np.mean(val_pred == y_val))
         else:
             val_acc = 0.0
+        val_breakdown = _val_breakdown(
+            val_samples,
+            y_val,
+            p_val,
+            val_threshold,
+            small_positive_diam=args.small_positive_diam,
+            low_score_positive_thresh=args.low_score_positive_thresh,
+        ) if len(y_val) > 0 else {}
 
         epoch_info = {
             "epoch": epoch + 1,
@@ -457,11 +632,12 @@ def main() -> None:
             "val_recall": val_recall,
             "val_f1": val_f1,
             "val_best_threshold": val_threshold,
+            **val_breakdown,
         }
         history.append(epoch_info)
 
         logger.info(
-            "Epoch %02d/%d | train_loss=%.4f train_acc=%.3f | val_loss=%.4f val_f1=%.3f @ %.2f (P=%.3f R=%.3f)",
+            "Epoch %02d/%d | train_loss=%.4f train_acc=%.3f | val_loss=%.4f val_f1=%.3f @ %.2f (P=%.3f R=%.3f) | smallR=%.3f lowR=%.3f hardFPR=%.3f",
             epoch + 1,
             args.epochs,
             train_loss,
@@ -471,6 +647,9 @@ def main() -> None:
             val_threshold,
             val_precision,
             val_recall,
+            float(val_breakdown.get("val_recall_small_pos", float("nan"))),
+            float(val_breakdown.get("val_recall_low_score_pos", float("nan"))),
+            float(val_breakdown.get("val_fpr_hard_neg", float("nan"))),
         )
 
         if val_f1 > best_val_f1:
@@ -490,6 +669,8 @@ def main() -> None:
                     "loss": args.loss,
                     "focal_gamma": args.focal_gamma,
                     "model_type": model_type,
+                    "backbone_name": backbone_name,
+                    "num_slices_per_view": num_slices_per_view,
                 },
                 output_dir / "model_best.pt",
             )
