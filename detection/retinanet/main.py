@@ -158,6 +158,7 @@ def cmd_test(args):
     if args.nms_thresh is not None:
         config.nms_thresh = args.nms_thresh
     config.validate()
+    fpr_thresh = 0.0 if args.fpr_no_hard_filter else args.fpr_thresh
 
     trainer = RetinaNetTrainer(config)
     trainer.output_dir = Path(config.output_dir)
@@ -173,13 +174,11 @@ def cmd_test(args):
         ensemble_iou_thresh=args.ensemble_iou_thresh,
         ensemble_vote_power=args.ensemble_vote_power,
         fpr_model_path=args.fpr_model,
-        fpr_thresh=args.fpr_thresh,
+        fpr_thresh=fpr_thresh,
         fpr_patch_size=args.fpr_patch_size,
         fpr_weight=args.fpr_weight,
         fpr_mode=args.fpr_mode,
         fpr_fuser_model_path=args.fpr_fuser_model,
-        fpr_regression_json=args.fpr_regression_json,
-        fpr_regression_threshold_mode=args.fpr_regression_threshold_mode,
         fp_max_elongation=args.fp_max_elongation,
         fp_min_solidity=args.fp_min_solidity,
         fp_min_vol=args.fp_min_vol,
@@ -187,6 +186,18 @@ def cmd_test(args):
         morph_skip_small_diam=args.morph_skip_small_diam,
         morph_three_plane=args.morph_three_plane,
         morph_min_bad_planes=args.morph_min_bad_planes,
+        morph_require_round_planes=args.morph_require_round_planes,
+        morph_min_round_planes=args.morph_min_round_planes,
+        morph_max_round_elongation=args.morph_max_round_elongation,
+        morph_min_plane_area_ratio=args.morph_min_plane_area_ratio,
+        morph_axial_similarity=args.morph_axial_similarity,
+        morph_max_elongation_delta=args.morph_max_elongation_delta,
+        morph_max_solidity_delta=args.morph_max_solidity_delta,
+        morph_max_fill_delta=args.morph_max_fill_delta,
+        morph_min_axial_area_ratio=args.morph_min_axial_area_ratio,
+        bbox_filter=args.bbox_filter,
+        bbox_max_aspect_ratio=args.bbox_max_aspect_ratio,
+        bbox_aspect_skip_small_diam=args.bbox_aspect_skip_small_diam,
         eval_split=args.eval_split,
         max_samples=args.max_samples,
         fpr_score_aware=args.fpr_score_aware,
@@ -303,13 +314,12 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("--filter_fp", action="store_true")
     test_p.add_argument("--filter_lung_mask", action="store_true")
     test_p.add_argument("--fpr_model", default=None)
-    test_p.add_argument("--fpr_mode", choices=["fuse", "gate", "hybrid", "learned", "regression"], default="hybrid")
+    test_p.add_argument("--fpr_mode", choices=["fuse", "gate", "hybrid", "learned"], default="hybrid")
     test_p.add_argument("--fpr_thresh", type=float, default=0.5)
     test_p.add_argument("--fpr_patch_size", type=int, default=32)
     test_p.add_argument("--fpr_weight", type=float, default=0.5)
     test_p.add_argument("--fpr_fuser_model", default=None, help="optional learned fuser checkpoint (model_best.pt)")
-    test_p.add_argument("--fpr_regression_json", default=None, help="optional regression fuser JSON from fit_trace_fuser_regression.py")
-    test_p.add_argument("--fpr_regression_threshold_mode", choices=["best_f1", "coverage_safe", "custom"], default="best_f1", help="threshold source for regression mode")
+    test_p.add_argument("--fpr_no_hard_filter", action="store_true", help="use FPR/fuser only to rescore proposals; do not remove proposals before final score thresholding")
     test_p.add_argument("--fpr_score_aware", action="store_true", help="enable score-aware gate policy for FPR filtering")
     test_p.add_argument("--fpr_det_high_thresh", type=float, default=0.9, help="detector high-score boundary")
     test_p.add_argument("--fpr_det_mid_thresh", type=float, default=0.6, help="detector mid-score lower bound")
@@ -325,6 +335,18 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("--morph_skip_small_diam", type=float, default=0.0, help="skip morphology FP filtering for boxes with max diameter <= this value")
     test_p.add_argument("--morph_three_plane", action="store_true", help="apply morphology FP filtering on axial/coronal/sagittal projections")
     test_p.add_argument("--morph_min_bad_planes", type=int, default=2, help="remove a box only if at least this many planes fail morphology checks")
+    test_p.add_argument("--morph_require_round_planes", action="store_true", help="keep morphology candidates only when enough projections are round and similarly sized")
+    test_p.add_argument("--morph_min_round_planes", type=int, default=2, help="minimum round/similar projection planes required to keep a candidate")
+    test_p.add_argument("--morph_max_round_elongation", type=float, default=1.8, help="maximum major/minor axis ratio for a projection to count as round")
+    test_p.add_argument("--morph_min_plane_area_ratio", type=float, default=0.5, help="minimum smaller/larger area ratio among selected round planes")
+    test_p.add_argument("--morph_axial_similarity", action="store_true", help="keep candidates when sagittal or coronal shape is similar to axial projection")
+    test_p.add_argument("--morph_max_elongation_delta", type=float, default=1.5, help="maximum elongation difference from axial projection")
+    test_p.add_argument("--morph_max_solidity_delta", type=float, default=0.35, help="maximum solidity difference from axial projection")
+    test_p.add_argument("--morph_max_fill_delta", type=float, default=0.35, help="maximum bbox fill-ratio difference from axial projection")
+    test_p.add_argument("--morph_min_axial_area_ratio", type=float, default=0.35, help="minimum smaller/larger area ratio between axial and side projection")
+    test_p.add_argument("--bbox_filter", action="store_true", help="filter elongated prediction boxes by bbox axis aspect ratio")
+    test_p.add_argument("--bbox_max_aspect_ratio", type=float, default=3.5, help="maximum max_axis/min_axis ratio for bbox filtering")
+    test_p.add_argument("--bbox_aspect_skip_small_diam", type=float, default=0.0, help="skip bbox aspect filtering for boxes with max diameter <= this value in mm")
     test_p.add_argument("--export_case_analysis", action="store_true", help="export per-case CT/masks/HTML for TP/FP/FN analysis")
     test_p.add_argument("--case_analysis_dir", default=None, help="output directory for per-case analysis exports")
 
