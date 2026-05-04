@@ -29,7 +29,7 @@ from .config import RetinaNetConfig
 from .dataset import (
     prepare_datalist, build_train_transform, build_val_transform,
     build_det_transform, build_rand_transform,
-    get_full_split_info,
+    get_full_split_info, get_monai_cache_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -476,7 +476,7 @@ class RetinaNetTrainer:
                 crop_neg_ratio=cfg.crop_neg_ratio,
             )
 
-            cache_dir = Path("cache/monai_persistent_cache")
+            cache_dir = get_monai_cache_dir()
             cache_dir.mkdir(parents=True, exist_ok=True)
 
             # 組合 deterministic + random transforms
@@ -934,32 +934,6 @@ class RetinaNetTrainer:
             keep_mask.append(bool(lung_mask[cx, cy, cz]))
         return self._apply_prediction_mask(output, keep_mask)
 
-    @staticmethod
-    def _load_fpr_regression_spec(spec_path: str) -> Dict[str, Any]:
-        spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
-        model = spec.get("model", {})
-        if "feature_names" in model:
-            required = ["intercept", "feature_names", "coefficients"]
-        else:
-            required = ["intercept", "coef_det_score", "coef_fpr_prob", "coef_interaction"]
-        missing = [key for key in required if key not in model]
-        if missing:
-            raise ValueError(f"Invalid regression spec, missing keys: {missing}")
-        if "feature_names" in model and len(model.get("feature_names", [])) != len(model.get("coefficients", [])):
-            raise ValueError("Invalid regression spec: feature_names and coefficients length mismatch.")
-        return spec
-
-    @staticmethod
-    def _resolve_fpr_regression_threshold(spec: Dict[str, Any], threshold_mode: str, custom_thresh: float) -> float:
-        mode = str(threshold_mode).strip().lower()
-        if mode == "custom":
-            return float(custom_thresh)
-        if mode == "best_f1":
-            return float(spec.get("best_f1_threshold", {}).get("threshold", custom_thresh))
-        if mode == "coverage_safe":
-            return float(spec.get("coverage_safe_threshold", {}).get("threshold", custom_thresh))
-        raise ValueError(f"Unsupported regression threshold mode: {threshold_mode}")
-
     def _filter_predictions_by_morphology(
         self,
         output: Dict,
@@ -1048,6 +1022,112 @@ class RetinaNetTrainer:
         return bad_planes
 
     @staticmethod
+    def _has_round_similar_morphology_planes(
+        patch_bin: np.ndarray,
+        max_round_elongation: float,
+        min_solidity: float,
+        min_area_ratio: float,
+        min_round_planes: int,
+    ) -> bool:
+        from itertools import combinations
+        from skimage import measure
+
+        projections = (
+            np.any(patch_bin, axis=2),  # axial: y-x
+            np.any(patch_bin, axis=1),  # sagittal: y-z
+            np.any(patch_bin, axis=0),  # coronal: x-z
+        )
+        round_planes = []
+        for proj in projections:
+            if not np.any(proj):
+                continue
+            label_img = measure.label(proj)
+            props = measure.regionprops(label_img)
+            if not props:
+                continue
+            largest_prop = max(props, key=lambda p: p.area)
+            minor_axis = float(getattr(largest_prop, "minor_axis_length", 0.0) or 0.0)
+            major_axis = float(getattr(largest_prop, "major_axis_length", 0.0) or 0.0)
+            if major_axis <= 1e-6:
+                continue
+            elongation = float("inf") if minor_axis <= 1e-6 else major_axis / minor_axis
+            solidity = float(getattr(largest_prop, "solidity", 1.0) or 1.0)
+            if elongation <= float(max_round_elongation) and solidity >= float(min_solidity):
+                round_planes.append(float(largest_prop.area))
+
+        min_round_planes = max(1, int(min_round_planes))
+        if len(round_planes) < min_round_planes:
+            return False
+
+        min_area_ratio = float(min_area_ratio)
+        for areas in combinations(round_planes, min_round_planes):
+            min_area = min(areas)
+            max_area = max(areas)
+            if max_area <= 0:
+                continue
+            if min_area / max_area >= min_area_ratio:
+                return True
+        return False
+
+    @staticmethod
+    def _projection_shape_features(proj: np.ndarray) -> Optional[Dict[str, float]]:
+        from skimage import measure
+
+        if not np.any(proj):
+            return None
+        label_img = measure.label(proj)
+        props = measure.regionprops(label_img)
+        if not props:
+            return None
+        largest_prop = max(props, key=lambda p: p.area)
+        minor_axis = float(getattr(largest_prop, "minor_axis_length", 0.0) or 0.0)
+        major_axis = float(getattr(largest_prop, "major_axis_length", 0.0) or 0.0)
+        if major_axis <= 1e-6:
+            return None
+        elongation = float("inf") if minor_axis <= 1e-6 else major_axis / minor_axis
+        solidity = float(getattr(largest_prop, "solidity", 1.0) or 1.0)
+        minr, minc, maxr, maxc = largest_prop.bbox
+        bbox_area = max(1.0, float((maxr - minr) * (maxc - minc)))
+        fill = float(largest_prop.area) / bbox_area
+        return {
+            "area": float(largest_prop.area),
+            "elongation": float(elongation),
+            "solidity": float(solidity),
+            "fill": float(fill),
+        }
+
+    @classmethod
+    def _has_axial_similar_side_plane(
+        cls,
+        patch_bin: np.ndarray,
+        max_elongation_delta: float,
+        min_solidity_delta: float,
+        min_fill_delta: float,
+        min_area_ratio: float,
+    ) -> bool:
+        axial = cls._projection_shape_features(np.any(patch_bin, axis=2))
+        if axial is None:
+            return False
+        side_planes = (
+            cls._projection_shape_features(np.any(patch_bin, axis=1)),  # sagittal
+            cls._projection_shape_features(np.any(patch_bin, axis=0)),  # coronal
+        )
+        for side in side_planes:
+            if side is None:
+                continue
+            area_ratio = min(axial["area"], side["area"]) / max(axial["area"], side["area"], 1.0)
+            if area_ratio < float(min_area_ratio):
+                continue
+            if abs(axial["elongation"] - side["elongation"]) > float(max_elongation_delta):
+                continue
+            if abs(axial["solidity"] - side["solidity"]) > float(min_solidity_delta):
+                continue
+            if abs(axial["fill"] - side["fill"]) > float(min_fill_delta):
+                continue
+            return True
+        return False
+
+    @staticmethod
     def _proposal_morphology_features(
         patch_arr: np.ndarray,
         max_elongation: float = 4.0,
@@ -1121,7 +1201,6 @@ class RetinaNetTrainer:
         image_tensor: torch.Tensor,
         fpr_model,
         fpr_fuser,
-        fpr_regression_spec,
         fpr_patch_size: int,
         fpr_weight: float,
         fpr_thresh: float,
@@ -1136,7 +1215,12 @@ class RetinaNetTrainer:
     ) -> Dict[str, Any]:
         from .collect_fpr_data import crop_patch
         from .fpr_fuser import predict_fused_prob
-        from .fpr_model import batch_patches_to_model_input, get_model_type_from_model
+        from .fpr_model import (
+            batch_patches_to_model_input,
+            get_model_backbone_from_model,
+            get_model_num_slices_per_view,
+            get_model_type_from_model,
+        )
 
         pb = output[self.detector.target_box_key]
         ps = output[self.detector.pred_score_key]
@@ -1152,8 +1236,14 @@ class RetinaNetTrainer:
             patches.append(crop_patch(img_np, center, fpr_patch_size))
 
         fpr_model_type = get_model_type_from_model(fpr_model)
+        fpr_backbone = get_model_backbone_from_model(fpr_model)
+        fpr_num_slices_per_view = get_model_num_slices_per_view(fpr_model)
         patch_arr = np.stack(patches).astype(np.float32, copy=False)
-        patch_batch = batch_patches_to_model_input(patch_arr, fpr_model_type)
+        patch_batch = batch_patches_to_model_input(
+            patch_arr,
+            fpr_model_type,
+            num_slices_per_view=fpr_num_slices_per_view,
+        )
         patches_tensor = torch.from_numpy(patch_batch).to(self.device)
         with torch.no_grad():
             logits = fpr_model(patches_tensor)
@@ -1185,78 +1275,10 @@ class RetinaNetTrainer:
             "patch_p90": torch.from_numpy(patch_p90.astype(np.float32, copy=False)).to(ps.device),
         }
         morph_features_np = self._proposal_morphology_features(patch_arr)
-        regression_features_np = {
-            "det_score": det_scores_np,
-            "fpr_prob": nodule_prob_np,
-            "interaction": det_scores_np * nodule_prob_np,
-            "log_volume": np.log1p(vol).astype(np.float32, copy=False),
-            "elongation": (max_axis / min_axis).astype(np.float32, copy=False),
-            "patch_mean": patch_mean.astype(np.float32, copy=False),
-            "patch_std": patch_std.astype(np.float32, copy=False),
-            "patch_p90": patch_p90.astype(np.float32, copy=False),
-            "max_diameter_mm": max_axis_mm.astype(np.float32, copy=False),
-            "size_aware_small": small_box_np.astype(np.float32, copy=False),
-            **morph_features_np,
-        }
         final_score_np = det_scores_np.copy()
         keep_mask_np = np.ones(len(boxes_np), dtype=bool)
         applied_thresh_np = np.full(len(boxes_np), np.nan, dtype=np.float32)
         det_band = np.array(["all"] * len(boxes_np), dtype=object)
-
-        if fpr_mode == "regression":
-            if fpr_regression_spec is None:
-                raise ValueError("fpr_mode='regression' requires fpr_regression_json.")
-            model_spec = fpr_regression_spec.get("model", {})
-            intercept = float(model_spec["intercept"])
-            feature_names = model_spec.get("feature_names")
-            if feature_names:
-                coefficients = np.asarray(model_spec["coefficients"], dtype=np.float32)
-                missing = [name for name in feature_names if name not in regression_features_np]
-                if missing:
-                    raise ValueError(f"Regression spec requests unavailable features: {missing}")
-                X = np.stack([regression_features_np[name] for name in feature_names], axis=1).astype(np.float32, copy=False)
-                logit_np = intercept + X @ coefficients
-                fused_prob = torch.from_numpy((1.0 / (1.0 + np.exp(-logit_np))).astype(np.float32, copy=False)).to(ps.device)
-            else:
-                coef_det = float(model_spec["coef_det_score"])
-                coef_fpr = float(model_spec["coef_fpr_prob"])
-                coef_inter = float(model_spec["coef_interaction"])
-                logit = intercept + coef_det * ps + coef_fpr * nodule_prob + coef_inter * (ps * nodule_prob)
-                fused_prob = torch.sigmoid(logit)
-            final_score_np = fused_prob.detach().cpu().numpy().astype(np.float32, copy=False)
-            filtered = 0
-            if fpr_thresh is not None and fpr_thresh > 0:
-                keep_mask = fused_prob >= fpr_thresh
-                keep_mask_np = keep_mask.detach().cpu().numpy().astype(bool, copy=False)
-                applied_thresh_np[:] = float(fpr_thresh)
-                det_band[:] = "regression"
-                filtered = self._apply_prediction_mask(output, keep_mask)
-            else:
-                det_band[:] = "regression"
-            trace = [
-                {
-                    "proposal_index": int(i),
-                    "box": [float(v) for v in boxes_np[i].tolist()],
-                    "det_score": float(det_scores_np[i]),
-                    "fpr_prob": float(nodule_prob_np[i]),
-                    "final_score_after_fpr": float(final_score_np[i]),
-                    "keep_after_fpr": bool(keep_mask_np[i]),
-                    "removed_by_fpr": bool(not keep_mask_np[i]),
-                    "det_band": str(det_band[i]),
-                    "applied_threshold": None if np.isnan(applied_thresh_np[i]) else float(applied_thresh_np[i]),
-                    "fpr_mode": fpr_mode,
-                    "max_diameter_mm": float(max_axis_mm[i]),
-                    "size_aware_small": bool(small_box_np[i]),
-                    **{name: float(values[i]) for name, values in morph_features_np.items()},
-                }
-                for i in range(len(boxes_np))
-            ]
-            if len(output[self.detector.target_box_key]) == 0:
-                return {"rescored": int(len(pb)), "filtered": int(filtered), "trace": trace}
-            if fpr_thresh is not None and fpr_thresh > 0:
-                fused_prob = fused_prob[keep_mask]
-            output[self.detector.pred_score_key] = fused_prob
-            return {"rescored": int(len(pb)), "filtered": int(filtered), "trace": trace}
 
         if fpr_mode == "learned":
             if fpr_fuser is None:
@@ -1365,11 +1387,13 @@ class RetinaNetTrainer:
                 "size_aware_small": bool(small_box_np[i]),
                 **{name: float(values[i]) for name, values in morph_features_np.items()},
                 "det_band": str(det_band[i]),
-                "applied_threshold": None if np.isnan(applied_thresh_np[i]) else float(applied_thresh_np[i]),
-                "fpr_mode": fpr_mode,
-            }
-            for i in range(len(boxes_np))
-        ]
+                    "applied_threshold": None if np.isnan(applied_thresh_np[i]) else float(applied_thresh_np[i]),
+                    "fpr_mode": fpr_mode,
+                    "fpr_backbone": str(fpr_backbone),
+                    "fpr_num_slices_per_view": int(fpr_num_slices_per_view),
+                }
+                for i in range(len(boxes_np))
+            ]
         return {"rescored": int(len(pb)), "filtered": int(filtered), "trace": trace}
 
     def _apply_score_threshold_to_arrays(self, pred_boxes_list, pred_scores_list, pred_labels_list, score_thresh: float) -> int:
@@ -1409,6 +1433,34 @@ class RetinaNetTrainer:
             pred_boxes_list[i] = boxes[keep_mask]
             pred_scores_list[i] = scores[keep_mask]
             pred_labels_list[i] = pred_labels_list[i][keep_mask]
+        return n_filtered
+
+    def _apply_bbox_aspect_filter_to_output(
+        self,
+        output: Dict,
+        max_aspect_ratio: float,
+        skip_small_diam: float = 0.0,
+    ) -> int:
+        boxes = output[self.detector.target_box_key]
+        scores = output[self.detector.pred_score_key]
+        labels = output[self.detector.target_label_key]
+        if len(boxes) == 0:
+            return 0
+
+        spacing = torch.as_tensor(self.config.spacing, device=boxes.device, dtype=boxes.dtype)
+        dims_mm = torch.clamp(boxes[:, 3:6] - boxes[:, 0:3], min=0.0) * spacing
+        max_axis = torch.max(dims_mm, dim=1).values
+        min_axis = torch.clamp(torch.min(dims_mm, dim=1).values, min=1e-3)
+        aspect = max_axis / min_axis
+        keep = aspect <= float(max_aspect_ratio)
+        if skip_small_diam and skip_small_diam > 0:
+            keep = keep | (max_axis <= float(skip_small_diam))
+
+        n_filtered = int((~keep).sum().item())
+        if n_filtered > 0:
+            output[self.detector.target_box_key] = boxes[keep]
+            output[self.detector.pred_score_key] = scores[keep]
+            output[self.detector.target_label_key] = labels[keep]
         return n_filtered
 
     @staticmethod
@@ -1517,20 +1569,16 @@ class RetinaNetTrainer:
             label_key: torch.as_tensor(fused_labels_np[keep_order], device=base_device, dtype=base_label_dtype),
         }
 
-    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_fuser_model_path: str = None, fpr_regression_json: str = None, fpr_regression_threshold_mode: str = "best_f1", size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
+    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, morph_require_round_planes: bool = False, morph_min_round_planes: int = 2, morph_max_round_elongation: float = 1.8, morph_min_plane_area_ratio: float = 0.5, morph_axial_similarity: bool = False, morph_max_elongation_delta: float = 1.5, morph_max_solidity_delta: float = 0.35, morph_max_fill_delta: float = 0.35, morph_min_axial_area_ratio: float = 0.35, bbox_filter: bool = False, bbox_max_aspect_ratio: float = 3.5, bbox_aspect_skip_small_diam: float = 0.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_fuser_model_path: str = None, size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
         """訓練結束後，自動載入最佳模型並在測試集上評估。"""
         cfg = self.config
         M = self.monai
-        if fpr_mode not in {"fuse", "gate", "hybrid", "learned", "regression"}:
+        if fpr_mode not in {"fuse", "gate", "hybrid", "learned"}:
             raise ValueError(f"Unsupported fpr_mode: {fpr_mode}")
         if fpr_mode == "learned" and not fpr_fuser_model_path:
             raise ValueError("fpr_mode='learned' requires --fpr_fuser_model.")
         if fpr_mode == "learned" and not fpr_model_path:
             raise ValueError("fpr_mode='learned' requires --fpr_model.")
-        if fpr_mode == "regression" and not fpr_regression_json:
-            raise ValueError("fpr_mode='regression' requires --fpr_regression_json.")
-        if fpr_mode == "regression" and not fpr_model_path:
-            raise ValueError("fpr_mode='regression' requires --fpr_model.")
         if fpr_score_aware:
             if fpr_det_mid_thresh > fpr_det_high_thresh:
                 raise ValueError(
@@ -1619,7 +1667,7 @@ class RetinaNetTrainer:
         )
 
         if cfg.cache_dataset:
-            cache_dir = Path("cache/monai_persistent_cache/test")
+            cache_dir = get_monai_cache_dir("test")
             cache_dir.mkdir(parents=True, exist_ok=True)
             test_ds = M["PersistentDataset"](
                 test_data,
@@ -1646,6 +1694,7 @@ class RetinaNetTrainer:
         test_outputs_all = []
         test_targets_all = []
         fpr_stats = {"rescored": 0, "filtered": 0}
+        bbox_filter_stats = {"filtered": 0}
 
         start_time = time.time()
         torch.cuda.empty_cache()
@@ -1662,9 +1711,20 @@ class RetinaNetTrainer:
         # 載入 FPR 分類器 (如果有提供)
         _fpr_model = None
         if fpr_model_path is not None:
-            from .fpr_model import load_fpr_model
+            from .fpr_model import (
+                get_model_backbone_from_model,
+                get_model_num_slices_per_view,
+                get_model_type_from_model,
+                load_fpr_model,
+            )
             _fpr_model = load_fpr_model(fpr_model_path, device=str(self.device))
-            logger.info(f"  🧠 已載入 FPR 分類器 (ResNet-18): {fpr_model_path}")
+            logger.info(
+                "  🧠 已載入 FPR 分類器: %s | type=%s backbone=%s slices/view=%d",
+                fpr_model_path,
+                get_model_type_from_model(_fpr_model),
+                get_model_backbone_from_model(_fpr_model),
+                get_model_num_slices_per_view(_fpr_model),
+            )
         
         _fpr_fuser = None
         if fpr_fuser_model_path is not None:
@@ -1675,19 +1735,6 @@ class RetinaNetTrainer:
                 "  🧮 learned fuser suggested threshold: %.2f",
                 float(_fpr_fuser.get("meta", {}).get("best_threshold", 0.5)),
             )
-        _fpr_regression_spec = None
-        if fpr_regression_json is not None:
-            _fpr_regression_spec = self._load_fpr_regression_spec(fpr_regression_json)
-            if fpr_mode == "regression":
-                fpr_thresh = self._resolve_fpr_regression_threshold(
-                    _fpr_regression_spec,
-                    threshold_mode=fpr_regression_threshold_mode,
-                    custom_thresh=fpr_thresh,
-                )
-            logger.info("  🧮 已載入 regression fuser: %s", fpr_regression_json)
-            logger.info("  🧮 regression equation: %s", _fpr_regression_spec.get("model", {}).get("equation", "<missing>"))
-            logger.info("  🧮 regression threshold mode=%s | threshold=%.6f", str(fpr_regression_threshold_mode), float(fpr_thresh))
-
         if save_gifs:
             if gif_dir:
                 gif_out_dir = Path(gif_dir)
@@ -1875,7 +1922,23 @@ class RetinaNetTrainer:
                                 elongation = ma_len / mi_len
                                 
                             # 判斷是否為血管 (長條狀) 或形狀極度不規則
-                            if morph_three_plane:
+                            if morph_axial_similarity:
+                                should_remove = not self._has_axial_similar_side_plane(
+                                    patch_bin=patch_bin,
+                                    max_elongation_delta=morph_max_elongation_delta,
+                                    min_solidity_delta=morph_max_solidity_delta,
+                                    min_fill_delta=morph_max_fill_delta,
+                                    min_area_ratio=morph_min_axial_area_ratio,
+                                )
+                            elif morph_require_round_planes:
+                                should_remove = not self._has_round_similar_morphology_planes(
+                                    patch_bin=patch_bin,
+                                    max_round_elongation=morph_max_round_elongation,
+                                    min_solidity=min_solidity,
+                                    min_area_ratio=morph_min_plane_area_ratio,
+                                    min_round_planes=morph_min_round_planes,
+                                )
+                            elif morph_three_plane:
                                 bad_plane_count = self._count_bad_morphology_planes(
                                     patch_bin=patch_bin,
                                     max_elongation=max_elongation,
@@ -1895,6 +1958,14 @@ class RetinaNetTrainer:
                         test_outputs[i][self.detector.target_label_key] = pl[keep_mask_tensor]
 
                 # 5. FPR 3D CNN 分類器過濾
+                if bbox_filter:
+                    for i in range(len(test_inputs)):
+                        bbox_filter_stats["filtered"] += self._apply_bbox_aspect_filter_to_output(
+                            test_outputs[i],
+                            max_aspect_ratio=bbox_max_aspect_ratio,
+                            skip_small_diam=bbox_aspect_skip_small_diam,
+                        )
+
                 batch_fpr_traces = [None] * len(test_inputs)
                 if (fpr_model_path is not None and _fpr_model is not None) or fpr_mode == "learned":
                     for i in range(len(test_inputs)):
@@ -1903,7 +1974,6 @@ class RetinaNetTrainer:
                             image_tensor=test_inputs[i],
                             fpr_model=_fpr_model,
                             fpr_fuser=_fpr_fuser,
-                            fpr_regression_spec=_fpr_regression_spec,
                             fpr_patch_size=fpr_patch_size,
                             fpr_weight=fpr_weight,
                             fpr_thresh=fpr_thresh,
@@ -2084,6 +2154,21 @@ class RetinaNetTrainer:
                 "skip_small_diam_mm": float(morph_skip_small_diam),
                 "three_plane": bool(morph_three_plane),
                 "min_bad_planes": int(morph_min_bad_planes),
+                "require_round_planes": bool(morph_require_round_planes),
+                "min_round_planes": int(morph_min_round_planes),
+                "max_round_elongation": float(morph_max_round_elongation),
+                "min_plane_area_ratio": float(morph_min_plane_area_ratio),
+                "axial_similarity": bool(morph_axial_similarity),
+                "max_elongation_delta": float(morph_max_elongation_delta),
+                "max_solidity_delta": float(morph_max_solidity_delta),
+                "max_fill_delta": float(morph_max_fill_delta),
+                "min_axial_area_ratio": float(morph_min_axial_area_ratio),
+            },
+            "bbox_filter": {
+                "enabled": bool(bbox_filter),
+                "max_aspect_ratio": float(bbox_max_aspect_ratio),
+                "skip_small_diam_mm": float(bbox_aspect_skip_small_diam),
+                "filtered_boxes": int(bbox_filter_stats["filtered"]),
             },
             "ensemble": {
                 "enabled": bool(ensemble_enabled),
@@ -2098,8 +2183,6 @@ class RetinaNetTrainer:
                 "mode": fpr_mode,
                 "threshold": fpr_thresh,
                 "fuser_model_path": fpr_fuser_model_path,
-                "regression_json": fpr_regression_json,
-                "regression_threshold_mode": fpr_regression_threshold_mode,
                 "score_aware": bool(fpr_score_aware),
                 "det_high_thresh": float(fpr_det_high_thresh),
                 "det_mid_thresh": float(fpr_det_mid_thresh),
