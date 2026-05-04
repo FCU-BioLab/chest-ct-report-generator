@@ -205,6 +205,8 @@ def cmd_test(args):
         fpr_det_mid_thresh=args.fpr_det_mid_thresh,
         fpr_high_thresh=args.fpr_high_thresh,
         fpr_mid_thresh=args.fpr_mid_thresh,
+        fpr_apply_min_diam=args.fpr_apply_min_diam,
+        fpr_apply_max_diam=args.fpr_apply_max_diam,
         size_aware_small_diam=args.size_aware_small_diam,
         size_aware_fpr_thresh=args.size_aware_fpr_thresh,
         size_aware_final_thresh=args.size_aware_final_thresh,
@@ -325,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("--fpr_det_mid_thresh", type=float, default=0.6, help="detector mid-score lower bound")
     test_p.add_argument("--fpr_high_thresh", type=float, default=0.15, help="FPR gate threshold for high-score proposals")
     test_p.add_argument("--fpr_mid_thresh", type=float, default=0.25, help="FPR gate threshold for mid-score proposals")
+    test_p.add_argument("--fpr_apply_min_diam", type=float, default=None, help="apply FPR only to proposals with max diameter >= this value in mm")
+    test_p.add_argument("--fpr_apply_max_diam", type=float, default=None, help="apply FPR only to proposals with max diameter <= this value in mm")
     test_p.add_argument("--size_aware_small_diam", type=float, default=0.0, help="enable size-aware postprocess for proposals with max diameter <= this value")
     test_p.add_argument("--size_aware_fpr_thresh", type=float, default=None, help="FPR gate threshold for small proposals")
     test_p.add_argument("--size_aware_final_thresh", type=float, default=None, help="final score threshold for small proposals")
