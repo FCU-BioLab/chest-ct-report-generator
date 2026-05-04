@@ -1590,7 +1590,7 @@ class RetinaNetTrainer:
             label_key: torch.as_tensor(fused_labels_np[keep_order], device=base_device, dtype=base_label_dtype),
         }
 
-    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, lung_mask_thresh: float = 0.47, lung_mask_min_overlap_ratio: float = 0.01, lung_mask_method: str = "slice", override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, morph_require_round_planes: bool = False, morph_min_round_planes: int = 2, morph_max_round_elongation: float = 1.8, morph_min_plane_area_ratio: float = 0.5, morph_axial_similarity: bool = False, morph_max_elongation_delta: float = 1.5, morph_max_solidity_delta: float = 0.35, morph_max_fill_delta: float = 0.35, morph_min_axial_area_ratio: float = 0.35, bbox_filter: bool = False, bbox_max_aspect_ratio: float = 3.5, bbox_aspect_skip_small_diam: float = 0.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_apply_min_diam: float = None, fpr_apply_max_diam: float = None, fpr_fuser_model_path: str = None, size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
+    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, preprocess_lung_mask: bool = False, lung_mask_preprocess_dilate: int = 5, lung_mask_preprocess_fill: float = 0.0, filter_lung_mask: bool = False, lung_mask_thresh: float = 0.47, lung_mask_min_overlap_ratio: float = 0.01, lung_mask_method: str = "slice", override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, morph_require_round_planes: bool = False, morph_min_round_planes: int = 2, morph_max_round_elongation: float = 1.8, morph_min_plane_area_ratio: float = 0.5, morph_axial_similarity: bool = False, morph_max_elongation_delta: float = 1.5, morph_max_solidity_delta: float = 0.35, morph_max_fill_delta: float = 0.35, morph_min_axial_area_ratio: float = 0.35, bbox_filter: bool = False, bbox_max_aspect_ratio: float = 3.5, bbox_aspect_skip_small_diam: float = 0.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_apply_min_diam: float = None, fpr_apply_max_diam: float = None, fpr_fuser_model_path: str = None, size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
         """訓練結束後，自動載入最佳模型並在測試集上評估。"""
         cfg = self.config
         M = self.monai
@@ -1628,6 +1628,14 @@ class RetinaNetTrainer:
             float(cfg.proposal_score_thresh),
             float(final_score_thresh),
         )
+        if preprocess_lung_mask:
+            logger.info(
+                "  Lung mask preprocessing enabled: method=%s thresh=%.4f dilate=%d fill=%.4f",
+                str(lung_mask_method),
+                float(lung_mask_thresh),
+                int(lung_mask_preprocess_dilate),
+                float(lung_mask_preprocess_fill),
+            )
         if filter_lung_mask:
             logger.info(
                 "  Lung mask filtering enabled: method=%s thresh=%.4f min_overlap=%.4f",
@@ -1723,6 +1731,7 @@ class RetinaNetTrainer:
         test_targets_all = []
         fpr_stats = {"rescored": 0, "filtered": 0}
         bbox_filter_stats = {"filtered": 0}
+        lung_mask_preprocess_stats = {"samples": 0, "mask_fraction_sum": 0.0}
         lung_mask_stats = {"filtered": 0, "center_kept": 0, "overlap_kept": 0}
 
         start_time = time.time()
@@ -1786,6 +1795,30 @@ class RetinaNetTrainer:
                 test_source_paths = []
                 for item in test_data_batch:
                     image_mt = item.pop("image")
+                    if preprocess_lung_mask:
+                        from scipy import ndimage
+
+                        from .postprocess import generate_lung_mask
+
+                        image_np = image_mt[0].detach().cpu().numpy()
+                        lung_mask = generate_lung_mask(
+                            image_np,
+                            thresh_val=float(lung_mask_thresh),
+                            method=lung_mask_method,
+                        )
+                        dilate_iter = max(0, int(lung_mask_preprocess_dilate))
+                        if dilate_iter > 0:
+                            lung_mask = ndimage.binary_dilation(
+                                lung_mask,
+                                structure=ndimage.generate_binary_structure(3, 1),
+                                iterations=dilate_iter,
+                            )
+                        masked_np = image_np.copy()
+                        masked_np[~lung_mask.astype(bool, copy=False)] = float(lung_mask_preprocess_fill)
+                        image_mt = image_mt.clone()
+                        image_mt[0] = torch.as_tensor(masked_np, dtype=image_mt.dtype, device=image_mt.device)
+                        lung_mask_preprocess_stats["samples"] += 1
+                        lung_mask_preprocess_stats["mask_fraction_sum"] += float(np.mean(lung_mask > 0))
                     test_inputs.append(image_mt.to(self.device))
                     affine = getattr(image_mt, "affine", None)
                     if affine is None:
@@ -2185,6 +2218,18 @@ class RetinaNetTrainer:
         test_results["postprocess"] = {
             "candidate_score_thresh": float(cfg.proposal_score_thresh),
             "score_thresh": final_score_thresh,
+            "preprocess_lung_mask": {
+                "enabled": bool(preprocess_lung_mask),
+                "method": str(lung_mask_method),
+                "threshold": float(lung_mask_thresh),
+                "dilate_iterations": int(lung_mask_preprocess_dilate),
+                "fill_value": float(lung_mask_preprocess_fill),
+                "samples": int(lung_mask_preprocess_stats["samples"]),
+                "mean_mask_fraction": (
+                    float(lung_mask_preprocess_stats["mask_fraction_sum"])
+                    / max(int(lung_mask_preprocess_stats["samples"]), 1)
+                ),
+            },
             "filter_lung_mask": bool(filter_lung_mask),
             "lung_mask": {
                 "enabled": bool(filter_lung_mask),
