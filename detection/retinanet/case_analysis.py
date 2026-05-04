@@ -554,7 +554,7 @@ def _build_preview_html(
       const dims = dimsForView(currentView);
       const imageData = ctx.createImageData(dims.width, dims.height);
       for (let row = 0; row < dims.height; row += 1) {{
-        const srcRow = dims.height - 1 - row;
+        const srcRow = currentView === "axial" ? row : dims.height - 1 - row;
         for (let col = 0; col < dims.width; col += 1) {{
           const srcIdx = sampleView(currentView, srcRow, col, currentIndex);
           const pix = ct[srcIdx];
@@ -637,6 +637,7 @@ def export_case_analysis(
         pred_scores = pred_scores[keep]
 
     pred_is_tp, pred_match_gt, gt_matched = match_predictions(pred_boxes, gt_boxes, iou_thresh=iou_thresh)
+    pred_best_iou = _best_iou_per_prediction(pred_boxes, gt_boxes)
     pred_tp = pred_boxes[pred_is_tp]
     pred_fp = pred_boxes[~pred_is_tp] if len(pred_boxes) > 0 else np.zeros((0, 6), dtype=np.float32)
     gt_fn = gt_boxes[~gt_matched] if len(gt_boxes) > 0 else np.zeros((0, 6), dtype=np.float32)
@@ -703,7 +704,11 @@ def export_case_analysis(
         "score_thresh": float(score_thresh) if score_thresh is not None else None,
         "iou_thresh": float(iou_thresh),
         "pred_scores": [float(v) for v in pred_scores.tolist()],
+        "pred_boxes_yxz": [[float(x) for x in row] for row in pred_boxes.tolist()],
+        "pred_is_tp": [bool(v) for v in pred_is_tp.tolist()],
+        "pred_best_iou": [float(v) for v in pred_best_iou.tolist()],
         "pred_match_gt": [int(v) for v in pred_match_gt.tolist()],
+        "gt_boxes_yxz": [[float(x) for x in row] for row in gt_boxes.tolist()],
         "original_copy_error": original_copy_error,
     }
     case_precision, case_recall, case_f1 = _compute_case_prf1(
