@@ -12,7 +12,8 @@ segmentation/video_result
 volume_output_unet3d
 bundles
 cache
-docs
+doc
+# docs
 tools
 dataset
 detection/__pycache__
@@ -30,3 +31,6 @@ temp
 **/checkpoints/
 **/*logs/
 n8n/runtime
+n8n/.env
+n8n/data
+n8n/local-data
