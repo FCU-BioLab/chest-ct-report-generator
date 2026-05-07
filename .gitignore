@@ -23,7 +23,6 @@ detection/manifests
 detection/backup
 models
 *.pt
-*.html
 results*
 temp
 **/*pycache*/
