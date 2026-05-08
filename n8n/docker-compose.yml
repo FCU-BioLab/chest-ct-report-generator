@@ -1,6 +1,6 @@
 ﻿services:
   n8n:
-    image: n8nio/n8n:latest
+    image: n8nio/n8n:1.123.38
     container_name: n8n
     restart: unless-stopped
     ports:
@@ -14,6 +14,13 @@
       - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - CHEST_CT_REPO_ROOT=${CHEST_CT_REPO_ROOT:-/workspace}
+      - CHEST_CT_PYTHON=${CHEST_CT_PYTHON:-python}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - N8N_TEMPLATES_ENABLED=false
       - NODES_EXCLUDE=[]
     volumes:
       - ./data:/home/node/.n8n
