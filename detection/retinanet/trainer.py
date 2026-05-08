@@ -1590,7 +1590,7 @@ class RetinaNetTrainer:
             label_key: torch.as_tensor(fused_labels_np[keep_order], device=base_device, dtype=base_label_dtype),
         }
 
-    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, morph_require_round_planes: bool = False, morph_min_round_planes: int = 2, morph_max_round_elongation: float = 1.8, morph_min_plane_area_ratio: float = 0.5, morph_axial_similarity: bool = False, morph_max_elongation_delta: float = 1.5, morph_max_solidity_delta: float = 0.35, morph_max_fill_delta: float = 0.35, morph_min_axial_area_ratio: float = 0.35, bbox_filter: bool = False, bbox_max_aspect_ratio: float = 3.5, bbox_aspect_skip_small_diam: float = 0.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_apply_min_diam: float = None, fpr_apply_max_diam: float = None, fpr_fuser_model_path: str = None, size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
+    def _run_test_evaluation(self, save_gifs: bool = False, gif_dir: str = None, filter_fp: bool = False, score_thresh: float = None, filter_lung_mask: bool = False, lung_mask_thresh: float = 0.47, lung_mask_min_overlap_ratio: float = 0.01, lung_mask_method: str = "slice", override_model_path: str = None, ensemble_model_paths: List[str] = None, ensemble_iou_thresh: float = None, ensemble_vote_power: float = 1.0, fpr_model_path: str = None, fpr_thresh: float = 0.5, fpr_patch_size: int = 32, fpr_weight: float = 0.5, fpr_mode: str = "hybrid", fp_max_elongation: float = 5.0, fp_min_solidity: float = 0.3, fp_min_vol: float = 4.2, fp_max_vol: float = 65450.0, morph_skip_small_diam: float = 0.0, morph_three_plane: bool = False, morph_min_bad_planes: int = 2, morph_require_round_planes: bool = False, morph_min_round_planes: int = 2, morph_max_round_elongation: float = 1.8, morph_min_plane_area_ratio: float = 0.5, morph_axial_similarity: bool = False, morph_max_elongation_delta: float = 1.5, morph_max_solidity_delta: float = 0.35, morph_max_fill_delta: float = 0.35, morph_min_axial_area_ratio: float = 0.35, bbox_filter: bool = False, bbox_max_aspect_ratio: float = 3.5, bbox_aspect_skip_small_diam: float = 0.0, eval_split: str = "test", max_samples: int = 0, fpr_score_aware: bool = False, fpr_det_high_thresh: float = 0.9, fpr_det_mid_thresh: float = 0.6, fpr_high_thresh: float = 0.15, fpr_mid_thresh: float = 0.25, fpr_apply_min_diam: float = None, fpr_apply_max_diam: float = None, fpr_fuser_model_path: str = None, size_aware_small_diam: float = 0.0, size_aware_fpr_thresh: float = None, size_aware_final_thresh: float = None, export_case_analysis: bool = False, case_analysis_dir: str = None):
         """訓練結束後，自動載入最佳模型並在測試集上評估。"""
         cfg = self.config
         M = self.monai
@@ -1628,6 +1628,13 @@ class RetinaNetTrainer:
             float(cfg.proposal_score_thresh),
             float(final_score_thresh),
         )
+        if filter_lung_mask:
+            logger.info(
+                "  Lung mask filtering enabled: method=%s thresh=%.4f min_overlap=%.4f",
+                str(lung_mask_method),
+                float(lung_mask_thresh),
+                float(lung_mask_min_overlap_ratio),
+            )
 
         ensemble_paths = [str(Path(p)) for p in (ensemble_model_paths or []) if p]
         if not ensemble_paths:
@@ -1716,6 +1723,7 @@ class RetinaNetTrainer:
         test_targets_all = []
         fpr_stats = {"rescored": 0, "filtered": 0}
         bbox_filter_stats = {"filtered": 0}
+        lung_mask_stats = {"filtered": 0, "center_kept": 0, "overlap_kept": 0}
 
         start_time = time.time()
         torch.cuda.empty_cache()
@@ -1821,13 +1829,16 @@ class RetinaNetTrainer:
 
                 # 3. 肺部遮罩過濾 (Lung Masking)
                 if filter_lung_mask:
-                    from .postprocess import generate_lung_mask
-                    import numpy as np
+                    from .postprocess import generate_lung_mask, lung_mask_keep_flags
                     
                     for i in range(len(test_inputs)):
                         # 生成遮罩 (需要原始的 CPU影像陣列)
                         img_np = test_inputs[i][0].cpu().numpy()
-                        lung_mask = generate_lung_mask(img_np, thresh_val=0.3)
+                        lung_mask = generate_lung_mask(
+                            img_np,
+                            thresh_val=float(lung_mask_thresh),
+                            method=lung_mask_method,
+                        )
                         
                         # 取得當前掃描預測框
                         pb = test_outputs[i][self.detector.target_box_key]
@@ -1836,14 +1847,22 @@ class RetinaNetTrainer:
                         
                         if len(pb) > 0:
                             pb_np = pb.cpu().numpy()
-                            keep_mask = []
-                            for box in pb_np:
-                                # 取預測框中心點，判斷中心點是否落在肺部遮罩內
-                                cx = min(max(int((box[0] + box[3]) / 2), 0), img_np.shape[0] - 1)
-                                cy = min(max(int((box[1] + box[4]) / 2), 0), img_np.shape[1] - 1)
-                                cz = min(max(int((box[2] + box[5]) / 2), 0), img_np.shape[2] - 1)
-                                keep_mask.append(bool(lung_mask[cx, cy, cz]))
-                                
+                            keep_mask, mask_metrics = lung_mask_keep_flags(
+                                pb_np,
+                                lung_mask,
+                                min_overlap_ratio=float(lung_mask_min_overlap_ratio),
+                            )
+                            lung_mask_stats["filtered"] += int((~keep_mask).sum())
+                            lung_mask_stats["center_kept"] += sum(
+                                1 for item, keep in zip(mask_metrics, keep_mask) if keep and bool(item["center_in_lung"])
+                            )
+                            lung_mask_stats["overlap_kept"] += sum(
+                                1
+                                for item, keep in zip(mask_metrics, keep_mask)
+                                if keep
+                                and (not bool(item["center_in_lung"]))
+                                and float(item["overlap_ratio"]) >= float(lung_mask_min_overlap_ratio)
+                            )
                             keep_mask_tensor = torch.tensor(keep_mask, device=pb.device, dtype=torch.bool)
                             
                             # 過濾掉肺部以外的框
@@ -2167,6 +2186,15 @@ class RetinaNetTrainer:
             "candidate_score_thresh": float(cfg.proposal_score_thresh),
             "score_thresh": final_score_thresh,
             "filter_lung_mask": bool(filter_lung_mask),
+            "lung_mask": {
+                "enabled": bool(filter_lung_mask),
+                "method": str(lung_mask_method),
+                "threshold": float(lung_mask_thresh),
+                "min_overlap_ratio": float(lung_mask_min_overlap_ratio),
+                "filtered_boxes": int(lung_mask_stats["filtered"]),
+                "center_kept_boxes": int(lung_mask_stats["center_kept"]),
+                "overlap_kept_boxes": int(lung_mask_stats["overlap_kept"]),
+            },
             "filter_fp": bool(filter_fp),
             "morphology": {
                 "enabled": bool(filter_fp),
