@@ -169,6 +169,9 @@ def cmd_test(args):
         filter_fp=args.filter_fp,
         score_thresh=final_thresh,
         filter_lung_mask=args.filter_lung_mask,
+        lung_mask_thresh=args.lung_mask_thresh,
+        lung_mask_min_overlap_ratio=args.lung_mask_min_overlap_ratio,
+        lung_mask_method=args.lung_mask_method,
         override_model_path=primary_checkpoint,
         ensemble_model_paths=ensemble_paths if len(ensemble_paths) > 1 else None,
         ensemble_iou_thresh=args.ensemble_iou_thresh,
@@ -315,6 +318,9 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("--gif_dir", default=None)
     test_p.add_argument("--filter_fp", action="store_true")
     test_p.add_argument("--filter_lung_mask", action="store_true")
+    test_p.add_argument("--lung_mask_thresh", type=float, default=0.47, help="air threshold for generated lung mask in normalized CT scale")
+    test_p.add_argument("--lung_mask_min_overlap_ratio", type=float, default=0.01, help="keep boxes with at least this lung-mask overlap ratio")
+    test_p.add_argument("--lung_mask_method", choices=["slice", "volume"], default="slice", help="lung mask generation method: slice is n8n-style, volume is legacy")
     test_p.add_argument("--fpr_model", default=None)
     test_p.add_argument("--fpr_mode", choices=["fuse", "gate", "hybrid", "learned"], default="hybrid")
     test_p.add_argument("--fpr_thresh", type=float, default=0.5)
