@@ -61,11 +61,12 @@ Impression:
 Recommendation:
 [SELECT based on category: annual screening / 6-month CT / 3-month CT / PET-CT]"""
 
-# Nodule description template (HU used internally for classification, not shown in report)
+# Nodule description template.
 NODULE_DESCRIPTION_TEMPLATE = """Nodule {nodule_id}:
 - Size: {size_mm:.1f} mm
 - Volume: {volume_mm3:.1f} mm3
-- Type: {nodule_type}
+- Attenuation: {nodule_type}
+- Attenuation confidence: {attenuation_confidence:.2f}
 """
 
 # Fleischner criteria for nodule follow-up
@@ -93,44 +94,17 @@ def _to_float(value: Any) -> Optional[float]:
 
 def classify_nodule_type_from_features(features: Mapping[str, Any]) -> str:
     """
-    Classify nodule type from HU statistics.
-
-    Priority:
-    1) Robust percentiles (when present),
-    2) Fallback to legacy mean-HU rule.
+    Return the attenuation type computed by the feature extraction stage.
+    This function intentionally does not infer nodule type from HU mean or
+    percentiles. HU-derived composition is only a transparent estimate unless
+    a dedicated classification model is added upstream.
     """
-    mean_hu = _to_float(features.get("mean_hu"))
-    p25_hu = _to_float(features.get("p25_hu"))
-    p75_hu = _to_float(features.get("p75_hu"))
-    p90_hu = _to_float(features.get("p90_hu"))
-    max_hu = _to_float(features.get("max_hu"))
-
-    # Calcification should remain detectable even if distribution is broad.
-    if max_hu is not None and max_hu > 200:
-        return "calcified"
-
-    # Predominantly low-attenuation lesion.
-    if p90_hu is not None and p90_hu < -500:
-        return "ground-glass"
-
-    # Mixed attenuation lesion: low quartile in GGN range and upper quartile in soft tissue range.
-    if p25_hu is not None and p75_hu is not None and p25_hu < -500 and p75_hu > -300:
-        return "part-solid"
-
-    # Soft fallback for mostly low distribution.
-    if p75_hu is not None and p75_hu < -300:
-        return "ground-glass"
-
-    # Legacy fallback keeps backward behavior when percentile stats are unavailable.
-    if mean_hu is None:
-        mean_hu = 0.0
-    if mean_hu < -600:
-        return "ground-glass"
-    if mean_hu < -300:
-        return "part-solid"
-    if mean_hu > 200:
-        return "calcified"
-    return "solid"
+    nodule_type = str(features.get("attenuation_type") or "").strip()
+    confidence = _to_float(features.get("attenuation_confidence"))
+    allowed = {"solid", "part-solid", "ground-glass", "calcified"}
+    if nodule_type in allowed and confidence is not None and confidence >= 0.50:
+        return nodule_type
+    return "indeterminate"
 
 
 def get_fleischner_recommendation(size_mm: float, nodule_type: str = "solid") -> str:
@@ -155,12 +129,16 @@ def format_nodule_descriptions(lesion_features_list: list) -> str:
 
     for i, features in enumerate(lesion_features_list, 1):
         nodule_type = classify_nodule_type_from_features(features)
+        attenuation_confidence = _to_float(features.get("attenuation_confidence"))
+        if attenuation_confidence is None:
+            attenuation_confidence = 0.0
 
         desc = NODULE_DESCRIPTION_TEMPLATE.format(
             nodule_id=i,
-            size_mm=features.get("equivalent_diameter_mm", 0),
+            size_mm=features.get("longest_axis_mm", features.get("equivalent_diameter_mm", 0)),
             volume_mm3=features.get("volume_mm3", 0),
             nodule_type=nodule_type,
+            attenuation_confidence=attenuation_confidence,
         )
         descriptions.append(desc)
 
