@@ -5,6 +5,7 @@ Professional radiology report templates (English only) for generating
 structured CT reports from segmentation features with Lung-RADS 2022 scoring.
 """
 
+import json
 from typing import Any, Mapping, Optional
 
 # System prompt for the LLM
@@ -60,6 +61,43 @@ Impression:
 
 Recommendation:
 [SELECT based on category: annual screening / 6-month CT / 3-month CT / PET-CT]"""
+
+STRUCTURED_REPORT_GENERATION_PROMPT = """You are a radiologist. Write a CT chest report from the structured JSON payload below.
+
+RULES:
+- Use ONLY the values in the JSON payload; do not fabricate nodules, locations, sizes, dates, or history.
+- The Lung-RADS category has already been computed by a deterministic rule engine. Do NOT recalculate or change it.
+- Mention limitations when the JSON includes them.
+- Output in English only.
+
+STRUCTURED_JSON:
+{structured_json}
+
+Write the report:
+
+Report ID: {report_id}
+Date: {scan_date}
+
+Technique:
+Non-contrast CT chest.
+
+Findings:
+
+Lungs:
+[Describe each listed nodule with available location, attenuation, size, volume, and relevant Lung-RADS nodule category.]
+
+Mediastinum: Not evaluated.
+Pleura: Not evaluated.
+
+Lung-RADS Assessment:
+Category: [Use lung_rads.exam.category exactly]
+Management: [Use lung_rads.exam.management exactly]
+
+Impression:
+[Summarize nodule count, most suspicious nodule, and exam-level Lung-RADS category.]
+
+Recommendation:
+[Use lung_rads.exam.management exactly]"""
 
 # Nodule description template.
 NODULE_DESCRIPTION_TEMPLATE = """Nodule {nodule_id}:
@@ -149,6 +187,7 @@ def build_report_prompt(
     lesion_features_list: list,
     report_id: str = "",
     scan_date: str = "",
+    structured_input: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Build the complete prompt for report generation."""
     from datetime import datetime
@@ -159,8 +198,15 @@ def build_report_prompt(
     if not report_id:
         report_id = f"AUTO_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-    nodule_descriptions = format_nodule_descriptions(lesion_features_list)
+    if structured_input is not None:
+        structured_json = json.dumps(structured_input, ensure_ascii=False, indent=2)
+        return STRUCTURED_REPORT_GENERATION_PROMPT.format(
+            scan_date=scan_date,
+            report_id=report_id,
+            structured_json=structured_json,
+        )
 
+    nodule_descriptions = format_nodule_descriptions(lesion_features_list)
     prompt = REPORT_GENERATION_PROMPT.format(
         scan_date=scan_date,
         report_id=report_id,
