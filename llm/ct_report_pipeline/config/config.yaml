@@ -33,7 +33,7 @@ medsam2:
   default_checkpoint: "pretrained"
 
 llm:
-  model_name: "meta-llama/Llama-3.2-1B-Instruct"
+  model_name: "C:/GitHub/chest-ct-report-generator/models/llm/Llama-3.2-1B-Instruct"
   load_in_8bit: false
   max_length: 2048
   temperature: 0.3
