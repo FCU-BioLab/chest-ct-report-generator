@@ -168,6 +168,9 @@ def cmd_test(args):
         gif_dir=args.gif_dir,
         filter_fp=args.filter_fp,
         score_thresh=final_thresh,
+        preprocess_lung_mask=args.preprocess_lung_mask,
+        lung_mask_preprocess_dilate=args.lung_mask_preprocess_dilate,
+        lung_mask_preprocess_fill=args.lung_mask_preprocess_fill,
         filter_lung_mask=args.filter_lung_mask,
         lung_mask_thresh=args.lung_mask_thresh,
         lung_mask_min_overlap_ratio=args.lung_mask_min_overlap_ratio,
@@ -317,6 +320,9 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("--save_gifs", action="store_true")
     test_p.add_argument("--gif_dir", default=None)
     test_p.add_argument("--filter_fp", action="store_true")
+    test_p.add_argument("--preprocess_lung_mask", action="store_true", help="apply a coarse lung mask to the CT before detector inference")
+    test_p.add_argument("--lung_mask_preprocess_dilate", type=int, default=5, help="dilation iterations for the preprocessing lung mask")
+    test_p.add_argument("--lung_mask_preprocess_fill", type=float, default=0.0, help="normalized value used outside the preprocessing lung mask")
     test_p.add_argument("--filter_lung_mask", action="store_true")
     test_p.add_argument("--lung_mask_thresh", type=float, default=0.47, help="air threshold for generated lung mask in normalized CT scale")
     test_p.add_argument("--lung_mask_min_overlap_ratio", type=float, default=0.01, help="keep boxes with at least this lung-mask overlap ratio")
