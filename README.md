@@ -1,5 +1,95 @@
 # Chest CT Report Generator
 
+## 快速啟動：n8n 後端與醫師版 HTML
+
+以下指令以 Windows CMD 為主，假設專案放在 `C:\GitHub\chest-ct-report-generator`，輸出放在 `F:\chest-ct-report-output`。
+
+### 1. 啟動 n8n
+
+開一個 CMD 視窗執行：
+
+```cmd
+cd /d C:\GitHub\chest-ct-report-generator
+n8n\start-local-n8n.cmd
+```
+
+看到 `Editor is now accessible via: http://localhost:5678` 代表 n8n 已經起來。這個視窗不要關掉。
+
+### 2. 執行一個 Case
+
+再開另一個 CMD 視窗執行。建議每次測試都換新的 `case_id`，避免舊輸出或舊圖片被混用。
+
+```cmd
+curl -X POST http://localhost:5678/webhook/ldZr0BeUQRKujShk/webhook/chest-ct-pipeline -H "Content-Type: application/json" -d "{\"case_id\":\"case-007\",\"input_path\":\"C:/GitHub/chest-ct-report-generator/detection/nndet_data/Task100_LUNA16Nodule/imagesTr/c_1_3_6_1_4_1_14519_5_2_1_6279_6001_100225287222365663678666836860_0000.nii.gz\",\"model_path\":\"C:/GitHub/chest-ct-report-generator/detection/results/retinanet_20260222_223955/model_best.pt\",\"repo_root\":\"C:/GitHub/chest-ct-report-generator\",\"python_exe\":\"C:/GitHub/chest-ct-report-generator/venv/Scripts/python.exe\",\"work_dir\":\"F:/chest-ct-report-output\",\"threshold\":0.5,\"device\":\"cuda\",\"use_llm\":true}"
+```
+
+如果要分多行貼到 CMD，行尾的 `^` 後面不能有空白：
+
+```cmd
+curl -X POST http://localhost:5678/webhook/ldZr0BeUQRKujShk/webhook/chest-ct-pipeline ^
+  -H "Content-Type: application/json" ^
+  -d "{\"case_id\":\"case-007\",\"input_path\":\"C:/GitHub/chest-ct-report-generator/detection/nndet_data/Task100_LUNA16Nodule/imagesTr/c_1_3_6_1_4_1_14519_5_2_1_6279_6001_100225287222365663678666836860_0000.nii.gz\",\"model_path\":\"C:/GitHub/chest-ct-report-generator/detection/results/retinanet_20260222_223955/model_best.pt\",\"repo_root\":\"C:/GitHub/chest-ct-report-generator\",\"python_exe\":\"C:/GitHub/chest-ct-report-generator/venv/Scripts/python.exe\",\"work_dir\":\"F:/chest-ct-report-output\",\"threshold\":0.5,\"device\":\"cuda\",\"use_llm\":true}"
+```
+
+### 3. 查看輸出
+
+主要輸出會在：
+
+```text
+F:\chest-ct-report-output\<case_id>\
+```
+
+醫師版首頁：
+
+```text
+F:\chest-ct-report-output\<case_id>\05_report\index.html
+```
+
+完整 CT 複查頁：
+
+```text
+F:\chest-ct-report-output\<case_id>\05_report\ct_viewer.html
+```
+
+報告文字與 JSON：
+
+```text
+F:\chest-ct-report-output\<case_id>\05_report\AUTO_<case_id>.txt
+F:\chest-ct-report-output\<case_id>\05_report\AUTO_<case_id>.json
+```
+
+Segmentation mask：
+
+```text
+F:\chest-ct-report-output\<case_id>\03_segment\mask_combined.nii.gz
+F:\chest-ct-report-output\<case_id>\03_segment\mask_nodule_001.nii.gz
+```
+
+### 4. 只重生醫師版 HTML
+
+如果 pipeline 已經跑完，只想用現有結果重生 `index.html` 與 `ct_viewer.html`：
+
+```cmd
+cd /d C:\GitHub\chest-ct-report-generator
+venv\Scripts\python.exe n8n\run_case_pipeline.py --stage report --case-id case-007 --work-dir F:\chest-ct-report-output --use-llm
+```
+
+### 5. LLM 與套版報告
+
+`use_llm:true` 會先嘗試使用本機 LLM。若 LLM 無法載入或生成失敗，pipeline 會自動改用套版報告，不會讓整個流程失敗。醫師版 `index.html` 會顯示報告來源：
+
+- `LLM-generated`
+- `Template-generated`
+- `Template-generated (LLM fallback)`
+
+### 6. 注意事項
+
+- 如果 curl 回傳 `webhook is not registered`，請確認 n8n 已啟動，且 workflow 是 Active。
+- 目前本機 webhook URL 是 `http://localhost:5678/webhook/ldZr0BeUQRKujShk/webhook/chest-ct-pipeline`。
+- 若 detection image 還看到 GT 標記，通常是舊 case 的舊圖片；請換新的 `case_id` 重新跑。
+- 醫師版 `index.html` 會顯示 pipeline process time、Detection/Segmentation 特徵比較、三軸 CT viewer 連結、Segmentation mask 連結。
+- CT viewer 以 Axial 為主做 nodule 跳轉，並用同一條 slider 同步 Axial、Coronal、Sagittal 三個切面。
+
 胸部 CT 結節偵測、分割、特徵量化與報告生成專案。
 
 ## 文件索引
