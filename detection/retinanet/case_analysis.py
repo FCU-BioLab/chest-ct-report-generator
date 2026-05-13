@@ -119,17 +119,41 @@ def _copy_original_ct_to_nifti(source_image: Optional[str], output_path: Path) -
         return str(exc)
 
 
-def _choose_preview_slices(pred_boxes: np.ndarray, gt_boxes: np.ndarray, depth: int) -> List[int]:
+def _choose_preview_slices(
+    pred_boxes: np.ndarray,
+    gt_boxes: np.ndarray,
+    depth: int,
+    gt_matched: Optional[np.ndarray] = None,
+    max_slices: int = 8,
+) -> List[int]:
+    priority_z: List[int] = []
+    if gt_matched is not None and len(gt_boxes) > 0:
+        for box, matched in zip(gt_boxes, gt_matched):
+            if not bool(matched):
+                priority_z.append(int(round((float(box[2]) + float(box[5])) / 2.0)))
+
     z_values: List[int] = []
     for box in list(pred_boxes) + list(gt_boxes):
         z_values.append(int(round((float(box[2]) + float(box[5])) / 2.0)))
-    if not z_values:
+
+    if not z_values and not priority_z:
         return [max(0, depth // 2)]
+
+    priority_z = sorted({max(0, min(depth - 1, z)) for z in priority_z})
     z_values = sorted({max(0, min(depth - 1, z)) for z in z_values})
-    if len(z_values) <= 6:
+    if len(z_values) <= max_slices:
         return z_values
-    idx = np.linspace(0, len(z_values) - 1, num=6, dtype=int)
-    return [z_values[i] for i in idx]
+
+    n_sample = max(0, int(max_slices) - len(priority_z))
+    sampled: List[int] = []
+    if n_sample > 0:
+        candidates = [z for z in z_values if z not in priority_z]
+        if len(candidates) <= n_sample:
+            sampled = candidates
+        else:
+            idx = np.linspace(0, len(candidates) - 1, num=n_sample, dtype=int)
+            sampled = [candidates[i] for i in idx]
+    return sorted(set(priority_z + sampled))
 
 
 def _best_iou_per_prediction(pred_boxes: np.ndarray, gt_boxes: np.ndarray) -> np.ndarray:
@@ -239,6 +263,80 @@ def _build_trace_rows(fpr_trace: Sequence[Dict]) -> str:
             f"<td>{html.escape(str(bool(item.get('keep_after_final_score', True))))}</td>"
             "</tr>"
         )
+    return "".join(rows)
+
+
+def _fmt_float(value: object, digits: int = 3) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _build_prediction_rows(summary: Dict) -> str:
+    pred_scores = list(summary.get("pred_scores", []) or [])
+    pred_boxes = list(summary.get("pred_boxes_yxz", []) or [])
+    pred_is_tp = list(summary.get("pred_is_tp", []) or [])
+    pred_best_iou = list(summary.get("pred_best_iou", []) or [])
+    pred_match_gt = list(summary.get("pred_match_gt", []) or [])
+    rows = []
+    for idx, box in enumerate(pred_boxes):
+        score = pred_scores[idx] if idx < len(pred_scores) else 0.0
+        is_tp = bool(pred_is_tp[idx]) if idx < len(pred_is_tp) else False
+        best_iou = pred_best_iou[idx] if idx < len(pred_best_iou) else 0.0
+        match_gt = pred_match_gt[idx] if idx < len(pred_match_gt) else -1
+        if len(box) == 6:
+            y1, x1, z1, y2, x2, z2 = [float(v) for v in box]
+            cy, cx, cz = (y1 + y2) / 2.0, (x1 + x2) / 2.0, (z1 + z2) / 2.0
+            dy, dx, dz = abs(y2 - y1), abs(x2 - x1), abs(z2 - z1)
+        else:
+            cy = cx = cz = dy = dx = dz = 0.0
+        rows.append(
+            "<tr>"
+            f"<td>{idx}</td>"
+            f"<td>{html.escape('TP' if is_tp else 'FP')}</td>"
+            f"<td>{_fmt_float(score, 4)}</td>"
+            f"<td>{_fmt_float(best_iou, 3)}</td>"
+            f"<td>{html.escape(str(match_gt))}</td>"
+            f"<td>{_fmt_float(cy, 1)}</td>"
+            f"<td>{_fmt_float(cx, 1)}</td>"
+            f"<td>{_fmt_float(cz, 1)}</td>"
+            f"<td>{_fmt_float(dy, 1)}</td>"
+            f"<td>{_fmt_float(dx, 1)}</td>"
+            f"<td>{_fmt_float(dz, 1)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return '<tr><td colspan="11">No predictions</td></tr>'
+    return "".join(rows)
+
+
+def _build_gt_rows(summary: Dict) -> str:
+    gt_boxes = list(summary.get("gt_boxes_yxz", []) or [])
+    pred_match_gt = list(summary.get("pred_match_gt", []) or [])
+    matched_gt = {int(v) for v in pred_match_gt if isinstance(v, int) or str(v).lstrip("-").isdigit()}
+    rows = []
+    for idx, box in enumerate(gt_boxes):
+        if len(box) == 6:
+            y1, x1, z1, y2, x2, z2 = [float(v) for v in box]
+            cy, cx, cz = (y1 + y2) / 2.0, (x1 + x2) / 2.0, (z1 + z2) / 2.0
+            dy, dx, dz = abs(y2 - y1), abs(x2 - x1), abs(z2 - z1)
+        else:
+            cy = cx = cz = dy = dx = dz = 0.0
+        rows.append(
+            "<tr>"
+            f"<td>{idx}</td>"
+            f"<td>{html.escape('matched' if idx in matched_gt else 'FN')}</td>"
+            f"<td>{_fmt_float(cy, 1)}</td>"
+            f"<td>{_fmt_float(cx, 1)}</td>"
+            f"<td>{_fmt_float(cz, 1)}</td>"
+            f"<td>{_fmt_float(dy, 1)}</td>"
+            f"<td>{_fmt_float(dx, 1)}</td>"
+            f"<td>{_fmt_float(dz, 1)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return '<tr><td colspan="8">No GT boxes</td></tr>'
     return "".join(rows)
 
 
@@ -434,6 +532,21 @@ def _build_preview_html(
         f'<div class="preview"><img src="{html.escape(name)}" alt="{html.escape(name)}"><p>{html.escape(name)}</p></div>'
         for name in preview_files
     )
+    prediction_table = (
+        "<h2>Prediction List</h2>"
+        "<table>"
+        "<tr><th>Idx</th><th>Type</th><th>Score</th><th>Best IoU</th><th>Matched GT</th>"
+        "<th>Y</th><th>X</th><th>Z</th><th>DY</th><th>DX</th><th>DZ</th></tr>"
+        + _build_prediction_rows(summary)
+        + "</table>"
+    )
+    gt_table = (
+        "<h2>GT List</h2>"
+        "<table>"
+        "<tr><th>Idx</th><th>Status</th><th>Y</th><th>X</th><th>Z</th><th>DY</th><th>DX</th><th>DZ</th></tr>"
+        + _build_gt_rows(summary)
+        + "</table>"
+    )
     fpr_links = ""
     fpr_table = ""
     if has_fpr_trace:
@@ -510,6 +623,8 @@ def _build_preview_html(
       <canvas id="slice-canvas" width="768" height="768"></canvas>
     </section>
   </div>
+  {prediction_table}
+  {gt_table}
   <div class="previews">{previews}</div>
   {fpr_table}
   <script>
@@ -677,7 +792,7 @@ def export_case_analysis(
     original_copy_error = _copy_original_ct_to_nifti(source_image, case_dir / "ct_original.nii.gz")
 
     preview_files: List[str] = []
-    for z_idx in _choose_preview_slices(pred_boxes, gt_boxes, image_arr.shape[2]):
+    for z_idx in _choose_preview_slices(pred_boxes, gt_boxes, image_arr.shape[2], gt_matched=gt_matched):
         frame = draw_boxes_on_slice(
             image_arr[:, :, z_idx],
             pred_boxes,
