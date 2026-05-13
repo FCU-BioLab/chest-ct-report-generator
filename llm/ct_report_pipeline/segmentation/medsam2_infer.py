@@ -13,6 +13,11 @@ from pathlib import Path
 import sys
 import os
 
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - progress is optional
+    tqdm = None
+
 # Add parent directory to path for config access
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -333,7 +338,8 @@ class MedSAM2Segmenter:
         self,
         ct_volume: np.ndarray,
         bounding_boxes: List[Dict],
-        propagate: bool = True
+        propagate: bool = True,
+        show_progress: bool = False,
     ) -> List[np.ndarray]:
         """
         Segment using bounding box prompts.
@@ -360,7 +366,10 @@ class MedSAM2Segmenter:
         masks = []
         
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            for box in bounding_boxes:
+            box_iter = bounding_boxes
+            if show_progress and tqdm is not None:
+                box_iter = tqdm(bounding_boxes, desc="MedSAM2 boxes", leave=False, ncols=100)
+            for box in box_iter:
                 # Scale box to 512x512
                 x_min = box['x_min'] * 512 / orig_w
                 x_max = box['x_max'] * 512 / orig_w
