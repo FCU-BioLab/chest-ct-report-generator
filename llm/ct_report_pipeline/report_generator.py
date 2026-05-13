@@ -7,11 +7,15 @@ Supports both pre-trained and fine-tuned models with Lung-RADS 2022 classificati
 
 import os
 import sys
-import torch
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 from datetime import datetime
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 # Load environment variables from .env file
 try:
@@ -36,6 +40,7 @@ from prompt_templates import (
     format_nodule_descriptions,
     classify_nodule_type_from_features,
 )
+from lung_rads import assess_exam, build_structured_report_input
 
 
 class ReportGenerator:
@@ -61,7 +66,7 @@ class ReportGenerator:
     ):
         """Initialize the report generator."""
         self.model_name = model_name
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or ("cuda" if torch is not None and torch.cuda.is_available() else "cpu")
         self.use_lora = use_lora
         self.lora_path = lora_path
         self.load_in_8bit = load_in_8bit
@@ -76,6 +81,8 @@ class ReportGenerator:
         """Load the Llama model and tokenizer."""
         if self.is_loaded:
             return
+        if torch is None:
+            raise ImportError("PyTorch is required for LLM report generation but is not installed.")
         
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -137,6 +144,8 @@ class ReportGenerator:
         report_id: str = None,
         scan_date: str = None,
         return_xml: bool = False,
+        structured_input: Optional[Dict] = None,
+        lung_rads_assessment: Optional[Dict] = None,
     ) -> Dict[str, str]:
         """Generate a structured CT report from lesion features."""
         if not self.is_loaded:
@@ -151,12 +160,22 @@ class ReportGenerator:
             report_id = f"AUTO_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         if not scan_date:
             scan_date = datetime.now().strftime("%Y/%m/%d")
+
+        if structured_input is None:
+            structured_input = build_structured_report_input(
+                lesion_features,
+                report_id=report_id,
+                scan_date=scan_date,
+            )
+        if lung_rads_assessment is None:
+            lung_rads_assessment = structured_input.get("lung_rads")
         
         # Build prompt
         prompt = build_report_prompt(
             lesion_features,
             report_id=report_id,
             scan_date=scan_date,
+            structured_input=structured_input,
         )
         
         # Log prompt for debugging
@@ -175,7 +194,10 @@ class ReportGenerator:
         return {
             "text": report_text,
             "xml": None,
-            "parsed": None,
+            "parsed": {
+                "structured_input": structured_input,
+                "lung_rads": lung_rads_assessment,
+            },
             "report_id": report_id,
             "scan_date": scan_date,
         }
@@ -266,6 +288,7 @@ class ReportGenerator:
                     "report_id": report_id,
                     "scan_date": report.get("scan_date", ""),
                     "text": report.get("text", ""),
+                    "parsed": report.get("parsed"),
                 }, f, ensure_ascii=False, indent=2)
             saved_files["json"] = str(json_path)
         
@@ -288,75 +311,15 @@ class SimpleReportGenerator:
     @staticmethod
     def get_lung_rads_category(size_mm: float, nodule_type: str) -> Dict:
         """Calculate Lung-RADS 2022 category."""
-        if nodule_type == "calcified":
-            return {
-                "category": "1",
-                "description": "Negative - Calcified nodule (benign)",
-                "probability": "<1%",
-                "recommendation": "Continue annual LDCT screening."
-            }
-        
-        if nodule_type == "ground-glass":
-            if size_mm < 30:
-                return {
-                    "category": "2",
-                    "description": "Benign appearance - GGN <30mm",
-                    "probability": "<1%",
-                    "recommendation": "Continue annual LDCT screening."
-                }
-            else:
-                return {
-                    "category": "3",
-                    "description": "Probably benign - GGN ??0mm",
-                    "probability": "1-2%",
-                    "recommendation": "6-month LDCT follow-up."
-                }
-        
-        if nodule_type == "part-solid":
-            if size_mm < 6:
-                return {
-                    "category": "2",
-                    "description": "Benign appearance - Part-solid <6mm",
-                    "probability": "<1%",
-                    "recommendation": "Continue annual LDCT screening."
-                }
-            else:
-                return {
-                    "category": "4A",
-                    "description": "Suspicious - Part-solid ??mm",
-                    "probability": "5-15%",
-                    "recommendation": "3-month LDCT or PET/CT; tissue sampling if PET positive."
-                }
-        
-        # Solid nodule
-        if size_mm < 6:
-            return {
-                "category": "2",
-                "description": "Benign appearance - Solid <6mm",
-                "probability": "<1%",
-                "recommendation": "Continue annual LDCT screening."
-            }
-        elif size_mm < 8:
-            return {
-                "category": "3",
-                "description": "Probably benign - Solid 6-<8mm",
-                "probability": "1-2%",
-                "recommendation": "6-month LDCT follow-up."
-            }
-        elif size_mm < 15:
-            return {
-                "category": "4A",
-                "description": "Suspicious - Solid 8-<15mm",
-                "probability": "5-15%",
-                "recommendation": "3-month LDCT or PET/CT."
-            }
-        else:
-            return {
-                "category": "4B",
-                "description": "Very suspicious - Solid ??5mm",
-                "probability": ">15%",
-                "recommendation": "PET/CT and/or tissue sampling."
-            }
+        assessment = assess_exam(
+            [{"nodule_id": 1, "attenuation_type": nodule_type, "longest_axis_mm": size_mm}]
+        )["exam"]
+        return {
+            "category": assessment["category"],
+            "description": assessment["descriptor"],
+            "probability": "Not encoded by Lung-RADS v2022 rule table",
+            "recommendation": assessment["management"],
+        }
     
     def generate_report(
         self,
@@ -364,6 +327,8 @@ class SimpleReportGenerator:
         report_id: str = None,
         scan_date: str = None,
         return_xml: bool = False,
+        structured_input: Optional[Dict] = None,
+        lung_rads_assessment: Optional[Dict] = None,
     ) -> Dict[str, str]:
         """Generate a template-based report."""
         if isinstance(lesion_features, dict):
@@ -373,6 +338,19 @@ class SimpleReportGenerator:
             report_id = f"AUTO_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         if not scan_date:
             scan_date = datetime.now().strftime("%Y/%m/%d")
+
+        if structured_input is None:
+            structured_input = build_structured_report_input(
+                lesion_features,
+                report_id=report_id,
+                scan_date=scan_date,
+            )
+        if lung_rads_assessment is None:
+            lung_rads_assessment = structured_input.get("lung_rads") or assess_exam(lesion_features)
+        exam_assessment = lung_rads_assessment.get("exam", {})
+        nodule_assessments = {
+            item.get("nodule_id"): item for item in lung_rads_assessment.get("nodules", [])
+        }
         
         # Build report sections
         lines = [
@@ -388,27 +366,22 @@ class SimpleReportGenerator:
         ]
         
         # Process each nodule
-        max_category = "1"
-        max_lung_rads = None
-        
         for i, features in enumerate(lesion_features, 1):
             size_mm = features.get("equivalent_diameter_mm", 0)
             volume_mm3 = features.get("volume_mm3", 0)
             nodule_type = self.get_nodule_type(features)
-            lung_rads = self.get_lung_rads_category(size_mm, nodule_type)
+            nodule_id = features.get("nodule_id", i)
+            nodule_lung_rads = nodule_assessments.get(nodule_id, {})
+            location = ""
+            if isinstance(features.get("anatomical_location"), dict):
+                location = features["anatomical_location"].get("lobe_full") or features["anatomical_location"].get("lobe") or ""
             
-            # Track highest category
-            if lung_rads["category"] > max_category:
-                max_category = lung_rads["category"]
-                max_lung_rads = lung_rads
-            
-            lines.append(f"{i}. A {nodule_type} pulmonary nodule measuring {size_mm:.1f} mm (ESD) "
-                        f"with volume of {volume_mm3:.1f} mm3 is identified.")
-        
-        if max_lung_rads is None:
-            max_lung_rads = self.get_lung_rads_category(
-                lesion_features[0].get("equivalent_diameter_mm", 0),
-                self.get_nodule_type(lesion_features[0])
+            location_text = f" in the {location}" if location else ""
+            category_text = nodule_lung_rads.get("category", "not assessed")
+            lines.append(
+                f"{i}. A {nodule_type} pulmonary nodule{location_text} measuring {size_mm:.1f} mm (ESD) "
+                f"with volume of {volume_mm3:.1f} mm3 is identified "
+                f"(nodule Lung-RADS {category_text})."
             )
         
         lines.extend([
@@ -423,23 +396,31 @@ class SimpleReportGenerator:
             "The visualized osseous structures are unremarkable.",
             "",
             "Lung-RADS 2022 Assessment:",
-            f"Category: {max_lung_rads['category']}",
-            f"Description: {max_lung_rads['description']}",
-            f"Malignancy Probability: {max_lung_rads['probability']}",
+            f"Category: {exam_assessment.get('category', '0')}",
+            f"Description: {exam_assessment.get('descriptor', '')}",
             "",
             "Impression:",
-            f"1. {len(lesion_features)} pulmonary nodule(s) identified - Lung-RADS Category {max_lung_rads['category']}.",
+            f"1. {len(lesion_features)} pulmonary nodule(s) identified - Lung-RADS Category {exam_assessment.get('category', '0')}.",
             "",
             "Recommendation:",
-            max_lung_rads['recommendation'],
+            exam_assessment.get("management", ""),
         ])
+
+        limitations = lung_rads_assessment.get("limitations", []) + exam_assessment.get("limitations", [])
+        if limitations:
+            lines.extend(["", "Limitations:"])
+            for item in dict.fromkeys(limitations):
+                lines.append(f"- {item}")
         
         report_text = "\n".join(lines)
         
         return {
             "text": report_text,
             "xml": None,
-            "parsed": None,
+            "parsed": {
+                "structured_input": structured_input,
+                "lung_rads": lung_rads_assessment,
+            },
             "report_id": report_id,
             "scan_date": scan_date,
         }
@@ -465,6 +446,7 @@ class SimpleReportGenerator:
                     "report_id": report_id,
                     "scan_date": report.get("scan_date", ""),
                     "text": report.get("text", ""),
+                    "parsed": report.get("parsed"),
                 }, f, ensure_ascii=False, indent=2)
             saved_files["json"] = str(json_path)
         
