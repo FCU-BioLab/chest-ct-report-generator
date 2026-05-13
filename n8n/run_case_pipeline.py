@@ -42,6 +42,7 @@ sys.path.insert(0, str(PIPELINE_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import load_config, get_medsam2_checkpoint, get_medsam2_root
+from lung_rads import build_structured_report_input
 from report_generator import get_report_generator
 from segmentation import MedSAM2Segmenter
 
@@ -774,20 +775,32 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
     state = _load_state(case_dir)
     features_path = Path(_require(state, "features_path"))
     case_id = str(state.get("case_id", case_dir.name))
+    report_id = f"AUTO_{case_id}"
+    scan_date = datetime.now().strftime("%Y-%m-%d")
 
     with open(features_path, "r", encoding="utf-8") as f:
         features = json.load(f)
 
     out_dir = case_dir / "05_report"
     out_dir.mkdir(parents=True, exist_ok=True)
+    structured_input = build_structured_report_input(
+        features,
+        report_id=report_id,
+        scan_date=scan_date,
+    )
+    structured_input_path = out_dir / "structured_input.json"
+    with open(structured_input_path, "w", encoding="utf-8") as f:
+        json.dump(structured_input, f, ensure_ascii=False, indent=2)
 
     if not features:
         # Keep pipeline executable even when segmentation produced empty masks.
+        exam_assessment = structured_input["lung_rads"]["exam"]
         report = {
-            "report_id": f"AUTO_{case_id}",
-            "scan_date": datetime.now().strftime("%Y-%m-%d"),
+            "report_id": report_id,
+            "scan_date": scan_date,
             "impression": "No measurable pulmonary nodule features were extracted.",
             "findings": [],
+            "lung_rads": structured_input["lung_rads"],
             "note": "Feature list is empty; check segmentation masks and thresholds.",
         }
 
@@ -795,6 +808,7 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         json_path = out_dir / "report.json"
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(report["impression"] + "\n")
+            f.write(f"Lung-RADS Category {exam_assessment['category']}: {exam_assessment['management']}\n")
             f.write(report["note"] + "\n")
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
@@ -809,6 +823,7 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
             "source_label": "Template-generated",
             "requested_llm": bool(use_llm),
             "fallback_reason": "",
+            "structured_input_path": str(structured_input_path),
         }
         with open(out_dir / "report_meta.json", "w", encoding="utf-8") as f:
             json.dump(report_meta, f, ensure_ascii=False, indent=2)
@@ -818,6 +833,7 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
             "report_text_path": report_meta["text_path"],
             "report_json_path": report_meta["json_path"],
             "report_meta_path": str(out_dir / "report_meta.json"),
+            "structured_input_path": str(structured_input_path),
             "report_status": report_meta["status"],
             "report_generation_method": report_meta["generation_method"],
             "report_source_label": report_meta["source_label"],
@@ -833,7 +849,10 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
             generator = get_report_generator(use_llm=True)
             report = generator.generate_report(
                 lesion_features=features,
-                report_id=f"AUTO_{case_id}",
+                report_id=report_id,
+                scan_date=scan_date,
+                structured_input=structured_input,
+                lung_rads_assessment=structured_input["lung_rads"],
             )
             if generator.__class__.__name__ == "ReportGenerator":
                 report_generation_method = "llm"
@@ -847,7 +866,10 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
             generator = get_report_generator(use_llm=False)
             report = generator.generate_report(
                 lesion_features=features,
-                report_id=f"AUTO_{case_id}",
+                report_id=report_id,
+                scan_date=scan_date,
+                structured_input=structured_input,
+                lung_rads_assessment=structured_input["lung_rads"],
             )
             report_generation_method = "template"
             report_status = "template_fallback"
@@ -855,7 +877,10 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         generator = get_report_generator(use_llm=False)
         report = generator.generate_report(
             lesion_features=features,
-            report_id=f"AUTO_{case_id}",
+            report_id=report_id,
+            scan_date=scan_date,
+            structured_input=structured_input,
+            lung_rads_assessment=structured_input["lung_rads"],
         )
 
     saved = generator.save_report(report, str(out_dir), formats=["txt", "json"])
@@ -874,6 +899,7 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         "source_label": report_source_label,
         "requested_llm": bool(use_llm),
         "fallback_reason": fallback_reason,
+        "structured_input_path": str(structured_input_path),
     }
 
     with open(out_dir / "report_meta.json", "w", encoding="utf-8") as f:
@@ -884,6 +910,7 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         "report_text_path": report_meta["text_path"],
         "report_json_path": report_meta["json_path"],
         "report_meta_path": str(out_dir / "report_meta.json"),
+        "structured_input_path": str(structured_input_path),
         "report_status": report_meta["status"],
         "report_generation_method": report_meta["generation_method"],
         "report_source_label": report_meta["source_label"],
