@@ -104,7 +104,7 @@ class LNDbSliceDataset(Dataset):
             
             # Quality transforms (Reconstruction kernels/Noise)
             A.GaussianBlur(blur_limit=(3, 5), p=0.2),
-            A.GaussNoise(var_limit=(0.001, 0.005), p=0.3),
+            A.GaussNoise(std_range=(0.01, 0.05), p=0.3),
             
             ToTensorV2()
         ])

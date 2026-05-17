@@ -584,6 +584,10 @@ class UNetPPTrainer:
                 with autocast('cuda'):
                     outputs = self.model(images)
                     loss = self._compute_loss(outputs, masks, self.criterion)
+
+                if not torch.isfinite(loss):
+                    logger.warning("Skipping batch with non-finite loss: %s", loss.item())
+                    continue
                 
                 self.scaler.scale(loss).backward()
                 
@@ -595,7 +599,12 @@ class UNetPPTrainer:
                 self.scaler.update()
             else:
                 outputs = self.model(images)
-                loss = self.criterion(outputs, masks)
+                loss = self._compute_loss(outputs, masks, self.criterion)
+
+                if not torch.isfinite(loss):
+                    logger.warning("Skipping batch with non-finite loss: %s", loss.item())
+                    continue
+
                 loss.backward()
                 
                 # Gradient Clipping
@@ -614,7 +623,7 @@ class UNetPPTrainer:
             
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         
-        return total_loss / num_batches
+        return total_loss / num_batches if num_batches > 0 else float("nan")
     
     @torch.no_grad()
     def validate(self, dataloader: DataLoader, epoch: int = None, save_samples: bool = True) -> Dict[str, float]:

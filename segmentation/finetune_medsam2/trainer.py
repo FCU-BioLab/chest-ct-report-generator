@@ -489,8 +489,9 @@ class MedSAM2Trainer:
             if train_positive_samples:
                 self._save_positive_samples(train_positive_samples, sample_dir, prefix="train")
             
+            train_positive_ratio = (train_positive_count / train_total_count * 100) if train_total_count else 0.0
             self.logger.info(f"📊 訓練集統計: {train_positive_count}/{train_total_count} 個有病灶的切片 "
-                           f"({train_positive_count/train_total_count*100:.1f}%)")
+                           f"({train_positive_ratio:.1f}%)")
         except Exception as e:
             self.logger.warning(f"無法保存訓練樣本: {e}")
         
@@ -517,8 +518,9 @@ class MedSAM2Trainer:
                 if val_positive_samples:
                     self._save_positive_samples(val_positive_samples, sample_dir, prefix="val")
                 
+                val_positive_ratio = (val_positive_count / val_total_count * 100) if val_total_count else 0.0
                 self.logger.info(f"📊 驗證集統計: {val_positive_count}/{val_total_count} 個有病灶的切片 "
-                               f"({val_positive_count/val_total_count*100:.1f}%)")
+                               f"({val_positive_ratio:.1f}%)")
         except Exception as e:
             self.logger.warning(f"無法保存驗證樣本: {e}")
         
@@ -531,15 +533,21 @@ class MedSAM2Trainer:
             f.write(f"訓練集:\n")
             f.write(f"  - 總切片數: {train_total_count}\n")
             f.write(f"  - 有病灶切片數: {train_positive_count}\n")
-            f.write(f"  - 比例: {train_positive_count/train_total_count*100:.2f}%\n\n")
+            train_positive_ratio = (train_positive_count / train_total_count * 100) if train_total_count else 0.0
+            val_positive_ratio = (val_positive_count / val_total_count * 100) if val_total_count else 0.0
+            total_count = train_total_count + val_total_count
+            total_positive_count = train_positive_count + val_positive_count
+            total_positive_ratio = (total_positive_count / total_count * 100) if total_count else 0.0
+
+            f.write(f"  - 比例: {train_positive_ratio:.2f}%\n\n")
             f.write(f"驗證集:\n")
             f.write(f"  - 總切片數: {val_total_count}\n")
             f.write(f"  - 有病灶切片數: {val_positive_count}\n")
-            f.write(f"  - 比例: {val_positive_count/val_total_count*100:.2f}%\n\n")
+            f.write(f"  - 比例: {val_positive_ratio:.2f}%\n\n")
             f.write(f"總計:\n")
-            f.write(f"  - 總切片數: {train_total_count + val_total_count}\n")
-            f.write(f"  - 有病灶切片數: {train_positive_count + val_positive_count}\n")
-            f.write(f"  - 比例: {(train_positive_count + val_positive_count)/(train_total_count + val_total_count)*100:.2f}%\n")
+            f.write(f"  - 總切片數: {total_count}\n")
+            f.write(f"  - 有病灶切片數: {total_positive_count}\n")
+            f.write(f"  - 比例: {total_positive_ratio:.2f}%\n")
         
         self.logger.info(f"✅ 第一 epoch 樣本已保存（只保存有病灶的切片）")
         self.logger.info(f"📄 統計資訊已保存到: {stats_file}")

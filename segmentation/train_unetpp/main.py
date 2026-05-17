@@ -93,12 +93,28 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=None, help='Batch size')
     parser.add_argument('--lr', type=float, default=None, help='學習率')
     parser.add_argument('--patch_size', type=int, default=None, help='Patch 大小')
+    parser.add_argument(
+        '--loss_type',
+        type=str,
+        default=None,
+        choices=['dice_focal', 'adaptive', 'bce_dice', 'tversky'],
+        help='Training loss type'
+    )
+    parser.add_argument('--grad_clip', type=float, default=None, help='Gradient clipping max norm')
+    parser.add_argument('--no_amp', action='store_true', help='Disable mixed precision AMP')
+    parser.add_argument('--early_stopping_patience', type=int, default=None, help='Early stopping patience')
 
     # 模型參數
     parser.add_argument('--encoder', type=str, default=None, help='編碼器名稱')
     
     # 其他
     parser.add_argument('--data_fraction', type=float, default=1.0, help='使用的資料比例（用於快速測試）')
+    parser.add_argument(
+        '--encoder_weights',
+        type=str,
+        default=None,
+        help='Encoder pretrained weights, e.g. imagenet or none. Use none for offline training.'
+    )
     parser.add_argument('--seed', type=int, default=42, help='隨機種子')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--device', type=str, default='cuda', help='設備')
@@ -119,8 +135,19 @@ def create_config(args) -> Config:
         config.training.learning_rate = args.lr
     if args.patch_size is not None:
         config.data.patch_size = args.patch_size
+    if args.loss_type is not None:
+        config.training.loss_type = args.loss_type
+    if args.grad_clip is not None:
+        config.training.grad_clip = args.grad_clip
+    if args.no_amp:
+        config.training.use_amp = False
+    if args.early_stopping_patience is not None:
+        config.training.early_stopping_patience = args.early_stopping_patience
     if args.encoder is not None:
         config.model.encoder_name = args.encoder
+    if args.encoder_weights is not None:
+        encoder_weights = args.encoder_weights.strip()
+        config.model.encoder_weights = None if encoder_weights.lower() in {"none", "null", "no", ""} else encoder_weights
     # in_channels 使用 config 預設值 (5 for 2.5D: z-2, z-1, z, z+1, z+2)
     if args.seed is not None:
         config.seed = args.seed
@@ -271,7 +298,12 @@ def run_lndb_training(config: Config, args, run_dir: Path):
         logger.info(f"開始 LNDb Test Set 評估... ({len(test_ids)} 病人)")
         
         # 建立 Test DataLoader
-        test_dataset = CachedPatchDataset(cache_dir, test_ids, config, mode="val") # Test 使用 val 模式( deterministic)
+        if config.data.cache_preprocessed:
+            test_dataset = CachedPatchDataset(cache_dir, test_ids, config, mode="val")
+        else:
+            from train_unetpp.dataset import LNDbSliceDataset
+            slice_cache_dir = Path(config.data.cache_dir).parent / "lndb_slices"
+            test_dataset = LNDbSliceDataset(slice_cache_dir, test_ids, config, mode="val")
         
         test_loader = DataLoader(
             test_dataset,
@@ -359,7 +391,12 @@ def run_lndb_test_only(config: Config, args, run_dir: Path):
     logger.info(f"開始 LNDb Test Set 評估... ({len(test_ids)} 病人)")
     
     # 建立 DataLoader
-    test_dataset = CachedPatchDataset(cache_dir, test_ids, config, mode="val")
+    if config.data.cache_preprocessed:
+        test_dataset = CachedPatchDataset(cache_dir, test_ids, config, mode="val")
+    else:
+        from train_unetpp.dataset import LNDbSliceDataset
+        slice_cache_dir = Path(config.data.cache_dir).parent / "lndb_slices"
+        test_dataset = LNDbSliceDataset(slice_cache_dir, test_ids, config, mode="val")
     actual_workers = min(4, config.num_workers)
     
     test_loader = DataLoader(
