@@ -32,6 +32,17 @@ from peft import (
 from datasets import Dataset
 
 
+def to_jsonable(value):
+    """Convert numpy scalar-like values to plain JSON-compatible types."""
+    if isinstance(value, dict):
+        return {k: to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_jsonable(v) for v in value]
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
 def load_training_data(jsonl_path: str) -> Dataset:
     """Load training data from JSONL file."""
     data = []
@@ -141,6 +152,10 @@ def main():
     parser.add_argument("--use_8bit", action="store_true", 
                         default=llm_config.get('load_in_8bit', False),
                         help="Use 8-bit quantization")
+    parser.add_argument("--generation_eval_samples", type=int, default=0,
+                        help="Number of validation samples for generation metrics; 0 means all")
+    parser.add_argument("--generation_eval_max_new_tokens", type=int, default=1024,
+                        help="Maximum generated tokens per validation sample")
     
     args = parser.parse_args()
     
@@ -319,7 +334,9 @@ def main():
     print("=" * 60)
     gen_metrics = evaluate_generation(
         model, tokenizer, args.val_data_path, 
-        max_samples=5, max_new_tokens=args.max_length // 2
+        max_samples=args.generation_eval_samples,
+        max_new_tokens=args.generation_eval_max_new_tokens,
+        output_dir=output_dir / "generation_eval",
     )
     for key, value in gen_metrics.items():
         if isinstance(value, float):
@@ -349,7 +366,7 @@ def main():
         "lora_r": args.lora_r,
         "train_samples": len(dataset),
         "val_samples": len(val_dataset) if val_dataset else 0,
-        "eval_results": {k: float(v) if isinstance(v, (int, float)) else v for k, v in eval_results.items()},
+        "eval_results": to_jsonable(eval_results),
     }
     
     with open(metrics_file, 'w') as f:
@@ -364,16 +381,12 @@ llm:
 """)
 
 
-def evaluate_generation(model, tokenizer, val_data_path, max_samples=5, max_new_tokens=512):
-    """Evaluate generation quality with BLEU and METEOR."""
+def evaluate_generation(model, tokenizer, val_data_path, max_samples=0, max_new_tokens=1024, output_dir=None):
+    """Evaluate report generation on validation data and save predictions/metrics."""
     try:
-        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-        from nltk.translate.meteor_score import meteor_score
-        import nltk
-        nltk.download('wordnet', quiet=True)
-        nltk.download('omw-1.4', quiet=True)
+        from extras.evaluation.metrics import ClinicalEfficacyMetrics, NLGMetrics
     except ImportError:
-        print("  NLTK not installed. Skipping BLEU/METEOR evaluation.")
+        print("  Evaluation dependencies are missing. Skipping generation evaluation.")
         return {}
     
     # Load validation data (raw)
@@ -392,17 +405,11 @@ def evaluate_generation(model, tokenizer, val_data_path, max_samples=5, max_new_
     if not val_data:
         return {}
     
-    # Sample for evaluation
-    import random
-    samples = random.sample(val_data, min(max_samples, len(val_data)))
-    
-    bleu_scores = []
-    meteor_scores = []
-    format_compliance = []
-    smoother = SmoothingFunction()
+    samples = val_data[:max_samples] if max_samples and max_samples > 0 else val_data
     
     model.eval()
     print(f"  Evaluating {len(samples)} samples...")
+    generated_rows = []
     
     for i, sample in enumerate(samples):
         # Generate
@@ -431,44 +438,67 @@ def evaluate_generation(model, tokenizer, val_data_path, max_samples=5, max_new_
         
         generated = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
         reference = sample['reference']
-        
-        # Tokenize for BLEU
-        gen_tokens = generated.lower().split()
-        ref_tokens = reference.lower().split()
-        
-        # BLEU score
-        try:
-            bleu = sentence_bleu([ref_tokens], gen_tokens, smoothing_function=smoother.method1)
-            bleu_scores.append(bleu)
-        except:
-            pass
-        
-        # METEOR score
-        try:
-            meteor = meteor_score([ref_tokens], gen_tokens)
-            meteor_scores.append(meteor)
-        except:
-            pass
-        
-        # Format compliance check
-        has_report_id = "Report ID:" in generated
-        has_technique = "Technique:" in generated
-        has_findings = "Findings:" in generated or "Lungs:" in generated
-        has_lung_rads = "Lung-RADS" in generated or "Category:" in generated
-        has_recommendation = "Recommendation:" in generated
-        
-        compliance = sum([has_report_id, has_technique, has_findings, has_lung_rads, has_recommendation]) / 5
-        format_compliance.append(compliance)
-    
-    results = {}
-    if bleu_scores:
-        results['bleu'] = sum(bleu_scores) / len(bleu_scores)
-    if meteor_scores:
-        results['meteor'] = sum(meteor_scores) / len(meteor_scores)
-    if format_compliance:
-        results['format_compliance'] = sum(format_compliance) / len(format_compliance)
-    
-    return results
+        generated_rows.append({
+            "index": i + 1,
+            "prompt": sample['prompt'],
+            "reference": reference,
+            "generated": generated.strip(),
+        })
+
+    references = [row["reference"] for row in generated_rows]
+    hypotheses = [row["generated"] for row in generated_rows]
+    nlg_metrics = NLGMetrics().compute_all(references, hypotheses)
+    clinical_metrics = ClinicalEfficacyMetrics().compute_metrics(references, hypotheses)
+
+    def has(pattern, text):
+        import re
+        return bool(re.search(pattern, text, re.IGNORECASE))
+
+    format_scores = []
+    for hyp in hypotheses:
+        checks = [
+            has(r"\bReport ID\s*:", hyp),
+            has(r"\bTechnique\s*:", hyp),
+            has(r"\b(Findings|Lungs)\s*:", hyp),
+            has(r"\b(Lung-RADS|Category)\b", hyp),
+            has(r"\bRecommendation\s*:", hyp),
+        ]
+        format_scores.append(sum(checks) / len(checks))
+
+    results = {
+        "generation_eval_samples": len(generated_rows),
+        **{f"nlg_{k}": v for k, v in nlg_metrics.items()},
+        "clinical_macro_precision": clinical_metrics["macro_avg"]["precision"],
+        "clinical_macro_recall": clinical_metrics["macro_avg"]["recall"],
+        "clinical_macro_f1": clinical_metrics["macro_avg"]["f1"],
+        "format_compliance": sum(format_scores) / len(format_scores) if format_scores else 0.0,
+    }
+
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        predictions_file = output_dir / "generated_reports.jsonl"
+        metrics_file = output_dir / "evaluation_metrics.json"
+        with open(predictions_file, "w", encoding="utf-8") as f:
+            for row in generated_rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        with open(metrics_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "sample_count": len(generated_rows),
+                    "nlg": to_jsonable(nlg_metrics),
+                    "clinical_efficacy": to_jsonable(clinical_metrics),
+                    "format_compliance": results["format_compliance"],
+                    "flat_metrics": to_jsonable(results),
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        print(f"  Generated reports saved to: {predictions_file}")
+        print(f"  Detailed metrics saved to: {metrics_file}")
+
+    return to_jsonable(results)
 
 
 if __name__ == "__main__":
