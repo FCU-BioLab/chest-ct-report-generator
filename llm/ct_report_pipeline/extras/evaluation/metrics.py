@@ -6,7 +6,7 @@ as described in the Reg2RG paper.
 """
 
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 import re
 
@@ -21,16 +21,13 @@ class NLGMetrics:
             from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
             from nltk.translate.meteor_score import meteor_score
             
-            # Download required NLTK data
-            try:
-                nltk.data.find('tokenizers/punkt')
-            except LookupError:
-                nltk.download('punkt')
-            
+            # Do not download data here. Training/evaluation often runs in
+            # offline environments; METEOR is skipped when WordNet is absent.
+            self.meteor_available = True
             try:
                 nltk.data.find('corpora/wordnet')
             except LookupError:
-                nltk.download('wordnet')
+                self.meteor_available = False
             
             self.nltk = nltk
             self.sentence_bleu = sentence_bleu
@@ -80,7 +77,7 @@ class NLGMetrics:
         self,
         references: List[str],
         hypotheses: List[str]
-    ) -> float:
+    ) -> Optional[float]:
         """
         Compute METEOR score.
         
@@ -91,6 +88,9 @@ class NLGMetrics:
         Returns:
             Average METEOR score
         """
+        if not self.meteor_available:
+            return None
+
         scores = []
         
         for ref, hyp in zip(references, hypotheses):

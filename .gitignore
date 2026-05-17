@@ -1,5 +1,10 @@
 .DS_Store
 venv
+.venv-llm/
+.hf-cache/
+llm/ct_report_pipeline/assets/data/finetune_reportdata_*.jsonl
+llm/ct_report_pipeline/assets/data/finetune_reportdata_*_manifest.json
+llm/ct_report_pipeline/assets/evaluation/
 llm/RAG/build
 llm/RAG/dist
 llm/RAG/model
