@@ -3,11 +3,10 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from transformers import TrainingArguments
-from trl import SFTTrainer
+from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArguments
 
 # ===== 設定 =====
-BASE_MODEL = os.environ.get("BASE_MODEL", "google/gemma-3-1b-it")  # 使用 1B IT 版本適合 8GB VRAM
+BASE_MODEL = os.environ.get("BASE_MODEL", "meta-llama/Llama-3.2-1B-Instruct")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output/ct_report_adapter")
 DATA_PATH = os.environ.get("DATA_PATH", "../fine_tune_data/train_hospital_format.jsonl")  # 醫院標準格式訓練資料
 BATCH = int(os.environ.get("BATCH", "1"))
@@ -91,6 +90,22 @@ ds = ds.map(format_example)
 print(f"訓練樣本數: {len(ds['train'])}")
 print(f"範例文本:\n{ds['train'][0]['text'][:500]}...")
 
+def tokenize_example(ex):
+    encoded = tok(
+        ex["text"],
+        truncation=True,
+        max_length=MAX_LEN,
+        padding=False,
+    )
+    encoded["labels"] = encoded["input_ids"].copy()
+    return encoded
+
+tokenized = ds.map(
+    tokenize_example,
+    remove_columns=ds["train"].column_names,
+)
+collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False)
+
 # 訓練參數
 args = TrainingArguments(
     per_device_train_batch_size=BATCH,
@@ -110,12 +125,10 @@ args = TrainingArguments(
 
 # 開始訓練
 print("開始訓練...")
-trainer = SFTTrainer(
+trainer = Trainer(
     model=model,
-    tokenizer=tok,
-    train_dataset=ds["train"],
-    dataset_text_field="text",
-    max_seq_length=MAX_LEN,
+    train_dataset=tokenized["train"],
+    data_collator=collator,
     args=args,
 )
 

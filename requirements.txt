@@ -59,14 +59,14 @@ pytest>=7.4.0
 # Install these only AFTER you manually install the correct torch/torchvision.
 # Keeping them commented avoids pip pulling an incompatible CPU/CUDA torch build.
 # ---------------------------------------------------------------------------
-# accelerate>=0.27.0
-# peft>=0.10.0
-# bitsandbytes>=0.43.0
+# LoRA/QLoRA fine-tuning
+accelerate>=0.27.0
+peft>=0.10.0
+bitsandbytes>=0.43.0
 # monai>=1.3.0
 # segmentation-models-pytorch>=0.3.0
 # sentence-transformers>=3.0.0
 # lungmask>=0.2.20
-# trl>=0.9.0
 # pytorch-ignite>=0.4.11
 # submitit>=1.5.1
 # tensordict>=0.5.0

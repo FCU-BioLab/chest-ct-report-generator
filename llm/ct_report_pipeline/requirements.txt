@@ -36,7 +36,7 @@ hydra-core>=1.2.0
 python-dotenv>=1.0.0
 
 # Optional: Quantization (for large models)
-# bitsandbytes>=0.41.0  # Uncomment for 8-bit training
+bitsandbytes>=0.43.0  # Required for QLoRA / 4-bit training
 
 # Optional: DICOM support
 # pydicom>=2.4.0

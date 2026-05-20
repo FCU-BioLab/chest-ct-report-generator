@@ -33,7 +33,7 @@ except ImportError:
     print("警告: pydicom 未安裝，將無法讀取 DICOM 檔案")
 
 # ===== 設定 =====
-MODEL_ID = "google/gemma-3-1b-it"
+MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
 USE_ADAPTER = False  # 設為 True 以載入微調後的 adapter
 ADAPTER_PATH = "output/ct_report_adapter"
 
@@ -307,7 +307,7 @@ Report:"""
         Returns:
             (生成的報告, 統計資訊)
         """
-        # 使用 Gemma 3 的對話格式
+        # 使用 Llama 3.2 的對話格式
         formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
         
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)

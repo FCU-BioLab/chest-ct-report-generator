@@ -3,8 +3,7 @@ import time
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # ===== 設定 =====
-# MODEL_ID = "google/gemma-3-4b-it"  # 需要約 8GB+ VRAM
-MODEL_ID = "google/gemma-3-1b-it"  # 只需約 2-3GB VRAM，速度更快
+MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
 USE_ADAPTER = False  # 設為 True 以載入微調後的 adapter
 ADAPTER_PATH = "output/ct_report_adapter"
 
@@ -51,7 +50,7 @@ else:
         device_map="cpu",
     ).eval()
 
-# 使用 Gemma 3 的對話格式
+    # 使用 Llama 3.2 的對話格式
 user_prompt = "請給我一個完整的肺部腫瘤之CT影像結構化醫學報告範例，醫師為葉偉成醫師"
 prompt = f"<start_of_turn>user\n{user_prompt}<end_of_turn>\n<start_of_turn>model\n"
 

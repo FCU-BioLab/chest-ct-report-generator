@@ -108,7 +108,7 @@ ollama --version
 
 :: Download Ollama Model (3 attempts)
 set attempts=0
-set model=gemma3:4b
+set model=llama3.2:3b
 :pull_model
 echo Downloading Ollama model !model!...
 ollama pull !model!
@@ -128,7 +128,7 @@ echo Ollama model downloaded successfully!
 :: PyInstaller packaging
 echo Building executable with PyInstaller...
 python -m PyInstaller --noconfirm ^
-    --name MedicalReportAppByGemma3 ^
+    --name MedicalReportAppByLlama32 ^
     --onefile ^
     --windowed ^
     --add-data "lung_rads_criteria.txt;RAG" ^

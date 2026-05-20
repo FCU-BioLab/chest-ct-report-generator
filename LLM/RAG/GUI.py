@@ -386,9 +386,7 @@ class MedicalReportApp(QWidget):
 
         try:
             response = ollama.chat(
-                # model="gemma3n:e4b",
-                model="gemma3n:e2b",
-                # model="gemma3:4b",
+                model="llama3.2:3b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "Generate a radiological report : " + query}

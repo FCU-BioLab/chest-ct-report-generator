@@ -3,7 +3,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
 # ===== 設定 =====
-BASE_MODEL = os.environ.get("BASE_MODEL", "google/gemma-3-1b-it")
+BASE_MODEL = os.environ.get("BASE_MODEL", "meta-llama/Llama-3.2-1B-Instruct")
 ADAPTER = os.environ.get("ADAPTER", "output/ct_report_adapter")
 
 # 檢查 GPU 並設定 dtype
@@ -43,7 +43,7 @@ if torch.cuda.is_available():
 
 def generate_report(prompt: str, max_new_tokens: int = 1024) -> str:
     """生成 CT 影像報告"""
-    # 使用 Gemma 3 的對話格式
+    # 使用 Llama 3.2 的對話格式
     formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
     
     inputs = tok(formatted_prompt, return_tensors="pt").to(model.device)
