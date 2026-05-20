@@ -330,12 +330,12 @@ class ReportGenerator:
             structured_input=llm_structured_input,
         )
         
-        # Log prompt for debugging
-        print("\n" + "="*60)
-        print("[LLM PROMPT]")
-        print("="*60)
-        print(prompt)
-        print("="*60 + "\n")
+        if os.environ.get("CHEST_CT_LOG_LLM_PROMPT", "").lower() in {"1", "true", "yes"}:
+            print("\n" + "=" * 60)
+            print("[LLM PROMPT]")
+            print("=" * 60)
+            print(prompt)
+            print("=" * 60 + "\n")
         
         # Generate response
         generated_text = self._generate(prompt)

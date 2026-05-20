@@ -86,6 +86,44 @@ def copy_case_html(result: Dict[str, Any], html_output_dir: Path) -> str:
     return str(target_path)
 
 
+def hydrate_response_from_state(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill response fields from local state.json when n8n stdout parsing was incomplete."""
+    state_path = response.get("state_json_path")
+    if not state_path:
+        return response
+
+    path = Path(state_path)
+    if not path.exists():
+        return response
+
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return response
+
+    for key in (
+        "nodule_count",
+        "total_process_seconds",
+        "summary_html_path",
+        "report_text_path",
+        "report_json_path",
+        "report_status",
+        "report_generation_method",
+        "report_source_label",
+        "report_fallback_reason",
+        "structured_input_path",
+        "llm_structured_input_path",
+        "llm_raw_text_path",
+        "llm_validation_fix_count",
+        "llm_base_model",
+        "llm_adapter",
+        "llm_validate_output",
+    ):
+        if response.get(key) in (None, "", 0) and key in state:
+            response[key] = state[key]
+    return response
+
+
 def rel_link(path: str, base_dir: Path) -> str:
     if not path:
         return ""
@@ -248,6 +286,7 @@ def main() -> None:
         started = time.time()
         try:
             response = post_json(args.webhook_url, payload, args.timeout_sec)
+            response = hydrate_response_from_state(response)
             elapsed = round(time.time() - started, 3)
             result = {
                 "index": index,
