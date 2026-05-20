@@ -233,3 +233,15 @@ Results are written incrementally to:
 ```text
 n8n/runtime_detection_test/results.json
 ```
+
+HTML summaries are copied to F: by default:
+
+```text
+F:/chest-ct-report-output/n8n_detection_test_html/index.html
+```
+
+Use a different HTML output folder when needed:
+
+```cmd
+python n8n\run_detection_test_set.py --model-path detection\backup\retinanet_20260222_223955\model_best.pt --html-output-dir F:\my_html_results
+```
