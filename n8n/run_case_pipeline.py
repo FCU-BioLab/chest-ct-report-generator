@@ -43,7 +43,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import load_config, get_medsam2_checkpoint, get_medsam2_root
 from lung_rads import build_structured_report_input
-from report_generator import get_report_generator
+from report_generator import build_llm_structured_input, get_report_generator
 from segmentation import MedSAM2Segmenter
 
 
@@ -771,7 +771,13 @@ def stage_feature(case_dir: Path) -> Dict:
     return result
 
 
-def stage_report(case_dir: Path, use_llm: bool) -> Dict:
+def stage_report(
+    case_dir: Path,
+    use_llm: bool,
+    llm_base_model: str = "",
+    llm_adapter: str = "",
+    validate_output: bool = True,
+) -> Dict:
     state = _load_state(case_dir)
     features_path = Path(_require(state, "features_path"))
     case_id = str(state.get("case_id", case_dir.name))
@@ -791,6 +797,10 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
     structured_input_path = out_dir / "structured_input.json"
     with open(structured_input_path, "w", encoding="utf-8") as f:
         json.dump(structured_input, f, ensure_ascii=False, indent=2)
+    llm_structured_input = build_llm_structured_input(structured_input)
+    llm_structured_input_path = out_dir / "llm_structured_input.json"
+    with open(llm_structured_input_path, "w", encoding="utf-8") as f:
+        json.dump(llm_structured_input, f, ensure_ascii=False, indent=2)
 
     if not features:
         # Keep pipeline executable even when segmentation produced empty masks.
@@ -824,6 +834,8 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
             "requested_llm": bool(use_llm),
             "fallback_reason": "",
             "structured_input_path": str(structured_input_path),
+            "llm_structured_input_path": str(llm_structured_input_path),
+            "llm_validate_output": bool(validate_output),
         }
         with open(out_dir / "report_meta.json", "w", encoding="utf-8") as f:
             json.dump(report_meta, f, ensure_ascii=False, indent=2)
@@ -834,6 +846,7 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
             "report_json_path": report_meta["json_path"],
             "report_meta_path": str(out_dir / "report_meta.json"),
             "structured_input_path": str(structured_input_path),
+            "llm_structured_input_path": str(llm_structured_input_path),
             "report_status": report_meta["status"],
             "report_generation_method": report_meta["generation_method"],
             "report_source_label": report_meta["source_label"],
@@ -843,16 +856,23 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
     report_generation_method = "template"
     report_status = "template"
     fallback_reason = ""
+    llm_kwargs = {}
+    if llm_base_model:
+        llm_kwargs["model_name"] = llm_base_model
+    if llm_adapter:
+        llm_kwargs["lora_path"] = llm_adapter
+        llm_kwargs["use_lora"] = True
 
     if use_llm:
         try:
-            generator = get_report_generator(use_llm=True)
+            generator = get_report_generator(use_llm=True, **llm_kwargs)
             report = generator.generate_report(
                 lesion_features=features,
                 report_id=report_id,
                 scan_date=scan_date,
                 structured_input=structured_input,
                 lung_rads_assessment=structured_input["lung_rads"],
+                validate_output=validate_output,
             )
             if generator.__class__.__name__ == "ReportGenerator":
                 report_generation_method = "llm"
@@ -884,6 +904,10 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         )
 
     saved = generator.save_report(report, str(out_dir), formats=["txt", "json"])
+    raw_text_path = ""
+    if report.get("raw_text"):
+        raw_text_path = str(out_dir / f"{report.get('report_id', report_id)}_raw.txt")
+        Path(raw_text_path).write_text(str(report.get("raw_text", "")), encoding="utf-8")
 
     report_source_label = "LLM-generated" if report_generation_method == "llm" else "Template-generated"
     if report_status == "template_fallback":
@@ -900,6 +924,12 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         "requested_llm": bool(use_llm),
         "fallback_reason": fallback_reason,
         "structured_input_path": str(structured_input_path),
+        "llm_structured_input_path": str(llm_structured_input_path),
+        "llm_base_model": llm_base_model,
+        "llm_adapter": llm_adapter,
+        "llm_validate_output": bool(validate_output),
+        "llm_raw_text_path": raw_text_path,
+        "validation_fixes": report.get("parsed", {}).get("validation_fixes", []),
     }
 
     with open(out_dir / "report_meta.json", "w", encoding="utf-8") as f:
@@ -911,6 +941,9 @@ def stage_report(case_dir: Path, use_llm: bool) -> Dict:
         "report_json_path": report_meta["json_path"],
         "report_meta_path": str(out_dir / "report_meta.json"),
         "structured_input_path": str(structured_input_path),
+        "llm_structured_input_path": str(llm_structured_input_path),
+        "llm_raw_text_path": raw_text_path,
+        "llm_validation_fix_count": len(report_meta["validation_fixes"]),
         "report_status": report_meta["status"],
         "report_generation_method": report_meta["generation_method"],
         "report_source_label": report_meta["source_label"],
@@ -1590,6 +1623,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--medsam2-checkpoint", default="")
     parser.add_argument("--use-llm", action="store_true")
+    parser.add_argument("--llm-base-model", default="")
+    parser.add_argument("--llm-adapter", default="")
+    parser.add_argument("--no-llm-validate", action="store_true")
     parser.add_argument("--no-propagate", action="store_true")
 
     return parser.parse_args()
@@ -1609,6 +1645,12 @@ def main() -> None:
         state["device"] = str(args.device)
     if args.stage in {"report", "run"} or args.use_llm or "use_llm" not in state:
         state["use_llm"] = bool(args.use_llm)
+    if args.stage in {"report", "run"} or args.llm_base_model or "llm_base_model" not in state:
+        state["llm_base_model"] = str(args.llm_base_model or state.get("llm_base_model", ""))
+    if args.stage in {"report", "run"} or args.llm_adapter or "llm_adapter" not in state:
+        state["llm_adapter"] = str(args.llm_adapter or state.get("llm_adapter", ""))
+    if args.stage in {"report", "run"} or args.no_llm_validate or "llm_validate_output" not in state:
+        state["llm_validate_output"] = not args.no_llm_validate
     if args.stage in {"segment", "run"} or args.no_propagate or "propagate" not in state:
         state["propagate"] = not args.no_propagate
 
@@ -1662,7 +1704,13 @@ def main() -> None:
                 case_dir,
                 state,
                 "report",
-                lambda: stage_report(case_dir, use_llm=args.use_llm),
+                lambda: stage_report(
+                    case_dir,
+                    use_llm=args.use_llm,
+                    llm_base_model=state.get("llm_base_model", ""),
+                    llm_adapter=state.get("llm_adapter", ""),
+                    validate_output=bool(state.get("llm_validate_output", True)),
+                ),
             )
         )
         state.update(generate_summary_html(case_dir, state))
@@ -1705,7 +1753,13 @@ def main() -> None:
                 case_dir,
                 state,
                 "report",
-                lambda: stage_report(case_dir, use_llm=args.use_llm),
+                lambda: stage_report(
+                    case_dir,
+                    use_llm=args.use_llm,
+                    llm_base_model=state.get("llm_base_model", ""),
+                    llm_adapter=state.get("llm_adapter", ""),
+                    validate_output=bool(state.get("llm_validate_output", True)),
+                ),
             )
         )
         state.update(generate_summary_html(case_dir, state))

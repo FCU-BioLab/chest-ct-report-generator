@@ -39,7 +39,7 @@ llm:
   temperature: 0.3
   lora_weights:
     base_dir: "${PIPELINE_ROOT}/assets/models/lora_ct_report"
-    latest: "${PIPELINE_ROOT}/assets/models/lora_ct_report/lora_20251220_000011/final"
+    latest: "${PIPELINE_ROOT}/assets/models/lora_ct_report/llama32_20260520"
 
 outputs:
   root: "${PIPELINE_ROOT}/outputs"

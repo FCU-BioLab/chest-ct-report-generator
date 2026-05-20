@@ -180,3 +180,56 @@ n8n/runtime/<case_id>/
 ```
 
 `n8n/.env`、`n8n/data`、`n8n/local-data`、`n8n/runtime` 是本機狀態與輸出，不應提交到版本控制。
+
+## Llama 3.2 structured JSON report mode
+
+The workflow now defaults to the two-step LLM report method:
+
+1. Detection/segmentation/feature extraction writes `04_feature/lesion_features.json`.
+2. The report stage writes `05_report/structured_input.json` with full deterministic Lung-RADS metadata.
+3. The LLM receives `05_report/llm_structured_input.json`, which keeps image-derived features and deterministic Lung-RADS category, but removes prefilled malignancy risk and recommendation/management fields.
+4. The LLM writes the radiology report and infers malignancy risk/recommendation from few-shot Lung-RADS examples.
+5. The validator enforces final consistency between Lung-RADS category, malignancy risk, and recommendation. The raw LLM output is preserved as `*_raw.txt` and in the report JSON `raw_text` field.
+
+Additional webhook payload fields:
+
+```json
+{
+  "use_llm": true,
+  "llm_base_model": "C:/GitHub/chest-ct-report-generator/models/llm/Llama-3.2-1B-Instruct",
+  "llm_adapter": "C:/GitHub/chest-ct-report-generator/llm/ct_report_pipeline/assets/models/lora_ct_report/llama32_20260520",
+  "llm_validate_output": true
+}
+```
+
+The webhook response includes:
+
+```json
+{
+  "structured_input_path": ".../05_report/structured_input.json",
+  "llm_structured_input_path": ".../05_report/llm_structured_input.json",
+  "llm_raw_text_path": ".../05_report/AUTO_case_raw.txt",
+  "llm_validation_fix_count": 0
+}
+```
+
+## Run Detection test split through n8n
+
+Start n8n and import/activate `n8n/workflows/chest_ct_pipeline_5_stages.json`, then submit the Detection testing split:
+
+```cmd
+cd /d C:\GitHub\chest-ct-report-generator
+python n8n\run_detection_test_set.py --model-path detection\backup\retinanet_20260222_223955\model_best.pt --limit 1
+```
+
+Run all testing cases by removing `--limit 1`:
+
+```cmd
+python n8n\run_detection_test_set.py --model-path detection\backup\retinanet_20260222_223955\model_best.pt
+```
+
+Results are written incrementally to:
+
+```text
+n8n/runtime_detection_test/results.json
+```

@@ -65,10 +65,35 @@ Recommendation:
 STRUCTURED_REPORT_GENERATION_PROMPT = """You are a radiologist. Write a CT chest report from the structured JSON payload below.
 
 RULES:
-- Use ONLY the values in the JSON payload; do not fabricate nodules, locations, sizes, dates, or history.
-- The Lung-RADS category has already been computed by a deterministic rule engine. Do NOT recalculate or change it.
+- Use ONLY the structured JSON values.
+- Do NOT add nodules, locations, clinical history, mediastinal findings, or pleural findings that are not provided.
+- Use the provided lung_rads.exam.category exactly. Do NOT recalculate or change the category.
+- Determine malignancy risk and recommendation from the provided Lung-RADS category using the examples below.
 - Mention limitations when the JSON includes them.
 - Output in English only.
+
+FEW-SHOT RECOMMENDATION EXAMPLES:
+Example 1:
+Provided Lung-RADS category: 2
+Provided malignancy risk: <1%
+Correct recommendation: Continue annual LDCT screening.
+Incorrect recommendation: 6-month LDCT follow-up.
+
+Example 2:
+Provided Lung-RADS category: 3
+Provided malignancy risk: 1-2%
+Correct recommendation: 6-month LDCT follow-up.
+
+Example 3:
+Provided Lung-RADS category: 4A
+Provided malignancy risk: 5-15%
+Correct recommendation: 3-month LDCT or PET/CT.
+
+Example 4:
+Provided Lung-RADS category: 4B
+Provided malignancy risk: >15%
+Correct recommendation: PET/CT or tissue sampling.
+Incorrect recommendation: 6-month LDCT follow-up.
 
 STRUCTURED_JSON:
 {structured_json}
@@ -91,13 +116,13 @@ Pleura: Not evaluated.
 
 Lung-RADS Assessment:
 Category: [Use lung_rads.exam.category exactly]
-Management: [Use lung_rads.exam.management exactly]
+Malignancy Risk: [Determine from the provided Lung-RADS category]
 
 Impression:
 [Summarize nodule count, most suspicious nodule, and exam-level Lung-RADS category.]
 
 Recommendation:
-[Use lung_rads.exam.management exactly]"""
+[Determine from the provided Lung-RADS category]"""
 
 # Nodule description template.
 NODULE_DESCRIPTION_TEMPLATE = """Nodule {nodule_id}:

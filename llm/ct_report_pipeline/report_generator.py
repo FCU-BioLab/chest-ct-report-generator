@@ -8,8 +8,10 @@ Supports both pre-trained and fine-tuned models with Lung-RADS 2022 classificati
 import os
 import sys
 import json
+import re
+from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from datetime import datetime
 
 try:
@@ -41,6 +43,153 @@ from prompt_templates import (
     classify_nodule_type_from_features,
 )
 from lung_rads import assess_exam, build_structured_report_input
+
+
+def category_output_mapping(category: str) -> Dict[str, str]:
+    """Map deterministic Lung-RADS category to report-facing risk and recommendation."""
+    return {
+        "1": {
+            "malignancy_risk": "<1%",
+            "recommendation": "Continue annual LDCT screening.",
+        },
+        "2": {
+            "malignancy_risk": "<1%",
+            "recommendation": "Continue annual LDCT screening.",
+        },
+        "3": {
+            "malignancy_risk": "1-2%",
+            "recommendation": "6-month LDCT follow-up.",
+        },
+        "4A": {
+            "malignancy_risk": "5-15%",
+            "recommendation": "3-month LDCT or PET/CT.",
+        },
+        "4B": {
+            "malignancy_risk": ">15%",
+            "recommendation": "PET/CT or tissue sampling.",
+        },
+        "4X": {
+            "malignancy_risk": ">15%",
+            "recommendation": "Diagnostic evaluation as appropriate for a very suspicious Lung-RADS finding.",
+        },
+    }.get(category, {"malignancy_risk": "Not encoded", "recommendation": "Additional evaluation is needed."})
+
+
+def build_llm_structured_input(structured_input: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build the LLM-facing JSON payload without prefilled risk/recommendation fields."""
+    payload = deepcopy(dict(structured_input))
+    payload["schema_version"] = "ct-report-structured-input-v1-rule-lungrads-llm-report"
+    payload["task"] = "Generate a CT chest radiology report from structured nodule data."
+    payload["decision_policy"] = {
+        "lung_rads_category": "Already determined from image-derived structured features. LLM must use it exactly.",
+        "malignancy_risk": "LLM must determine from the provided Lung-RADS category using the few-shot mapping.",
+        "recommendation": "LLM must determine from the provided Lung-RADS category using the few-shot mapping.",
+        "do_not_fabricate": [
+            "extra nodules",
+            "location",
+            "patient history",
+            "unprovided mediastinal or pleural findings",
+        ],
+    }
+    payload["image_features"] = {
+        "nodules": payload.pop("nodules", []),
+    }
+    payload["image_features"]["total_lesions"] = len(payload["image_features"]["nodules"])
+    payload["image_features"]["max_diameter_mm"] = max(
+        [
+            float(nodule.get("longest_axis_mm") or nodule.get("equivalent_diameter_mm") or 0.0)
+            for nodule in payload["image_features"]["nodules"]
+        ]
+        or [0.0]
+    )
+    payload["output_requirements"] = {
+        "must_include": [
+            "all listed nodules",
+            "provided Lung-RADS category",
+            "malignancy risk corresponding to Lung-RADS",
+            "recommendation corresponding to Lung-RADS",
+        ]
+    }
+    _remove_report_answer_fields(payload)
+    return payload
+
+
+def _remove_report_answer_fields(value: Any) -> None:
+    """Remove fields that would give the LLM the final risk/recommendation answer."""
+    if isinstance(value, dict):
+        for key in list(value.keys()):
+            normalized = str(key).lower()
+            if normalized in {"management", "recommendation", "malignancy_risk", "risk", "probability"}:
+                value.pop(key, None)
+            else:
+                _remove_report_answer_fields(value[key])
+    elif isinstance(value, list):
+        for item in value:
+            _remove_report_answer_fields(item)
+
+
+def validate_and_fix_report(report_text: str, structured_input: Mapping[str, Any]) -> Tuple[str, List[Dict[str, str]]]:
+    """Enforce final report consistency with the structured Lung-RADS category."""
+    category = str(structured_input.get("lung_rads", {}).get("exam", {}).get("category") or "").strip()
+    mapping = category_output_mapping(category)
+    fixed = report_text
+    fixes: List[Dict[str, str]] = []
+
+    fixed, changed = _replace_or_insert_line(
+        fixed,
+        field_name="Category",
+        value=category,
+        insert_after="Lung-RADS Assessment:",
+    )
+    if changed:
+        fixes.append({"field": "category", "value": category})
+
+    fixed, changed = _replace_or_insert_line(
+        fixed,
+        field_name="Malignancy Risk",
+        value=mapping["malignancy_risk"],
+        insert_after="Category:",
+    )
+    if changed:
+        fixes.append({"field": "malignancy_risk", "value": mapping["malignancy_risk"]})
+
+    fixed, changed = _replace_section(
+        fixed,
+        heading="Recommendation",
+        body=mapping["recommendation"],
+    )
+    if changed:
+        fixes.append({"field": "recommendation", "value": mapping["recommendation"]})
+
+    return fixed, fixes
+
+
+def _replace_or_insert_line(text: str, field_name: str, value: str, insert_after: str) -> Tuple[str, bool]:
+    replacement = f"{field_name}: {value}"
+    pattern = rf"(?im)^{re.escape(field_name)}:\s*.*$"
+    match = re.search(pattern, text)
+    if match:
+        if match.group(0).strip() == replacement:
+            return text, False
+        return re.sub(pattern, replacement, text, count=1), True
+
+    anchor_pattern = rf"(?im)^({re.escape(insert_after)}\s*)$"
+    anchor = re.search(anchor_pattern, text)
+    if anchor:
+        insert_at = anchor.end()
+        return text[:insert_at] + "\n" + replacement + text[insert_at:], True
+    return text.rstrip() + "\n\n" + replacement, True
+
+
+def _replace_section(text: str, heading: str, body: str) -> Tuple[str, bool]:
+    section = f"{heading}:\n{body}"
+    pattern = rf"(?ims)^{re.escape(heading)}:\s*\n?.*?(?=\n\n[A-Z][A-Za-z -]*:|\Z)"
+    match = re.search(pattern, text)
+    if match:
+        if match.group(0).strip() == section:
+            return text, False
+        return re.sub(pattern, section, text, count=1), True
+    return text.rstrip() + "\n\n" + section, True
 
 
 class ReportGenerator:
@@ -146,6 +295,7 @@ class ReportGenerator:
         return_xml: bool = False,
         structured_input: Optional[Dict] = None,
         lung_rads_assessment: Optional[Dict] = None,
+        validate_output: bool = True,
     ) -> Dict[str, str]:
         """Generate a structured CT report from lesion features."""
         if not self.is_loaded:
@@ -169,13 +319,15 @@ class ReportGenerator:
             )
         if lung_rads_assessment is None:
             lung_rads_assessment = structured_input.get("lung_rads")
+
+        llm_structured_input = build_llm_structured_input(structured_input)
         
         # Build prompt
         prompt = build_report_prompt(
             lesion_features,
             report_id=report_id,
             scan_date=scan_date,
-            structured_input=structured_input,
+            structured_input=llm_structured_input,
         )
         
         # Log prompt for debugging
@@ -189,14 +341,21 @@ class ReportGenerator:
         generated_text = self._generate(prompt)
         
         # Post-process
-        report_text = self._postprocess(generated_text, report_id, scan_date)
+        raw_report_text = self._postprocess(generated_text, report_id, scan_date)
+        report_text = raw_report_text
+        validation_fixes: List[Dict[str, str]] = []
+        if validate_output:
+            report_text, validation_fixes = validate_and_fix_report(raw_report_text, structured_input)
         
         return {
             "text": report_text,
+            "raw_text": raw_report_text,
             "xml": None,
             "parsed": {
                 "structured_input": structured_input,
+                "llm_structured_input": llm_structured_input,
                 "lung_rads": lung_rads_assessment,
+                "validation_fixes": validation_fixes,
             },
             "report_id": report_id,
             "scan_date": scan_date,
@@ -288,6 +447,7 @@ class ReportGenerator:
                     "report_id": report_id,
                     "scan_date": report.get("scan_date", ""),
                     "text": report.get("text", ""),
+                    "raw_text": report.get("raw_text", ""),
                     "parsed": report.get("parsed"),
                 }, f, ensure_ascii=False, indent=2)
             saved_files["json"] = str(json_path)
@@ -329,6 +489,7 @@ class SimpleReportGenerator:
         return_xml: bool = False,
         structured_input: Optional[Dict] = None,
         lung_rads_assessment: Optional[Dict] = None,
+        validate_output: bool = True,
     ) -> Dict[str, str]:
         """Generate a template-based report."""
         if isinstance(lesion_features, dict):
