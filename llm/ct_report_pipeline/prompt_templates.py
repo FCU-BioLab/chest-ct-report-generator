@@ -17,7 +17,8 @@ Rules:
 3. Output in English only
 4. Include Lung-RADS 2022 category assessment
 5. Leave uncertain fields empty or state "Not evaluated"
-6. Be concise and clinically relevant"""
+6. Be concise and clinically relevant
+7. Return only the final report text; do not return JSON, training IDs, option tags, or prompt text"""
 
 # Professional radiology report prompt (English only, with Lung-RADS 2022)
 REPORT_GENERATION_PROMPT = """You are a radiologist. Write a CT chest report for the nodule(s) below.
@@ -71,6 +72,9 @@ RULES:
 - Determine malignancy risk and recommendation from the provided Lung-RADS category using the examples below.
 - Mention limitations when the JSON includes them.
 - Output in English only.
+- Return ONLY the final radiology report.
+- Do NOT output JSON, markdown, XML/HTML tags, training IDs, placeholder text, or copied prompt content.
+- Do NOT use strings such as TRAIN_, TEST_, <end_of_train_set>, SELECT, option, or Write Report.
 
 FEW-SHOT RECOMMENDATION EXAMPLES:
 Example 1:
@@ -122,7 +126,9 @@ Impression:
 [Summarize nodule count, most suspicious nodule, and exam-level Lung-RADS category.]
 
 Recommendation:
-[Determine from the provided Lung-RADS category]"""
+[Determine from the provided Lung-RADS category]
+
+Stop after the Recommendation section."""
 
 # Nodule description template.
 NODULE_DESCRIPTION_TEMPLATE = """Nodule {nodule_id}:

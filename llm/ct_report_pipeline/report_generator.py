@@ -77,41 +77,106 @@ def category_output_mapping(category: str) -> Dict[str, str]:
 
 def build_llm_structured_input(structured_input: Mapping[str, Any]) -> Dict[str, Any]:
     """Build the LLM-facing JSON payload without prefilled risk/recommendation fields."""
-    payload = deepcopy(dict(structured_input))
-    payload["schema_version"] = "ct-report-structured-input-v1-rule-lungrads-llm-report"
-    payload["task"] = "Generate a CT chest radiology report from structured nodule data."
-    payload["decision_policy"] = {
-        "lung_rads_category": "Already determined from image-derived structured features. LLM must use it exactly.",
-        "malignancy_risk": "LLM must determine from the provided Lung-RADS category using the few-shot mapping.",
-        "recommendation": "LLM must determine from the provided Lung-RADS category using the few-shot mapping.",
-        "do_not_fabricate": [
-            "extra nodules",
-            "location",
-            "patient history",
-            "unprovided mediastinal or pleural findings",
-        ],
+    source_nodules = [dict(item) for item in structured_input.get("nodules", [])]
+    lung_rads = deepcopy(dict(structured_input.get("lung_rads", {})))
+    exam = dict(lung_rads.get("exam", {}))
+    assessed_by_id = {
+        item.get("nodule_id"): item
+        for item in lung_rads.get("nodules", [])
+        if isinstance(item, Mapping)
     }
-    payload["image_features"] = {
-        "nodules": payload.pop("nodules", []),
-    }
-    payload["image_features"]["total_lesions"] = len(payload["image_features"]["nodules"])
-    payload["image_features"]["max_diameter_mm"] = max(
-        [
-            float(nodule.get("longest_axis_mm") or nodule.get("equivalent_diameter_mm") or 0.0)
-            for nodule in payload["image_features"]["nodules"]
-        ]
-        or [0.0]
-    )
-    payload["output_requirements"] = {
-        "must_include": [
-            "all listed nodules",
-            "provided Lung-RADS category",
-            "malignancy risk corresponding to Lung-RADS",
-            "recommendation corresponding to Lung-RADS",
-        ]
+
+    compact_nodules = []
+    for index, nodule in enumerate(source_nodules, 1):
+        nodule_id = nodule.get("nodule_id", index)
+        assessed = assessed_by_id.get(nodule_id, {})
+        compact = {
+            "nodule_id": nodule_id,
+            "longest_axis_mm": _round_or_none(nodule.get("longest_axis_mm")),
+            "equivalent_diameter_mm": _round_or_none(nodule.get("equivalent_diameter_mm")),
+            "volume_mm3": _round_or_none(nodule.get("volume_mm3"), digits=1),
+            "attenuation_type": nodule.get("attenuation_type"),
+            "attenuation_confidence": _round_or_none(nodule.get("attenuation_confidence"), digits=2),
+            "mean_hu": _round_or_none(nodule.get("mean_hu"), digits=1),
+            "lung_rads_category": assessed.get("category"),
+            "lung_rads_reason": assessed.get("reason"),
+        }
+        if "solid_component_mm" in assessed:
+            compact["solid_component_mm"] = _round_or_none(assessed.get("solid_component_mm"))
+        if isinstance(nodule.get("anatomical_location"), Mapping):
+            compact["anatomical_location"] = {
+                "lobe": nodule["anatomical_location"].get("lobe_full") or nodule["anatomical_location"].get("lobe"),
+                "side": nodule["anatomical_location"].get("side"),
+            }
+        compact_nodules.append({k: v for k, v in compact.items() if v not in (None, "", [])})
+
+    payload = {
+        "schema_version": "ct-report-structured-input-v1-rule-lungrads-llm-report",
+        "report_id": structured_input.get("report_id"),
+        "scan_date": structured_input.get("scan_date"),
+        "task": "Generate a CT chest radiology report from structured nodule data.",
+        "decision_policy": {
+            "lung_rads_category": "Already determined from image-derived structured features. LLM must use it exactly.",
+            "malignancy_risk": "LLM must determine from the provided Lung-RADS category using the few-shot mapping.",
+            "recommendation": "LLM must determine from the provided Lung-RADS category using the few-shot mapping.",
+            "do_not_fabricate": [
+                "extra nodules",
+                "location",
+                "patient history",
+                "unprovided mediastinal or pleural findings",
+                "training IDs",
+            ],
+        },
+        "image_features": {
+            "nodules": compact_nodules,
+            "total_lesions": len(compact_nodules),
+            "max_diameter_mm": max([_to_float(item.get("longest_axis_mm")) or 0.0 for item in compact_nodules] or [0.0]),
+        },
+        "lung_rads": {
+            "source": "deterministic_from_structured_image_features",
+            "exam": {
+                "category": exam.get("category"),
+                "descriptor": exam.get("descriptor"),
+                "reason": exam.get("reason"),
+                "limitations": exam.get("limitations", []),
+                "most_suspicious_nodule_id": exam.get("most_suspicious_nodule_id"),
+            },
+            "nodules": [
+                {
+                    "nodule_id": item.get("nodule_id"),
+                    "category": item.get("category"),
+                    "reason": item.get("reason"),
+                    "limitations": item.get("limitations", []),
+                }
+                for item in lung_rads.get("nodules", [])
+            ],
+            "limitations": lung_rads.get("limitations", []),
+        },
+        "output_requirements": {
+            "must_include": [
+                "all listed nodules",
+                "provided Lung-RADS category",
+                "malignancy risk corresponding to Lung-RADS",
+                "recommendation corresponding to Lung-RADS",
+            ]
+        },
     }
     _remove_report_answer_fields(payload)
     return payload
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_or_none(value: Any, digits: int = 2) -> Optional[float]:
+    number = _to_float(value)
+    return round(number, digits) if number is not None else None
 
 
 def _remove_report_answer_fields(value: Any) -> None:
@@ -190,6 +255,125 @@ def _replace_section(text: str, heading: str, body: str) -> Tuple[str, bool]:
             return text, False
         return re.sub(pattern, section, text, count=1), True
     return text.rstrip() + "\n\n" + section, True
+
+
+def _extract_report_like_text(text: str) -> str:
+    for marker in ("Report ID:", "Technique:", "Findings:", "Lung-RADS Assessment:"):
+        index = text.find(marker)
+        if index >= 0:
+            return text[index:].strip()
+    match = re.search(r"(?im)^Report:\s*$", text)
+    if match:
+        return text[match.end() :].strip()
+    return text
+
+
+def _remove_contaminated_tail(text: str) -> str:
+    stop_patterns = (
+        r"(?im)^Lungs-RADS Training Data:",
+        r"(?im)^Lung-RADS Training Data:",
+        r"(?im)^Write Report:",
+        r"(?im)^Training Data IDs:",
+        r"<END REPORT>",
+        r"<end_of_train_set>",
+    )
+    end = len(text)
+    for pattern in stop_patterns:
+        match = re.search(pattern, text)
+        if match:
+            end = min(end, match.start())
+    return text[:end].strip()
+
+
+def _is_contaminated_report(text: str) -> bool:
+    lowered = text.lower()
+    forbidden = (
+        "train_",
+        "test_",
+        "<end_of_train_set",
+        "<end report",
+        "select <option",
+        "<select",
+        '"bbox_',
+        '"source_feature_keys"',
+        '"lungs_data"',
+        "training data",
+        "write report:",
+    )
+    if any(token in lowered for token in forbidden):
+        return True
+    required = ("Technique:", "Findings:", "Lung-RADS Assessment:", "Impression:", "Recommendation:")
+    return sum(1 for marker in required if marker.lower() in lowered) < 4
+
+
+def _render_guardrailed_report(structured_input: Mapping[str, Any], report_id: str, scan_date: str) -> str:
+    """Render a clean final report when LLM text is contaminated by prompt/training artifacts."""
+    nodules = list(structured_input.get("nodules", []))
+    lung_rads = structured_input.get("lung_rads", {})
+    exam = lung_rads.get("exam", {}) if isinstance(lung_rads, Mapping) else {}
+    exam_category = str(exam.get("category") or "0")
+    mapping = category_output_mapping(exam_category)
+    assessed_by_id = {
+        item.get("nodule_id"): item
+        for item in lung_rads.get("nodules", [])
+        if isinstance(item, Mapping)
+    }
+
+    lines = [
+        f"Report ID: {report_id}",
+        f"Date: {scan_date}",
+        "",
+        "Technique:",
+        "Non-contrast CT chest.",
+        "",
+        "Findings:",
+        "",
+        "Lungs:",
+    ]
+    for index, nodule in enumerate(nodules, 1):
+        nodule_id = nodule.get("nodule_id", index)
+        assessed = assessed_by_id.get(nodule_id, {})
+        attenuation = nodule.get("attenuation_type") or "indeterminate"
+        size = _to_float(nodule.get("longest_axis_mm") or nodule.get("equivalent_diameter_mm"))
+        volume = _to_float(nodule.get("volume_mm3"))
+        location = ""
+        if isinstance(nodule.get("anatomical_location"), Mapping):
+            location = nodule["anatomical_location"].get("lobe_full") or nodule["anatomical_location"].get("lobe") or ""
+        location_text = f" in the {location}" if location else ""
+        size_text = f"{size:.1f} mm" if size is not None else "size not available"
+        volume_text = f", volume {volume:.1f} mm3" if volume is not None else ""
+        category_text = assessed.get("category") or "not assessed"
+        lines.append(
+            f"{index}. {attenuation} pulmonary nodule{location_text} measuring {size_text}{volume_text} "
+            f"(nodule Lung-RADS {category_text})."
+        )
+
+    if not nodules:
+        lines.append("No measurable pulmonary nodules were provided.")
+
+    limitations = list(dict.fromkeys((lung_rads.get("limitations", []) if isinstance(lung_rads, Mapping) else []) + exam.get("limitations", [])))
+    largest = max([_to_float(item.get("longest_axis_mm") or item.get("equivalent_diameter_mm")) or 0.0 for item in nodules] or [0.0])
+    lines.extend(
+        [
+            "",
+            "Mediastinum: Not evaluated.",
+            "Pleura: Not evaluated.",
+            "",
+            "Lung-RADS Assessment:",
+            f"Category: {exam_category}",
+            f"Malignancy Risk: {mapping['malignancy_risk']}",
+            "",
+            "Impression:",
+            f"{len(nodules)} pulmonary nodule(s), largest {largest:.1f} mm; exam-level Lung-RADS Category {exam_category}.",
+            "",
+            "Recommendation:",
+            mapping["recommendation"],
+        ]
+    )
+    if limitations:
+        lines.extend(["", "Limitations:"])
+        lines.extend(f"- {item}" for item in limitations)
+    return "\n".join(lines)
 
 
 class ReportGenerator:
@@ -341,7 +525,12 @@ class ReportGenerator:
         generated_text = self._generate(prompt)
         
         # Post-process
-        raw_report_text = self._postprocess(generated_text, report_id, scan_date)
+        raw_report_text, postprocess_fixes = self._postprocess(
+            generated_text,
+            report_id,
+            scan_date,
+            structured_input=structured_input,
+        )
         report_text = raw_report_text
         validation_fixes: List[Dict[str, str]] = []
         if validate_output:
@@ -355,6 +544,7 @@ class ReportGenerator:
                 "structured_input": structured_input,
                 "llm_structured_input": llm_structured_input,
                 "lung_rads": lung_rads_assessment,
+                "postprocess_fixes": postprocess_fixes,
                 "validation_fixes": validation_fixes,
             },
             "report_id": report_id,
@@ -392,14 +582,18 @@ class ReportGenerator:
         
         # Generate
         with torch.no_grad():
-            outputs = self.model.generate(
+            generate_kwargs = {
                 **inputs,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-                do_sample=self.temperature > 0,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                repetition_penalty=1.2,
+                "max_new_tokens": self.max_new_tokens,
+                "do_sample": self.temperature > 0,
+                "pad_token_id": self.tokenizer.pad_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+                "repetition_penalty": 1.2,
+            }
+            if self.temperature > 0:
+                generate_kwargs["temperature"] = self.temperature
+            outputs = self.model.generate(
+                **generate_kwargs,
             )
         
         # Decode
@@ -410,21 +604,35 @@ class ReportGenerator:
         
         return generated.strip()
     
-    def _postprocess(self, text: str, report_id: str, scan_date: str) -> str:
+    def _postprocess(
+        self,
+        text: str,
+        report_id: str,
+        scan_date: str,
+        structured_input: Optional[Mapping[str, Any]] = None,
+    ) -> Tuple[str, List[Dict[str, str]]]:
         """Clean up the generated report."""
         text = text.strip()
+        fixes: List[Dict[str, str]] = []
         
         # Remove markers
         if text.startswith("---"):
             text = text[3:].strip()
         if text.endswith("---"):
             text = text[:-3].strip()
+
+        text = _extract_report_like_text(text)
+        text = _remove_contaminated_tail(text)
+
+        if structured_input is not None and _is_contaminated_report(text):
+            text = _render_guardrailed_report(structured_input, report_id, scan_date)
+            fixes.append({"field": "report_body", "value": "guardrailed_from_structured_input"})
         
         # Ensure header exists
         if not text.startswith("Report ID:"):
             text = f"Report ID: {report_id}\nDate: {scan_date}\n\n{text}"
         
-        return text
+        return text, fixes
     
     def save_report(self, report: Dict, output_dir: str, formats: List[str] = ["txt", "json"]) -> Dict[str, str]:
         """Save report in multiple formats."""

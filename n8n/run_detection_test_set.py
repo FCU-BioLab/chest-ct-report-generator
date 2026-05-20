@@ -114,6 +114,7 @@ def hydrate_response_from_state(response: Dict[str, Any]) -> Dict[str, Any]:
         "structured_input_path",
         "llm_structured_input_path",
         "llm_raw_text_path",
+        "llm_postprocess_fix_count",
         "llm_validation_fix_count",
         "llm_base_model",
         "llm_adapter",
@@ -157,6 +158,7 @@ def render_html_index(results: List[Dict[str, Any]], html_output_dir: Path, summ
             f"<td>{html_lib.escape(str(result.get('elapsed_sec', '')))}</td>"
             f"<td>{html_lib.escape(str(response.get('nodule_count', '')))}</td>"
             f"<td>{html_lib.escape(str(response.get('report_generation_method', '')))}</td>"
+            f"<td>{html_lib.escape(str(response.get('llm_postprocess_fix_count', '')))}</td>"
             f"<td>{html_lib.escape(str(response.get('llm_validation_fix_count', '')))}</td>"
             f"<td>{html_cell}</td>"
             f"<td>{report_text_path}</td>"
@@ -202,6 +204,7 @@ def render_html_index(results: List[Dict[str, Any]], html_output_dir: Path, summ
         <th>Elapsed sec</th>
         <th>Nodules</th>
         <th>Report Method</th>
+        <th>LLM Postprocess</th>
         <th>LLM Fixes</th>
         <th>HTML</th>
         <th>Report TXT</th>

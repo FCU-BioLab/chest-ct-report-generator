@@ -36,7 +36,7 @@ llm:
   model_name: "C:/GitHub/chest-ct-report-generator/models/llm/Llama-3.2-1B-Instruct"
   load_in_8bit: false
   max_length: 2048
-  temperature: 0.3
+  temperature: 0.0
   lora_weights:
     base_dir: "${PIPELINE_ROOT}/assets/models/lora_ct_report"
     latest: "${PIPELINE_ROOT}/assets/models/lora_ct_report/llama32_20260520"

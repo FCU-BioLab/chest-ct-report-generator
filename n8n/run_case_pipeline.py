@@ -929,6 +929,7 @@ def stage_report(
         "llm_adapter": llm_adapter,
         "llm_validate_output": bool(validate_output),
         "llm_raw_text_path": raw_text_path,
+        "postprocess_fixes": report.get("parsed", {}).get("postprocess_fixes", []),
         "validation_fixes": report.get("parsed", {}).get("validation_fixes", []),
     }
 
@@ -943,6 +944,7 @@ def stage_report(
         "structured_input_path": str(structured_input_path),
         "llm_structured_input_path": str(llm_structured_input_path),
         "llm_raw_text_path": raw_text_path,
+        "llm_postprocess_fix_count": len(report_meta["postprocess_fixes"]),
         "llm_validation_fix_count": len(report_meta["validation_fixes"]),
         "report_status": report_meta["status"],
         "report_generation_method": report_meta["generation_method"],
